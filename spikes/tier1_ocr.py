@@ -43,7 +43,8 @@ def main() -> None:
 
     HfApi().create_repo("davanstrien/pumpjack-tier1-moh", repo_type="dataset",
                         private=True, exist_ok=True)
-    ds = load_dataset(INPUT, split="train").select(range(args.limit))
+    ds = load_dataset(INPUT, split="train")
+    ds = ds.select(range(min(args.limit, len(ds))))
     rows = [(f"{ex['b_number']}-p{ex['page_index']:04d}", {"uri": image_to_data_uri(ex["image"])})
             for ex in ds]
     print(f"[tier1] loaded {len(rows)} pages", flush=True)

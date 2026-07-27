@@ -57,7 +57,8 @@ def main() -> None:
                 "prompt_tokens": usage.get("prompt_tokens")}
 
     with Engine(MODEL, engine="vllm",
-                extra_args=["--task", "embed", "--gpu-memory-utilization", "0.90"]) as endpoint:
+                extra_args=["--runner", "pooling", "--convert", "embed",
+                            "--gpu-memory-utilization", "0.90"]) as endpoint:
         stats = pump(batch_rows(), to_request, parse, endpoint, OUTPUT,
                      route="/embeddings",
                      window=Auto(target_waiting=8, initial=4, max_limit=64),

@@ -1,3 +1,42 @@
+# Tier 1 round 2 (2026-07-27 late — fan-out, embeddings, TEI, the OOM lesson)
+
+## Fan-out — 4 Jobs, 4 engines, ONE output: FLAWLESS
+4×1000 dolly rows, strided assignment. Verified: 80 parts, **4,000 records / 4,000 unique /
+0 dupes**, markers shard-0..3.done, 4 telemetry files. Each shard's controller found its own
+equilibrium independently (final windows 80/80/72/32) — per-shard adaptivity with zero
+coordination is the fan-out-to-storage argument, demonstrated.
+
+## Embeddings (vLLM pooling) — zero library changes: PASS
+`route="/embeddings"` + micro-batch-as-row (500 rows × 64 texts = 32k fineweb-edu texts).
+500/500, 0 failed, 7.85M tokens at 33.5k tok/s; 1024-dim array columns landed in parquet on
+hf://. **Controller discovered the server ceiling downward**: vLLM pooling served one 64-seq
+batch at a time → window shrank to final_limit=2 instead of queueing into it, and the advisor
+fired its first real hint. Advisor nuance found: it counts requests, not items — normalize by
+items-per-request for micro-batch workloads (decision 12 note). Flag churn: `--task embed` is
+gone; current = `--runner pooling --convert embed`.
+
+## TEI — third serving stack, Job-to-Job, BLIND MODE: PASS
+TEI (Qwen3-Embedding-0.6B, `:86-latest`, `--max-batch-tokens 32768`) in an exposed GPU Job;
+pump clients hit `/v1/embeddings` through the jobs proxy with auth headers, **no gauges at
+all** (TEI metrics port not proxied). CPU client Job: **200/200 batch-rows (6,400 texts,
+1.1M tokens) at 23k tok/s in 48s, 0 failed**, blind AIMD settled at 6. Laptop client ran the
+same shape from outside. Gotchas banked: `hf jobs run IMAGE args...` replaces the entrypoint
+(name `text-embeddings-router` explicitly); `python:3.12-slim` has no curl.
+
+## The OOM lesson → ACK-clocked slow start (the night's most valuable failure)
+First 5k-page vision soak OOMKilled (exit 137, host RAM) ~1 min in: with ~30s generations,
+early ticks have ZERO completions → no tok_s for the plateau gate, and multimodal
+preprocessing queues ahead of the scheduler's gauges (waiting stayed low — the vLLM twin of
+the SGLang undercount) → slow-start doubled unopposed 8→512 in ~12s → hundreds of in-flight
+1540px images killed the container. **Fix (TCP rule): never widen a window nothing has ever
+been acknowledged through** — `Auto` now holds until the first completion. Plus multimodal
+guidance: cap `max_limit` (~128) as a host-RAM guard. Oracle after fix: 9/9.
+
+## Soak v2 (5k MOH pages, ACK-clocked, max_limit=128)
+Running at consolidation time; result appended when it lands.
+
+---
+
 # Tier 1 results (2026-07-27, evening fleet — total spend ≈ $2)
 
 All against the CLEAN package (wheel 0.1.0) on real Jobs, a10g-small.

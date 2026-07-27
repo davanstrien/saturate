@@ -62,7 +62,9 @@ never a per-shard counter.
 ## 3. Resume semantics
 
 Resume is an **anti-join on `id`**: rows whose id already has a durable record are skipped.
-Re-running the same command is always safe.
+Re-running the same command is always safe. Admission is exactly-once per id *within* a run
+too: a duplicate id later in the same stream is skipped (first admission wins; counted in
+`rows_deduped`) — with content-hash ids this makes identical input rows dedupe for free.
 
 The done-set is assembled **manifest-first, exactly**:
 

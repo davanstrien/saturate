@@ -74,6 +74,7 @@ class Stats:
     rows_done_prior: int = 0
     rows_processed: int = 0
     rows_failed: int = 0
+    rows_deduped: int = 0  # within-run duplicate ids skipped (first admission wins)
     prompt_tokens: int = 0
     completion_tokens: int = 0
     elapsed_s: float = 0.0
@@ -189,12 +190,18 @@ async def _pump(rows, to_request, parse, endpoint, output, controller, shard, fl
         tasks: set[asyncio.Task] = set()
         try:
             t_prev = time.monotonic()
+            seen: set[str] = set()
             for id_, row in stream:
                 stats.rows_total += 1
                 if id_ in done:
                     stats.rows_done_prior += 1
                     t_prev = time.monotonic()
                     continue
+                if id_ in seen:  # within-run dup (e.g. identical content under content-hash ids)
+                    stats.rows_deduped += 1
+                    t_prev = time.monotonic()
+                    continue
+                seen.add(id_)
                 src_wait["source"] += time.monotonic() - t_prev
                 await breaker.gate(client, probe_url)
                 t_acq = time.monotonic()

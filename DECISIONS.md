@@ -1,0 +1,50 @@
+# DECISIONS.md — build decisions (kickoff 2026-07-27)
+
+Confirmed at kickoff (Daniel, 2026-07-27, Slack-thread-day). Source lineage: the 14 staged
+sprint decisions (vault: `pumpjack-clean-poc-proposal-2026-07-17` §9 + project note items
+11–14), amended by the prior-art deep dive and the validation-thread replies. POC = oracle,
+not substrate: `pumpjack-poc` is frozen; this repo is judged by `pumpjack-oracle` (9 tests).
+
+| # | Decision | Resolution |
+|---|---|---|
+| 1 | Layout | 9 modules; LOC ceiling CI-checked (see `tests/test_loc_ceiling.py`) |
+| 2 | Request | Typed union json⊕multipart, `.kind` discriminator; `_files` hack dead |
+| 3 | parse | `parse(row, resp)` row passthrough; single-arg `parse(resp)` also accepted (introspected) — keeps oracle + POC recipes working |
+| 4 | Engine | Boot templates (vllm/sglang/sgl-omni/llamacpp) + ceiling-flag table; readiness = health×N + trial completion; killpg lifecycle; GGUF = download weights |
+| 5 | Controller | Sans-IO `decide(obs, limit)`; **throughput-primary, gauges secondary, blind AIMD floor**; debounced slow-start exit (the traces' priority fix); two-condition cut (kv high AND hits low); fixed band pending calibration grid; 429+Retry-After honored, never cut; `breaker_max_open_s` so a dead server exits |
+| 6 | Signals | `SignalSource` seam: `http-scrape` (MVP) / `in-process` (post-v1) / `none`. Scrape table keyed on GAIE model-server-protocol semantics, **dual prefix spellings** (`vllm:`/`vllm_`, `sglang:`/`sglang_`) — SGLang broke once (#12618), vLLM flip is roadmapped |
+| 7 | Sink | `_manifest/` sidecar 1:1 with parts; manifest-first **exact** resume (unmatched parts scanned individually — kill-safe, no dupes); minimal-effort implementation per Daniel's steer |
+| 8 | CONTRACT | Frozen 2026-07-27 (this repo). id = content-hash default (`content_id`), simplest correct form |
+| 9 | Name/repo | `pumpjack` working name; private `davanstrien/pumpjack`, GitHub before PyPI; name not precious. Layer split (Daniel): "Inference Pipelines"-style official layer sits ON TOP of this client; HF names the wrapper, this library keeps its own identity |
+| 10 | Schemas | Telemetry v1 = 8 core + `tok_s`/`kv`/`hits`/`preempts`; Stats v1 = POC 11 keys + `breaker_opens`. Frozen in CONTRACT §6–7 |
+| 11 | Recipes | uv-scripts stay static mini-pumps; pilot = lighton-ocr2 transport swap, gate: name + CONTRACT + pilot green. Not this build |
+| 12 | Micro-batch-as-row | DEFER. CONTRACT reserves the seam. Further deflated: the in-process transport dissolves the httpcore high-rate bottleneck for self-hosted; remote TEI is the only surviving case |
+| 13 | Embeddings/TEI | DEFER. Alvaro (2026-07-27): TEI router is **token-based** (`--max-batch-tokens`, opt. `--max-batch-requests`); `/embed` takes string or list → batch-per-request natively supported; right admission unit is likely tokens. TEI dialect gauge ready when needed: `te_queue_size` (canonical KEDA signal). Ref: his FineWiki/Cloud Run example (hf.co/docs/google-cloud) |
+| 14 | Pacer | DEFER post-v1; seams only (header-dialect slot, 429 taxonomy in controller) |
+| 15 | In-process async transports | Harry (2026-07-27): "use AsyncLLM, manage concurrency with asyncio, skip /metrics." SGLang parallel: `sgl.Engine.async_generate`. Verdict: **transport option, not redesign** — neither has persistence/resume/admission/remote; `Transport` is a protocol from day 0 (HTTP-only impl in MVP); the adaptive controller is a remote/shared-endpoint thesis, in-process degenerates to a Fixed feed-ahead window |
+
+## Thread receipts informing the design (2026-07-27)
+
+- **vLLM PR #48757 comment (via thread): oversized batches disable kernel fusions** — engine-side
+  proof that more concurrency can *reduce* per-token efficiency; only a delivered-throughput
+  signal catches that cliff. Direct support for decision 5's signal priority.
+- Julien: "find a good catchy name and then we'll build an official UI for it" → the wrapper
+  seam in CONTRACT ("The wrapper seam") is the interface that UI builds on.
+- Quentin: datatrove-rebranding/home suggestion → position held: lightweight primitive datatrove
+  can *build on*, not built inside (interop via the storage contract + `completions/` convention).
+
+## Deviations from staged defaults
+
+- LOC ceiling set to **800** (was ~700): the clean split carries module boundaries, the typed
+  Request union, manifest sidecars, SignalSource seam, and the observable breaker the POC
+  lacked. Enforced in CI; renegotiate downward after M3 trims, not by deleting docstrings.
+- Markers: **advisory** (CONTRACT §5). Sparse error rows kept (§1). Per-row token columns
+  standardized-when-present, not required (§1). Telemetry: all four proposed keys enter v1
+  (the controller consumes them; a v2 bump later would be sillier).
+
+## Verification bars (this build)
+
+Tier 0: oracle `ORACLE_ADAPTER=clean` → 9 passed / 0 xfail; ruff clean; LOC check green.
+Tier 1 (≤$20, signal-first): throughput parity vs bare-httpx/POC on one real model →
+kill/resume on a real Job → 50-page OCR parity → engine boots if budget remains.
+Tier 2 (~$30–50) is sprint-week material, flagged before spend.

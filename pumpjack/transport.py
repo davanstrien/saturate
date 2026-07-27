@@ -1,0 +1,155 @@
+"""Transport: typed Request union, retry ladder, circuit breaker.
+
+Transport is a protocol seam (decision 15): this module is the HTTP
+implementation; an in-process engine transport (vLLM AsyncLLM, sgl.Engine)
+slots in post-v1 behind the same call shape.
+
+Retry discipline (patterns per hynek/stamina; implementation ours because
+429/timeout events must feed the controller live): explicit allowlist only,
+exponential backoff with full jitter, capped by attempts AND total time,
+Retry-After honored. 4xx = poison row, never retried, never a breaker event.
+429 with Retry-After = a paced quota, not saturation: wait, don't cut.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import dataclasses
+import random
+import sys
+import time
+
+import httpx
+
+RETRY_ACTIVE = True  # kill-switch: flip off in tests for determinism
+RETRY_BUDGET_S = 300.0  # total retry wall-clock per row
+
+
+@dataclasses.dataclass
+class Request:
+    """Typed request union: json XOR multipart, discriminated by `kind`."""
+
+    kind: str  # "json" | "multipart"
+    route: str
+    json: dict | None = None
+    data: dict | None = None
+    files: dict | None = None
+
+
+def make_json_request(route: str, json: dict) -> Request:
+    return Request(kind="json", route=route, json=json)
+
+
+def make_multipart_request(route: str, data: dict, files: dict) -> Request:
+    return Request(kind="multipart", route=route, data=data, files=files)
+
+
+def coerce_request(payload: Request | dict, route: str) -> Request:
+    """Accept a plain dict from to_request (POC recipes) as a json request."""
+    if isinstance(payload, Request):
+        return payload
+    return Request(kind="json", route=route, json=payload)
+
+
+class Breaker:
+    """Sustained all-failure means the server is down, not busy — stop feeding
+    rows into the dead zone. Counts consecutive 5xx/transport *attempts*
+    (poison 4xx never count); opens at `threshold`, probes until any
+    server-generated response (<500), and gives up after `max_open_s` so a
+    dead server exits instead of burning Job money forever."""
+
+    def __init__(self, threshold: int = 8, probe_interval: float = 1.0, max_open_s: float = 600.0):
+        self.threshold, self.probe_interval, self.max_open_s = threshold, probe_interval, max_open_s
+        self.consecutive = 0
+        self.opens = 0
+        self._open = False
+        self._closed = asyncio.Event()
+        self._closed.set()
+
+    def fail(self) -> None:
+        self.consecutive += 1
+
+    def ok(self) -> None:
+        self.consecutive = 0
+
+    async def gate(self, client: httpx.AsyncClient, probe_url: str) -> None:
+        """Called at admission AND before every retry attempt — an open breaker
+        pauses the whole pump, not just new rows. One caller probes; the rest
+        wait on the close event (no double-counted opens)."""
+        while True:
+            if self._open:
+                await self._closed.wait()
+                continue  # re-check: the breaker may have re-opened
+            if self.consecutive < self.threshold:
+                return
+            break  # we are the opener (no await between check and set: atomic)
+        self._open = True
+        self._closed.clear()
+        self.opens += 1
+        print(f"[pump] circuit OPEN after {self.consecutive} consecutive 5xx/transport "
+              "failures — pausing admission, probing", file=sys.stderr, flush=True)
+        opened = time.monotonic()
+        while True:
+            if time.monotonic() - opened > self.max_open_s:
+                raise RuntimeError(f"circuit breaker open for {self.max_open_s}s — server is not coming back")
+            try:
+                r = await client.post(probe_url, json={"model": "readiness-probe", "messages": [
+                    {"role": "user", "content": "hi"}], "max_tokens": 1}, timeout=30)
+                if r.status_code < 500:
+                    break
+            except (httpx.TimeoutException, httpx.TransportError):
+                pass
+            await asyncio.sleep(self.probe_interval)
+        self.consecutive = 0
+        self._open = False
+        self._closed.set()
+        print("[pump] circuit CLOSED — server responding again, resuming admission",
+              file=sys.stderr, flush=True)
+
+
+async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
+                        events: dict, breaker: Breaker) -> tuple[dict | None, str | None]:
+    """Returns (response_json, error). Poison rows (4xx) never retry."""
+    url = f"{base.rstrip('/')}{req.route}"
+    delay, t0 = 1.0, time.monotonic()
+
+    def budget_left() -> bool:
+        return RETRY_ACTIVE and time.monotonic() - t0 < RETRY_BUDGET_S
+
+    async def backoff(retry_after: float | None = None) -> None:
+        nonlocal delay
+        await asyncio.sleep(retry_after if retry_after is not None else random.uniform(0, delay))
+        delay = min(delay * 2, 60.0)
+
+    probe_url = f"{base.rstrip('/')}/chat/completions"
+    for attempt in range(5):
+        await breaker.gate(client, probe_url)  # an open breaker pauses retries too
+        try:
+            if req.kind == "multipart":
+                r = await client.post(url, data=req.data, files=req.files)
+            else:
+                r = await client.post(url, json=req.json)
+        except (httpx.TimeoutException, httpx.TransportError) as e:
+            events["backpressure"] += 1
+            breaker.fail()
+            if attempt == 4 or not budget_left():
+                return None, f"transport: {type(e).__name__}: {e}"
+            await backoff()
+            continue
+        if r.status_code == 200:
+            events["successes"] += 1
+            breaker.ok()
+            return r.json(), None
+        retry_after = r.headers.get("retry-after")
+        if r.status_code == 429:
+            if retry_after is None:
+                events["backpressure"] += 1  # saturation-shaped; a paced quota is not
+        elif 400 <= r.status_code < 500:
+            return None, f"http {r.status_code}: {r.text[:300]}"  # poison, no retry, no breaker
+        else:
+            breaker.fail()
+        if attempt == 4 or not budget_left():
+            return None, f"http {r.status_code} after retries"
+        ra = float(retry_after) if retry_after and retry_after.replace(".", "").isdigit() else None
+        await backoff(ra)
+    return None, "unreachable"

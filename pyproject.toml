@@ -3,7 +3,7 @@ name = "pumpjack"
 version = "0.1.0"
 description = "Adaptive batch-inference client: dataset in, any OpenAI-compatible endpoint, resumable parquet out"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Daniel van Strien" }]
 dependencies = [
@@ -27,7 +27,7 @@ packages = ["pumpjack"]
 
 [tool.ruff]
 line-length = 110
-target-version = "py311"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

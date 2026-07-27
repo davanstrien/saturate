@@ -63,8 +63,10 @@ def main() -> None:
     with Engine(MODEL, engine="vllm",
                 extra_args=["--max-model-len", "16384", "--gpu-memory-utilization", "0.90",
                             "--no-enable-prefix-caching"]) as endpoint:
+        # max_limit=128: host-RAM guard for multimodal — hundreds of in-flight
+        # 1540px images live in container RAM (client bodies + server preprocess)
         stats = pump(stream_rows(), to_request, parse, endpoint, OUTPUT,
-                     window=Auto(target_waiting=8, initial=8), flush_every=50)
+                     window=Auto(target_waiting=8, initial=8, max_limit=128), flush_every=50)
     print("TIER1_BIGOCR " + stats.to_json(), flush=True)
 
 

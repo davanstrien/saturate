@@ -69,6 +69,7 @@ class Auto:
         self._slow_start = True
         self._queue_ticks = 0  # consecutive ticks with a standing queue (debounce)
         self._best_tok = 0.0
+        self._seen_ok = False  # ACK-clock: no growth before the first completion ever
 
     def _cut(self, limit: int) -> int:
         self._cooldown, self._slow_start = 2, False
@@ -84,6 +85,14 @@ class Auto:
         if obs.kv is not None and obs.hits is not None and obs.kv >= self.kv_hi and obs.hits < self.hits_lo:
             return self._cut(limit)
         if obs.input_bound:
+            return limit
+        # ACK-clocked slow start (the 5k-vision OOM lesson): with long generations,
+        # ticks pass with zero completions while gauges show phantom headroom
+        # (multimodal preprocessing queues ahead of the scheduler's gauges) —
+        # doubling on that evidence is how a client OOMs the box. TCP rule:
+        # never widen a window nothing has ever been acknowledged through.
+        self._seen_ok = self._seen_ok or obs.successes > 0
+        if not self._seen_ok:
             return limit
         grew = None  # None = no throughput signal this tick
         if obs.tok_s:

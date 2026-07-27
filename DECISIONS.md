@@ -25,9 +25,15 @@ not substrate: `pumpjack-poc` is frozen; this repo is judged by `pumpjack-oracle
 
 ## Thread receipts informing the design (2026-07-27)
 
-- **vLLM PR #48757 comment (via thread): oversized batches disable kernel fusions** — engine-side
-  proof that more concurrency can *reduce* per-token efficiency; only a delivered-throughput
-  signal catches that cliff. Direct support for decision 5's signal priority.
+- **vLLM PR #48757, Harry's own benchmark comment (read in full 2026-07-27)**: residual-add+RMSNorm
+  fusion gives **+18.3% tok/s / −15.7% TPOT at concurrency 32, nil at ~1000 running** — FlashInfer's
+  allreduce fusion has a 51-token size gate on SM90/TP8, so *which kernels run depends on the
+  concurrency the client picks*, with hardware/TP/version-specific thresholds. The efficiency-vs-
+  concurrency landscape is non-monotonic and unknowable in advance → runtime delivered-throughput
+  watching is the only general answer. Decision 5's receipt, from a vLLM maintainer's bench.
+  **Bench rule banked from the same comment**: `--dataset-name random` regenerates identical
+  prompts (his prefix-cache hit rate climbed 20%→98% across trials) — Tier 1/2 runs use unique
+  prompts or disable prefix caching on both arms.
 - Julien: "find a good catchy name and then we'll build an official UI for it" → the wrapper
   seam in CONTRACT ("The wrapper seam") is the interface that UI builds on.
 - Quentin: datatrove-rebranding/home suggestion → position held: lightweight primitive datatrove

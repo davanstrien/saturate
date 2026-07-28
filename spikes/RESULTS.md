@@ -1,3 +1,18 @@
+# Workload campaign day 2 (2026-07-28) — OCR + transcription lanes
+
+## OCR at scale, second model (OvisOCR2/vLLM, 2,000 MOH pages)
+Completed across THREE jobs via resume (a cancelled first job's durable rows + 1,150 +
+700; jobs 6a687190, 6a68848a): **2,000/2,000, zero failures**, ~0.745 pages/s per a10g,
+3.3–4.9k tok/s, window settled at 32 in both runs (consistent vision equilibrium).
+Another unplanned cross-job resume proof in the wild.
+
+## Transcription — the multipart route's first live contact: PASS ×2
+`make_multipart_request("/audio/transcriptions", ...)` unmodified against a real server:
+**300 clips then 2,403 clips, zero failures** (jobs 6a6866f2, 6a68847f), windows 56/40.
+Contract nicety proven: transcription responses carry no `usage` → `tokens_per_sec: 0.0`
+(blank-never-guessed), controller ran on gauges+latency without the throughput signal.
+Every Request arm (json + multipart) and every route family is now field-tested.
+
 # Tier 2 — bucket sink + bare-httpx parity (2026-07-28, the M1 bar)
 
 ## Bucket sink: VALIDATED both directions (jobs 6a686f15)

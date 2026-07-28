@@ -65,17 +65,19 @@ checks lie during warm-up, so readiness requires a real completion — and kills
 
 ## The composable layer (for building on top — datatrove-shaped stacks, power users)
 
-`pump()` is a composition of four small stages. Use them directly when you want to pipe:
+`pump()` is a composition of four small stages, and the middle one — `through()` — is the
+real product: **a stream of completed results**. Parquet is just the default place that
+stream lands.
 
 ```python
 from pumpjack import AdaptiveClient, Auto, stream, skip_done, through, drain
 
 rows = stream(load_dataset("...", streaming=True))     # (id, row) pairs, lazy
-rows = skip_done(rows, output)                          # exact resume filter
+rows = skip_done(rows, sink)                            # exact resume filter
 
 async with AdaptiveClient(endpoint, window=Auto()) as client:
     results = through(client, rows, to_request, parse)  # unordered async map, adaptive
-    stats = await drain(results, output)                # parquet + manifest + markers
+    stats = await drain(results, sink)                  # parquet + manifest + markers
 
 # chaining is just more piping — e.g. OCR then judge:
 #   pages -> through(ocr_client, ...) -> drain(stage1_out)
@@ -90,11 +92,39 @@ Two rules keep this honest:
 2. **This is itertools, not a pipeline framework.** No scheduler, no DAG, no `.compute()`.
    If you want orchestration, datatrove and friends sit naturally on top.
 
-Embedding just the adaptive part in your own stack (your IO, your loop):
+### Bring your own IO — resumably
+
+Resume isn't tied to parquet; it's a tiny contract any sink can satisfy: *an id in
+`existing_ids()` means its record is durable; an id absent means re-processing it is safe.*
+Two sinks ship with that contract:
+
+- **`ParquetSink`** (what `output="..."` gives you) — the full storage contract: exact
+  resume, durable error rows, healing.
+- **`FileSink(outdir, ext=".md", key="markdown")`** — one file per row, named by id. The
+  filesystem is the manifest, overwrites are idempotent, so OCR→markdown files or
+  audio→transcripts get exact resume too. (Failed rows leave no file, so they simply retry
+  next run — there's no error record. That's the trade.)
 
 ```python
-async with AdaptiveClient(endpoint, window=Auto()) as client:
-    body, err = await client.post(make_json_request("/chat/completions", payload))
+stats = pump(pages, to_request, parse, endpoint,
+             output=FileSink("ocr-out/", ext=".md", key="markdown"))
+```
+
+Or skip sinks entirely and consume the stream yourself — no resume, full freedom:
+
+```python
+async for done in through(client, rows, to_request, parse):
+    my_database.insert(done.id, done.out)
+```
+
+Embedding just the adaptive part in your own stack (your IO, your loop, your transport —
+this is the datatrove-shaped seam):
+
+```python
+limiter = AdaptiveLimiter(window=Auto())          # a drop-in for your fixed semaphore
+async with limiter.slot():
+    result = await your_send(payload)             # your client, unchanged
+limiter.observe(ok=True, tokens=n)
 ```
 
 ## Scaling: fan out to storage

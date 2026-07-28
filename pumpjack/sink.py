@@ -96,6 +96,18 @@ class ParquetSink:
         with self.fs.open(f"{self.root}/completions/shard-{shard[0]}.done", "wb") as f:
             f.write(b"done")
 
+    def write_stats(self, shard: tuple[int, int], stats_json: str) -> None:
+        """Console-facing run summary beside the marker (CONTRACT §5): exact
+        final counts + shard geometry, so a storage-only reader never has to
+        approximate from telemetry ticks or open parquet."""
+        import json as _json
+
+        payload = _json.loads(stats_json)
+        payload["rank"], payload["world"] = shard[0], shard[1]
+        self.fs.makedirs(f"{self.root}/completions", exist_ok=True)
+        with self.fs.open(f"{self.root}/completions/stats-{shard[0]}.json", "wb") as f:
+            f.write(_json.dumps(payload).encode())
+
     def write_telemetry(self, shard: tuple[int, int], lines: list[str]) -> None:
         name = f"telemetry-shard{shard[0]}-{int(time.time())}.jsonl"
         with self.fs.open(f"{self.root}/{name}", "wb") as f:

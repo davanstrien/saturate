@@ -68,6 +68,11 @@ def test_reserved_columns_win_over_parse(tmp_path):
     sink = ParquetSink(str(tmp_path), flush_every=1)
     asyncio.run(drain(results(), sink))
     assert sink.existing_ids() == {"row-1"}
+    # stats sidecar (CONTRACT §5): exact counts + geometry for storage-only readers
+    import json as _json
+    sink.write_stats((2, 4), _json.dumps({"rows_processed": 1, "rows_failed": 0}))
+    got = _json.loads((tmp_path / "completions" / "stats-2.json").read_text())
+    assert (got["rank"], got["world"], got["rows_processed"]) == (2, 4, 1)
 
 
 def test_content_id_rejects_objects():

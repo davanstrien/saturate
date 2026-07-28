@@ -97,6 +97,13 @@ what was flushed; parts-absent is the oracle's probe for manifest-based resume).
 coordination convenience (datatrove's convention); resume correctness never depends on them.
 A marker does not certify row-level success. v1 payload: the fixed sentinel `done`.
 
+**`completions/stats-{n}.json`** (v1 addition, 2026-07-28): written beside the marker — the
+run's full Stats object plus `rank`/`world`. This is the console-facing exact summary: final
+`rows_processed`/`rows_failed` (telemetry tick sums are approximate — the tail between the
+last tick and completion goes uncounted), and shard geometry so a reader can distinguish
+"all shards finished" from "a shard never started". Advisory like the marker; absent on
+sinks that don't implement `write_stats`.
+
 ## 6. Telemetry v1 (frozen keys)
 
 One `telemetry-shard{n}-{ts}.jsonl` per run; one object per controller tick (~2s).

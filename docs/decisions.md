@@ -57,6 +57,9 @@ validates the AdaptiveLimiter layering.
 - LOC ceiling set to **800** (was ~700): the clean split carries module boundaries, the typed
   Request union, manifest sidecars, SignalSource seam, and the observable breaker the POC
   lacked. Enforced in CI; renegotiate downward after M3 trims, not by deleting docstrings.
+- **Renegotiated to 1100 (2026-07-28 PM)**: +10 for the `completions/stats-{n}.json` sidecar
+  (console-gap findings G2/G5 from the UI POC — exact counts + shard geometry for
+  storage-only readers). Prior step was 1050 for probe-and-revert.
 - **Renegotiated to 1000 (2026-07-28)** with the approved functional core: `core.py`
   (AdaptiveLimiter/AdaptiveClient/through, 187) + FileSink/read_output/drain are new public
   surface with named consumers, not bloat — the facade itself *shrank* 203→123. Current

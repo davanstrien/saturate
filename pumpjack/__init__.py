@@ -141,6 +141,11 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
         stats.hints.append("run was INPUT-BOUND — the source, not the engine, was the bottleneck")
     for h in stats.hints:
         _log(f"advisor: {h}")
+    if hasattr(sink, "write_stats"):  # console-facing exact summary (CONTRACT §5)
+        try:
+            sink.write_stats(shard, stats.to_json())
+        except Exception as e:
+            _log(f"stats write failed (non-fatal): {e}")
     _log(f"done: {stats.rows_processed} ok, {stats.rows_failed} failed, "
          f"{stats.tokens_per_sec} tok/s, window settled at {stats.final_limit}")
     if agent_mode():

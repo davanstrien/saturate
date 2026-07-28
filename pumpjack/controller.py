@@ -83,6 +83,7 @@ class Auto:
     def _cut(self, limit: int) -> int:
         self._cooldown, self._slow_start = 2, False
         self._probe_from, self._probe_wait = None, 0  # a cut voids any in-flight probe
+        self._best_tok *= 0.5  # decay: an all-time max must not gate recovery after a cut
         return max(self.min, limit // 2)
 
     def decide(self, obs: Obs | dict, limit: int) -> int:

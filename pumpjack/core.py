@@ -102,12 +102,13 @@ class AdaptiveLimiter:
                 await self._task  # a crashed tick loop surfaces here, never dies silently
 
     async def _loop(self):
-        last_tokens = 0
+        last_tokens, t_last = 0, time.monotonic()
         while True:
             await asyncio.sleep(TICK_S)
             gauges = await self.signals.read()
-            tok_s = (self.tokens_total - last_tokens) / TICK_S
-            last_tokens = self.tokens_total
+            now = time.monotonic()  # actual elapsed, not TICK_S: scrape latency skews the rate
+            tok_s = (self.tokens_total - last_tokens) / (now - t_last)
+            last_tokens, t_last = self.tokens_total, now
             total_wait = self._wait["source"] + self._wait["acquire"]
             input_bound = (total_wait > 0 and self._wait["source"] / total_wait > 0.5
                            and self.window.inflight < int(self.window.limit * 0.5))

@@ -32,8 +32,7 @@ __all__ = [
     "Request", "make_json_request", "make_multipart_request", "existing_ids",
     "AdaptiveClient", "AdaptiveLimiter", "Done", "through", "stream", "skip_done",
     "drain", "read_output", "ParquetSink", "FileSink", "shard_select", "content_id",
-    "FatalTransportError",
-]
+    "FatalTransportError"]
 __version__ = "0.1.0"
 
 USER_AGENT = f"pumpjack/{__version__}"

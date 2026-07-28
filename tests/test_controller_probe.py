@@ -52,3 +52,13 @@ def test_initial_clamped_to_max():
     """Codex re-review #2: Auto(initial > max_limit) must clamp."""
     ctrl = Auto(initial=600, max_limit=512)
     assert ctrl.initial == 512
+
+
+def test_cut_decays_best_tok():
+    """Codex r3 #13: _best_tok was an all-time max retained after cuts, so the
+    plateau gate could block recovery forever. A cut must decay it."""
+    ctrl = Auto(target_waiting=8, initial=8, step=8)
+    ctrl._best_tok = 8000.0
+    ctrl.decide(dict(waiting=0, running=8, inflight=8, backpressure=5,
+                     successes=8, input_bound=False, tok_s=1000.0), 64)
+    assert ctrl._best_tok < 8000.0  # decayed: post-cut throughput can grow again

@@ -1,3 +1,24 @@
+# Tier 2 — bucket sink + bare-httpx parity (2026-07-28, the M1 bar)
+
+## Bucket sink: VALIDATED both directions (jobs 6a686f15)
+1,000 rows → `hf://buckets/davanstrien/pumpjack-scratch/tier2-synth`; identical re-run read
+the manifest FROM THE BUCKET and skipped all 1,000 in 4.5s (`rows_done_prior: 1000`). The
+staged-output pattern (pump→bucket hot, publish→dataset later) needs zero write-side code.
+
+## Parity vs bare-httpx: a three-act story ending at **1.209** (bar ≥0.95)
+Same model/rows/settings, prefix caching off, bare = expert-tuned fixed-64 httpx client.
+
+| act | run | ratio | what it meant |
+|---|---|---|---|
+| 1 | 2k rows (6a686f15) | 0.515 | unfair test: Auto's discovery ramp dominates a 44s run |
+| 2 | 10k rows (6a68704a) | 0.566 | **real bug**: controller parked at 32 — the plateau gate's `grew` reading is stale on real engines (generations lag the 2s tick) and `best_tok` ratchets it stuck |
+| 3 | 10k rows, probe-and-revert (6a6881b4) | **1.209** | pump 18,434 tok/s in 91s vs bare 15,243 in 110s; **final_limit 272** — the expert's 64 was also a wrong guess; discovery beat it by 21% |
+
+Fix: Vegas-style probe-and-revert (plateau-blocked growth probes +step on exponential-backoff
+cooldown; confirms on improvement, reverts after a 3-tick settle window). Two lag-simulating
+tests added; oracle 9/9 throughout. Caveats: single run per arm; 272 in-flight trades
+per-request latency for throughput (correct for batch); 150-token outputs on a 0.5B.
+
 # Tier 1 round 2 (2026-07-27 late — fan-out, embeddings, TEI, the OOM lesson)
 
 ## Fan-out — 4 Jobs, 4 engines, ONE output: FLAWLESS

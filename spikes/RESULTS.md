@@ -1,3 +1,29 @@
+# Extensibility probe: TTS bucket-to-bucket (2026-07-28) — PASS, seams held
+
+An agent playing END USER (package modification forbidden) shipped an unsupported
+modality — Qwen3-TTS on sglang-omni, **binary audio out** — bucket(.txt) → bucket(.mp3):
+**300/300 clips, filenames = ids, telemetry landed in the bucket too** (~16 job attempts,
+mostly fighting the sgl-omni image bootstrap, not pumpjack).
+
+Verdict on the three questions the probe was designed to answer:
+1. **Every helper plugged into a documented seam**: a bucket `(id, row)` source; an
+   `AudioSink` on the Sink protocol (binary + fsspec, resumable by the one-invariant
+   contract); an `AudioClient` = **AdaptiveLimiter + its own transport** — because it found
+   the known binary gap precisely (`transport.py` ends in `r.json()`; `/audio/speech`
+   returns bytes) and took the designed escape hatch. `through()` accepted the replacement
+   client because it only touches `client.post()` + `client.limiter` — the duck-type
+   surface held exactly as documented.
+2. **The docs were sufficient**: it cited README/CONTRACT sections in its comments, applied
+   CONTRACT §4 unprompted (an HTTP-200 under 2KB of audio = error row, never success), and
+   — the standout — **implemented the id-first-streaming design note straight from this
+   file** (done-set consulted before reading text bodies, with skip_done still authoritative
+   downstream). The banked design notes are apparently actionable specs.
+3. It built its own kill-test (`TTS_DIE_AFTER`) to verify mp3 resume under the Sink
+   invariant.
+
+Library gaps confirmed (already on the roadmap, now user-validated): binary responses in
+the built-in transport; a blessed bytes-capable FileSink variant would have saved ~30 lines.
+
 # Workload campaign day 2 (2026-07-28) — OCR + transcription lanes
 
 ## OCR at scale, second model (OvisOCR2/vLLM, 2,000 MOH pages)

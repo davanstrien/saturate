@@ -106,6 +106,12 @@ Refs: NVIDIA-NeMo/DataDesigner — `engine/models/request_admission/controller.p
 
 ## Open choices (confirm/veto)
 
+0. **(added from Daniel's stream-first steer, 2026-07-28)** `skip_done` accepts an external
+   done-set/callable, not only an output dir: `skip_done(rows, done={ids} | callable | output_dir)`.
+   Makes `through()`-plus-your-own-sink (OCR→.md files, audio→transcripts, filenames = ids)
+   fully resumable — the filesystem is the manifest. File sinks trade away the error-row
+   guarantee (failed ≙ absent ≙ un-attempted); documented, theirs to accept. No `drain_files()`
+   in v1 — `through()` + 3 lines covers it; promote to a blessed helper only if recipes repeat it.
 1. Names: `stream / skip_done / through / drain` — happy to bikeshed (`amap`? `pump_through`?).
 2. `through()` yields `(id, row, result)` triples with `result["error"]` convention, or a
    small `Done(id, row, out, error)` dataclass? (Lean: dataclass — self-documenting.)

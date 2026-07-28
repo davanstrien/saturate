@@ -9,7 +9,8 @@ flight (adaptively — you never pick a concurrency number), retries, crash-safe
 resume. Killing it at any point is fine. Re-running the same command is always safe.
 
 ```bash
-uv pip install pumpjack   # not yet on PyPI — pip install git+https://github.com/davanstrien/pumpjack
+uv pip install 'pumpjack[hf]'   # not yet on PyPI — pip install 'pumpjack[hf] @ git+https://github.com/davanstrien/pumpjack'
+# the [hf] extra pulls huggingface_hub, needed for hf:// output paths; plain pumpjack works for local output
 ```
 
 ## Quickstart: one model, one Job, one dataset
@@ -76,7 +77,7 @@ rows = skip_done(rows, sink)                            # exact resume filter
 
 async with AdaptiveClient(endpoint, window=Auto()) as client:
     results = through(client, rows, to_request, parse)  # unordered async map, adaptive
-    stats = await drain(results, sink)                  # parquet + manifest + markers
+    stats = await drain(results, sink)                  # parquet + manifest (pump() adds markers)
 
 # chaining is just more piping — e.g. OCR then judge:
 #   pages -> through(ocr_client, ...) -> drain(stage1_out)

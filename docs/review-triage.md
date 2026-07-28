@@ -38,6 +38,27 @@ Suite and oracle (`ORACLE_ADAPTER=clean`, 9/9) green after every commit on the f
 | 27 | LOC ceiling pressures reliability work; make it advisory | **REJECTED**: the ceiling stayed hard and every fix above landed inside it (1100/1100). It is doing its job |
 | 28 | Internal quotes/names/paths in docs; leak-guard violation | **FIXED**: decisions.md + why.md scrubbed to neutral attributions (this commit); originals live in internal notes and git history — pre-public checklist now requires history squash/rewrite |
 
+## Round 4 addendum (PR #1 review, 2026-07-28)
+
+The fix-diff re-review confirmed most of round 3 and raised 6 blockers + 6 gaps. Dispositions:
+
+| Blocker | Disposition |
+|---|---|
+| 1 Cross-part schema breaks in the null-first order | **FIXED**: null-typed columns default to string at flush (replaces the error-only pin — same rule, all columns). Reverse-order test added |
+| 2 Retry budget not a deadline (post-sleep request) | **FIXED**: budget rechecked after every backoff; test asserts request count. Per-attempt timeout capping = deferred (needs timeout plumbing through client.post) |
+| 3 `_best_tok` decay regrows at min limit | **FIXED**: decay only when the cut actually reduces the limit. Tested |
+| 4 Marker ⇒ sidecars overstated | **CONTRACT-NARROWED** (§5): marker guarantees ordering (writes attempted), not sidecar presence |
+| 5 Teardown reaps only the group leader | **PARTIAL**: leader reaped after SIGKILL. Full group-membership verification (retain PGID, probe, escalate, handle races) = deferred; on Jobs the container teardown owns stragglers |
+| 6 Crashed tick loop leaks the HTTP client | **FIXED**: `aclose()` in a finally. Tested |
+
+Gaps: Auto bound validation **FIXED** (tested); CONTRACT "every admitted row" invariant
+**NARROWED** (fatal-abort in-flight rows produce no record, re-admitted next run — in
+resume's favor); README marker/`[hf]` claims **FIXED**. Deferred: workload-aware readiness
+probe (still by-design, wrapper-layer material), Arrow-serializability validation of parse
+values, FileSink ext validation + concurrent-duplicate tmp races.
+
+LOC ceiling renegotiated 1100 → 1120 for this round (4th renegotiation, decisions.md).
+
 ## Design direction (review's closing suggestion)
 
 Typed fatal-vs-row-error outcome: **adopted** (#1). Frozen output schema: adopted within-run

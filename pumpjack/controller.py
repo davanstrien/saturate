@@ -62,6 +62,8 @@ class Auto:
     def __init__(self, target_waiting: int = 8, initial: int = 16, min_limit: int = 2,
                  max_limit: int = 512, step: int = 8, kv_hi: float = 0.9,
                  hits_lo: float = 0.5, improve: float = 1.05):
+        if min_limit < 1 or max_limit < min_limit or step < 1:
+            raise ValueError("Auto requires 1 <= min_limit <= max_limit and step >= 1")  # 0 deadlocks
         self.lo, self.hi = max(1, target_waiting // 4), target_waiting * 2
         self.min, self.max, self.step = min_limit, max_limit, step
         self.initial = max(min_limit, min(initial, max_limit))  # clamp into [min, max]
@@ -83,7 +85,8 @@ class Auto:
     def _cut(self, limit: int) -> int:
         self._cooldown, self._slow_start = 2, False
         self._probe_from, self._probe_wait = None, 0  # a cut voids any in-flight probe
-        self._best_tok *= 0.5  # decay: an all-time max must not gate recovery after a cut
+        if limit > self.min:  # decay only with a real reduction: at the floor, flat tok is not growth
+            self._best_tok *= 0.5  # an all-time max must not gate recovery after a cut
         return max(self.min, limit // 2)
 
     def decide(self, obs: Obs | dict, limit: int) -> int:

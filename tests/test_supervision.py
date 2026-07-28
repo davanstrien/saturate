@@ -26,6 +26,30 @@ def test_crashed_tick_loop_surfaces(monkeypatch):
         asyncio.run(go())
 
 
+def test_client_closed_when_tick_loop_crashed(monkeypatch):
+    """Codex r4 blocker #6: surfacing a crashed tick loop at limiter exit must
+    not leak the HTTP client."""
+    from pumpjack import AdaptiveClient
+
+    monkeypatch.setattr(core, "TICK_S", 0.01)
+
+    class BadSignals:
+        async def read(self):
+            raise RuntimeError("scrape bug")
+
+    holder = []
+
+    async def go():
+        async with AdaptiveClient("http://127.0.0.1:1", signal_source="none") as c:
+            holder.append(c)
+            c.limiter.signals = BadSignals()
+            await asyncio.sleep(0.05)
+
+    with pytest.raises(RuntimeError, match="scrape bug"):
+        asyncio.run(go())
+    assert holder[0]._client.is_closed
+
+
 def test_fixed_zero_raises():
     with pytest.raises(ValueError, match=">= 1"):
         Fixed(0)

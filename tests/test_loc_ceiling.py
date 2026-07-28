@@ -4,7 +4,7 @@ docstrings to sneak under)."""
 
 from pathlib import Path
 
-CEILING = 1100  # renegotiated 2026-07-28 (3rd): +stats sidecar (console gaps G2/G5; see docs/decisions.md)
+CEILING = 1120  # renegotiated 2026-07-28 (4th): codex r3/r4 correctness fixes (see docs/decisions.md)
 PKG = Path(__file__).parent.parent / "pumpjack"
 
 

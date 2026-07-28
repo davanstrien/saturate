@@ -67,6 +67,7 @@ class Engine:
                 self.proc.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
+                self.proc.wait()  # reap the leader; container teardown owns any group stragglers
 
 
 def wait_for_health(endpoint: str, timeout_s: int = 1800, proc: subprocess.Popen | None = None,

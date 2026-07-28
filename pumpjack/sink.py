@@ -78,11 +78,10 @@ class ParquetSink:
         name = f"part-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}.parquet"
         keys = {k for r in self._buf for k in r}  # union: row 0 alone must not set the schema
         table = pa.Table.from_pylist([{k: r.get(k) for k in keys} for r in self._buf])
-        # pin `error` to string: an all-null column otherwise infers as null type,
-        # which breaks cross-part schema unions for external readers (viewer,
-        # pq.read_table over the dir) the moment another part has real errors
-        i = table.schema.get_field_index("error")
-        table = table.set_column(i, pa.field("error", pa.string()), table["error"].cast(pa.string()))
+        # null-typed columns (all-None this batch: `error` on clean parts, sparse user columns)
+        # default to string, so parts stay union-compatible whichever order batches arrive in
+        table = table.cast(pa.schema([pa.field(f.name, pa.string()) if pa.types.is_null(f.type) else f
+                                      for f in table.schema]))
         # user columns: pin schema at first flush, cast later parts (mid-run type change raises — §8)
         self._schema = (table.schema if self._schema is None else
                         pa.unify_schemas([self._schema, table.schema], promote_options="permissive"))

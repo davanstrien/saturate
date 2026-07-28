@@ -35,6 +35,7 @@ def test_retry_after_capped_by_budget(monkeypatch):
         {"backpressure": 0, "successes": 0}, Breaker()))
     assert body is None and "429" in err
     assert time.monotonic() - t0 < 2.0  # not the header's 3600s
+    assert client.posts == 1  # r4: the budget-capped sleep must not buy another request
 
 
 def test_multipart_never_retries():

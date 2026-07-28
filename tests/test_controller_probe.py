@@ -62,3 +62,23 @@ def test_cut_decays_best_tok():
     ctrl.decide(dict(waiting=0, running=8, inflight=8, backpressure=5,
                      successes=8, input_bound=False, tok_s=1000.0), 64)
     assert ctrl._best_tok < 8000.0  # decayed: post-cut throughput can grow again
+
+
+def test_cut_at_floor_keeps_best_tok():
+    """Codex r4 blocker #3: a cut that cannot reduce the limit (already at
+    min_limit) must not decay the baseline — flat throughput at the floor
+    would otherwise read as growth and the window would climb right back."""
+    ctrl = Auto(target_waiting=8, initial=8, step=8, min_limit=2)
+    ctrl._best_tok = 8000.0
+    ctrl.decide(dict(waiting=0, running=2, inflight=2, backpressure=5,
+                     successes=2, input_bound=False, tok_s=1000.0), 2)
+    assert ctrl._best_tok == 8000.0
+
+
+def test_auto_invalid_bounds_raise():
+    """Codex r4: Auto(min_limit=0) deadlocks admission exactly like Fixed(0)."""
+    import pytest
+
+    for kw in (dict(min_limit=0), dict(max_limit=1, min_limit=2), dict(step=0)):
+        with pytest.raises(ValueError):
+            Auto(**kw)

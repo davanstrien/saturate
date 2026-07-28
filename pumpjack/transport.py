@@ -149,6 +149,8 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
             if attempt == 4 or req.files is not None or not budget_left():
                 return None, f"transport: {type(e).__name__}: {e}"
             await backoff()
+            if not budget_left():  # the sleep itself may exhaust the budget: no extra request
+                return None, f"transport: {type(e).__name__}: {e}"
             continue
         if r.status_code == 200:
             events["successes"] += 1
@@ -166,6 +168,8 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
         if attempt == 4 or req.files is not None or not budget_left():
             return None, f"http {r.status_code} after retries"
         await backoff(_parse_retry_after(retry_after))
+        if not budget_left():  # the sleep itself may exhaust the budget: no extra request
+            return None, f"http {r.status_code} after retries"
     return None, "unreachable"
 
 

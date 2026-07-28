@@ -159,8 +159,10 @@ class AdaptiveClient:
         return self
 
     async def __aexit__(self, *exc):
-        await self.limiter.__aexit__(*exc)
-        await self._client.aclose()
+        try:
+            await self.limiter.__aexit__(*exc)  # may re-raise a crashed tick loop
+        finally:
+            await self._client.aclose()  # ... which must never leak the HTTP client
 
     @property
     def dialect(self) -> str | None:

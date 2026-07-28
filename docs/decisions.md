@@ -57,6 +57,10 @@ validates the AdaptiveLimiter layering.
 - LOC ceiling set to **800** (was ~700): the clean split carries module boundaries, the typed
   Request union, manifest sidecars, SignalSource seam, and the observable breaker the POC
   lacked. Enforced in CI; renegotiate downward after M3 trims, not by deleting docstrings.
+- **Renegotiated to 1120 (2026-07-28, 4th)**: codex round-3/4 correctness fixes (fatal-abort
+  path, schema pinning, retry-budget deadline, teardown/leak guards, input validation).
+  Round 3 landed inside 1100; round 4's blockers needed ~+10. Reliability fixes are exactly
+  what the ceiling must not squeeze out — but they still pay the toll here, in the open.
 - **Renegotiated to 1100 (2026-07-28 PM)**: +10 for the `completions/stats-{n}.json` sidecar
   (console-gap findings G2/G5 from the UI POC — exact counts + shard geometry for
   storage-only readers). Prior step was 1050 for probe-and-revert.

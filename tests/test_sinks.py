@@ -74,6 +74,24 @@ def test_error_row_first_keeps_success_columns(tmp_path):
     assert recs["ok"]["text"] == "hi" and recs["bad"]["text"] is None
 
 
+def test_null_first_then_typed_column_stays_readable(tmp_path):
+    """Codex r4 blocker #1: the REVERSE order — an all-null column in part 1,
+    real strings in part 2 — must also leave the dataset readable (part 1 is
+    already on disk, so its type must default sanely, not to null)."""
+    import pyarrow.dataset as ds
+
+    from pumpjack import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "a", "text": None, "error": None})     # part 1: all-null text
+    sink.append({"id": "b", "text": "hi", "error": None})     # part 2: string text
+    sink.append({"id": "c", "error": "http 400: nope"})       # part 3: error-only
+    parts = sorted(str(p) for p in tmp_path.glob("part-*.parquet"))
+    t = ds.dataset(parts, format="parquet").to_table()
+    got = dict(zip(t["id"].to_pylist(), t["text"].to_pylist(), strict=True))
+    assert got == {"a": None, "b": "hi", "c": None}
+
+
 def test_all_null_column_inherits_pinned_type(tmp_path):
     """Codex r3 #5: an all-null user column in a later part must keep the type
     pinned at first flush, so cross-part dataset reads stay schema-stable."""

@@ -13,7 +13,10 @@ Two governing invariants:
   count from the API, a latency we timed, an error string we caught) — never a guess.
   Dollar cost is a reader-side computation from measured tokens × a user-supplied price.
 - **Error rows, not lost rows.** Every admitted row produces exactly one output record —
-  success or error — never nothing. This is what makes resume sound.
+  success or error — never nothing. This is what makes resume sound. One exception, in
+  resume's favor: rows in flight when a run-fatal abort fires (circuit breaker gave up —
+  the server is gone) produce **no** record and are re-admitted on the next run; writing
+  them as errors would make resume skip them forever.
 
 ## 1. Output layout
 
@@ -103,8 +106,9 @@ probe for manifest-based resume.)
 (`{n}` = rank, or `rank * chunks + c` for chunked runs). Markers are **advisory** — a
 coordination convenience (datatrove's convention); resume correctness never depends on them.
 A marker does not certify row-level success. v1 payload: the fixed sentinel `done`. The
-marker is written **last** — after the stats and telemetry sidecars — so its presence means
-the run's sidecars are also present.
+marker is written **last** — after the stats and telemetry writes have been *attempted*.
+Sidecar failures are non-fatal (logged to stderr), and short runs produce no telemetry
+ticks, so a marker guarantees ordering, not sidecar presence.
 
 **`completions/stats-{n}.json`** (v1 addition, 2026-07-28): written beside the marker — the
 run's full Stats object plus `rank`/`world`. This is the console-facing exact summary: final

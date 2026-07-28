@@ -14,6 +14,7 @@ results, in completion order, adaptively concurrent.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import time
 from collections.abc import AsyncIterator, Callable, Iterable
@@ -97,6 +98,8 @@ class AdaptiveLimiter:
     async def __aexit__(self, *exc):
         if self._task:
             self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task  # a crashed tick loop surfaces here, never dies silently
 
     async def _loop(self):
         last_tokens = 0
@@ -244,3 +247,4 @@ async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]],
         feeder.cancel()
         for t in tasks:
             t.cancel()
+        await asyncio.gather(feeder, *tasks, return_exceptions=True)  # reap, don't abandon

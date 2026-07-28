@@ -36,6 +36,8 @@ def as_obs(obs: Obs | dict) -> Obs:
 
 class Fixed:
     def __init__(self, n: int):
+        if n < 1:
+            raise ValueError(f"Fixed window must be >= 1, got {n}")  # 0 deadlocks admission
         self.n = n
 
     initial = property(lambda self: self.n)

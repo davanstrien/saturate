@@ -121,9 +121,8 @@ class Breaker:
 
 async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
                         events: dict, breaker: Breaker) -> tuple[dict | None, str | None]:
-    """Returns (response_json, error). Poison rows (4xx) never retry. Multipart
-    requests are single-attempt: their file objects are consumed by the wire, and
-    a blind re-send would post empty bodies."""
+    """Returns (response_json, error). Poison rows (4xx) never retry; multipart is
+    single-attempt (file objects are consumed by the wire — a re-send posts empty bodies)."""
     url = f"{base.rstrip('/')}{req.route}"
     delay, t0 = 1.0, time.monotonic()
 

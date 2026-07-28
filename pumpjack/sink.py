@@ -83,8 +83,8 @@ class ParquetSink:
         # pq.read_table over the dir) the moment another part has real errors
         i = table.schema.get_field_index("error")
         table = table.set_column(i, pa.field("error", pa.string()), table["error"].cast(pa.string()))
-        # same hazard for user columns: pin the schema at first flush and cast every
-        # later part to it (an incompatible parse type change raises here, by design)
+        # user columns face the same hazard: pin schema at first flush, cast later parts to it
+        # (an incompatible mid-run parse type change raises here, by design — CONTRACT §8)
         self._schema = (table.schema if self._schema is None else
                         pa.unify_schemas([self._schema, table.schema], promote_options="permissive"))
         table = table.cast(pa.schema([self._schema.field(n) for n in table.schema.names]))
@@ -117,7 +117,7 @@ class ParquetSink:
             f.write(_json.dumps(payload).encode())
 
     def write_telemetry(self, shard: tuple[int, int], lines: list[str]) -> None:
-        name = f"telemetry-shard{shard[0]}-{int(time.time())}.jsonl"
+        name = f"telemetry-shard{shard[0]}-{int(time.time())}-{uuid.uuid4().hex[:6]}.jsonl"
         with self.fs.open(f"{self.root}/{name}", "wb") as f:
             f.write("\n".join(lines).encode())
 
@@ -140,8 +140,7 @@ class FileSink:
         if record.get("error") is not None:
             return
         id_ = str(record["id"])
-        if not id_ or id_ != Path(id_).name or id_.startswith("."):  # ids become filenames;
-            # dotfiles are also invisible to existing_ids' glob, silently breaking resume
+        if not id_ or id_ != Path(id_).name or id_.startswith("."):  # filenames; dotfiles hide from resume
             raise ValueError(f"FileSink: id {id_!r} is not a safe filename")
         tmp = self.dir / f".{id_}{self.ext}.tmp"  # dot-prefix + .tmp: never matches existing_ids
         tmp.write_text(str(record[self.key]))
@@ -153,15 +152,16 @@ class FileSink:
 
 
 def as_sink(output, flush_every: int = 10):
-    """A string is a ParquetSink (the CONTRACT); anything with existing_ids/
-    append/flush passes through."""
-    return ParquetSink(output, flush_every) if isinstance(output, str) else output
+    """A string or Path is a ParquetSink (the CONTRACT); anything with
+    existing_ids/append/flush passes through."""
+    return ParquetSink(str(output), flush_every) if isinstance(output, (str, Path)) else output
 
 
 async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
                 stats=None):
-    """Terminal stage: persist a Done stream. Returns the Stats it was given
-    (or a fresh one), with processed/failed/token counts filled in."""
+    """Terminal stage: persist a Done stream; returns Stats with counts filled in.
+    Completion markers are pump()'s job (written last, after stats/telemetry) —
+    drain alone writes no marker."""
     from pumpjack import Stats  # local import: avoid cycle
 
     stats = stats if stats is not None else Stats()
@@ -179,8 +179,6 @@ async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
                 sink.append({"id": done.id, "error": done.error})
     finally:
         sink.flush()  # a fatal abort must still land the rows already paid for
-    if hasattr(sink, "write_marker"):
-        sink.write_marker(shard)
     return stats
 
 

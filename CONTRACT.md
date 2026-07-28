@@ -24,7 +24,7 @@ out/
 │   └── ids-part-{ms}-{uuid8}.parquet      # [id, error] sidecar, 1:1 with its part
 ├── completions/
 │   └── shard-{n}.done                     # per-shard completion markers
-└── telemetry-shard{n}-{ts}.jsonl          # per-run controller trajectory (v1 schema)
+└── telemetry-shard{n}-{ts}-{uuid6}.jsonl  # per-run controller trajectory (v1 schema)
 ```
 
 `out` is a single fsspec URI (local path, `hf://datasets/...`, `hf://buckets/...`).
@@ -102,7 +102,9 @@ probe for manifest-based resume.)
 `completions/shard-{n}.done` is written when a shard's run function returns normally
 (`{n}` = rank, or `rank * chunks + c` for chunked runs). Markers are **advisory** — a
 coordination convenience (datatrove's convention); resume correctness never depends on them.
-A marker does not certify row-level success. v1 payload: the fixed sentinel `done`.
+A marker does not certify row-level success. v1 payload: the fixed sentinel `done`. The
+marker is written **last** — after the stats and telemetry sidecars — so its presence means
+the run's sidecars are also present.
 
 **`completions/stats-{n}.json`** (v1 addition, 2026-07-28): written beside the marker — the
 run's full Stats object plus `rank`/`world`. This is the console-facing exact summary: final
@@ -113,7 +115,8 @@ sinks that don't implement `write_stats`.
 
 ## 6. Telemetry v1 (frozen keys)
 
-One `telemetry-shard{n}-{ts}.jsonl` per run; one object per controller tick (~2s).
+One `telemetry-shard{n}-{ts}-{uuid6}.jsonl` per run; one object per controller tick (~2s).
+The uuid suffix keeps two runs of the same shard within one second from overwriting.
 
 Core (always present): `t` float · `limit` int · `inflight` int · `waiting` int|null ·
 `running` int|null · `bp` int · `ok` int · `input_bound` bool.

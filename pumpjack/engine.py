@@ -51,8 +51,7 @@ class Engine:
     def __enter__(self) -> str:
         cmd = self.cmd or _boot(self.engine, self.model, self.port, self.extra_args)
         _log(f"engine: {' '.join(cmd)}")
-        # own process group; stdout=2 sends engine chatter to stderr so it can
-        # never corrupt the single Stats JSON line on stdout (CONTRACT §7)
+        # own process group; stdout=2 -> engine chatter to stderr, protecting the CONTRACT §7 stdout line
         self.proc = subprocess.Popen(cmd, start_new_session=True, stdout=2)
         try:
             wait_for_health(self.endpoint, self.boot_timeout, proc=self.proc)

@@ -147,6 +147,8 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
             sink.write_stats(shard, stats.to_json())
         except Exception as e:
             _log(f"stats write failed (non-fatal): {e}")
+    if hasattr(sink, "write_marker"):  # last: the marker certifies stats/telemetry landed
+        sink.write_marker(shard)
     _log(f"done: {stats.rows_processed} ok, {stats.rows_failed} failed, "
          f"{stats.tokens_per_sec} tok/s, window settled at {stats.final_limit}")
     if agent_mode():

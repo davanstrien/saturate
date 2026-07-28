@@ -169,3 +169,7 @@ or resume pumpjack output without importing pumpjack.
 One request per row (rollouts/agent loops are a different tool). No DAG authoring. No
 provider price tables — it records measured tokens and latency and leaves dollars to you.
 No live clusters: scaling is shards writing to storage.
+
+## More
+
+[WHY.md](WHY.md) answers "why not just use X" with receipts. [CONTRACT.md](CONTRACT.md) is the storage protocol. [spikes/RESULTS.md](spikes/RESULTS.md) holds every benchmark number with job ids. Design history in [design/](design/).

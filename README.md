@@ -58,7 +58,6 @@ Notes on what you didn't have to do:
 `pump()` is deliberately the highest level here: two lambdas, no task opinions. Nicer
 task-shaped wrappers ("OCR this dataset with model X") belong a layer up — recipe scripts
 and product surfaces build them out of `pump()`; this library stays small underneath them.
-```
 
 (`Engine` boots the server in its own process group, health-gates it properly — health
 checks lie during warm-up, so readiness requires a real completion — and kills it on exit.)

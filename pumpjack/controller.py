@@ -62,8 +62,8 @@ class Auto:
                  max_limit: int = 512, step: int = 8, kv_hi: float = 0.9,
                  hits_lo: float = 0.5, improve: float = 1.05):
         self.lo, self.hi = max(1, target_waiting // 4), target_waiting * 2
-        self.initial = initial
         self.min, self.max, self.step = min_limit, max_limit, step
+        self.initial = max(min_limit, min(initial, max_limit))  # clamp into [min, max]
         self.kv_hi, self.hits_lo, self.improve = kv_hi, hits_lo, improve
         self._cooldown = 0
         self._slow_start = True
@@ -121,7 +121,7 @@ class Auto:
                 elif self._probe_age >= 3:
                     back, self._probe_from = self._probe_from, None
                     self._probe_cooldown = min(self._probe_cooldown * 2, 32)
-                    return max(self.min, back)  # revert: the plateau was real
+                    return min(self.max, max(self.min, back))  # revert, clamped both ends
             if obs.waiting < self.lo and obs.inflight >= int(limit * 0.8):
                 if grew is not False:
                     return min(self.max, limit * 2 if self._slow_start else limit + self.step)
@@ -133,7 +133,10 @@ class Auto:
             if obs.waiting > self.hi:
                 return max(self.min, limit - self.step)
             return limit
-        # blind floor: creep on sustained success unless throughput plateaued
+        # blind floor: creep on sustained success unless throughput plateaued.
+        # A probe begun in gauge mode cannot settle here — void it so a stale
+        # revert can't fire when gauges come back.
+        self._probe_from, self._probe_wait = None, 0
         if obs.successes > 0 and grew is not False:
             return min(self.max, limit + 1)
         return limit

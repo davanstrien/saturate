@@ -31,3 +31,24 @@ def test_bounded_at_real_knee():
     ctrl = Auto(target_waiting=8, initial=8, step=8)
     traj = drive(ctrl, 8, 40, lambda lim: min(lim, 16) * 100.0, lag=1)
     assert max(traj) <= 16 * 3, f"ran away past the knee: {traj}"
+
+
+def test_probe_voided_by_gauge_loss():
+    """Codex re-review #1: a probe begun in gauge mode must not survive blind
+    ticks and fire a stale revert when gauges return."""
+    ctrl = Auto(target_waiting=8, initial=8, step=8)
+    limit = 32
+    flat = dict(waiting=0, running=16, inflight=32, backpressure=0,
+                successes=10, input_bound=False, tok_s=1000.0)
+    ctrl._best_tok = 5000.0  # plateau-blocked
+    for _ in range(ctrl._probe_cooldown):  # drive until a probe fires
+        limit = ctrl.decide(dict(flat, inflight=limit), limit)
+    assert ctrl._probe_from is not None  # probe active
+    limit = ctrl.decide(dict(flat, waiting=None), limit)  # gauges vanish
+    assert ctrl._probe_from is None  # voided, no stale revert possible
+
+
+def test_initial_clamped_to_max():
+    """Codex re-review #2: Auto(initial > max_limit) must clamp."""
+    ctrl = Auto(initial=600, max_limit=512)
+    assert ctrl.initial == 512

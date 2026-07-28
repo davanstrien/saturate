@@ -122,7 +122,11 @@ class Breaker:
 async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
                         events: dict, breaker: Breaker) -> tuple[dict | None, str | None]:
     """Returns (response_json, error). Poison rows (4xx) never retry; multipart is
-    single-attempt (file objects are consumed by the wire — a re-send posts empty bodies)."""
+    single-attempt (file objects are consumed by the wire — a re-send posts empty bodies).
+    Budget semantics: the FIRST attempt gets the client's full read window (long generations
+    are legitimate); retries get their timeout capped to the remaining budget. Time spent
+    waiting on an open breaker deliberately does NOT consume row budgets — a paused pump
+    that recovers must resume its rows, not fail them all."""
     url = f"{base.rstrip('/')}{req.route}"
     delay, t0 = 1.0, time.monotonic()
 
@@ -141,6 +145,9 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
         try:
             if req.kind == "multipart":
                 r = await client.post(url, data=req.data, files=req.files)
+            elif attempt and RETRY_ACTIVE:  # retries: read window capped to the remaining budget
+                left = max(1.0, RETRY_BUDGET_S - (time.monotonic() - t0))
+                r = await client.post(url, json=req.json, timeout=left)
             else:
                 r = await client.post(url, json=req.json)
         except (httpx.TimeoutException, httpx.TransportError) as e:

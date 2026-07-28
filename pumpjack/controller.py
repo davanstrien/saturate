@@ -85,9 +85,10 @@ class Auto:
     def _cut(self, limit: int) -> int:
         self._cooldown, self._slow_start = 2, False
         self._probe_from, self._probe_wait = None, 0  # a cut voids any in-flight probe
-        if limit > self.min:  # decay only with a real reduction: at the floor, flat tok is not growth
-            self._best_tok *= 0.5  # an all-time max must not gate recovery after a cut
-        return max(self.min, limit // 2)
+        new = max(self.min, limit // 2)
+        if new < limit:  # scale the baseline WITH the reduction (r5: 3->2 must not halve it) —
+            self._best_tok *= new / limit  # at the floor, flat throughput is not growth
+        return new
 
     def decide(self, obs: Obs | dict, limit: int) -> int:
         obs = as_obs(obs)
@@ -135,6 +136,7 @@ class Auto:
                         self._probe_wait, self._probe_from, self._probe_age = 0, limit, 0
                         return min(self.max, limit + self.step)
             if obs.waiting > self.hi:
+                self._probe_from, self._probe_wait = None, 0  # r5: independent reduction voids probe
                 return max(self.min, limit - self.step)
             return limit
         # blind floor: creep on sustained success unless throughput plateaued.

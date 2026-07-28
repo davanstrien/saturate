@@ -20,9 +20,11 @@ class _Client:
     def __init__(self, resp: _Resp):
         self.resp = resp
         self.posts = 0
+        self.timeouts: list = []
 
-    async def post(self, url, data=None, files=None, json=None, timeout=None):
+    async def post(self, url, data=None, files=None, json=None, timeout="absent"):
         self.posts += 1
+        self.timeouts.append(timeout)
         return self.resp
 
 
@@ -36,6 +38,22 @@ def test_retry_after_capped_by_budget(monkeypatch):
     assert body is None and "429" in err
     assert time.monotonic() - t0 < 2.0  # not the header's 3600s
     assert client.posts == 1  # r4: the budget-capped sleep must not buy another request
+
+
+def test_retry_attempts_get_budget_capped_timeouts(monkeypatch):
+    """Codex r5 blocker #2: a retry starting with little budget left must not
+    inherit the client's full 1800s read window — its timeout is capped to the
+    remaining budget. The first attempt keeps the full window (long generations
+    are legitimate, the budget governs retrying)."""
+    monkeypatch.setattr(transport, "RETRY_BUDGET_S", 1.0)
+    client = _Client(_Resp(500))
+    body, err = asyncio.run(call_endpoint(
+        client, "http://x", make_json_request("/chat/completions", {}),
+        {"backpressure": 0, "successes": 0}, Breaker()))
+    assert body is None and "500" in err
+    assert client.timeouts[0] == "absent"  # first attempt: client default window
+    assert all(isinstance(t, float) and t <= 1.0 for t in client.timeouts[1:])
+    assert len(client.timeouts) >= 2  # it did retry, with capped windows
 
 
 def test_multipart_never_retries():

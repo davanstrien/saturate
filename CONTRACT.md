@@ -46,6 +46,12 @@ out/
 
 Success rows: `{id, <parse columns…>, error: null}`. Error rows: `{id, error}` (sparse — no
 user columns; readers doing strict schema unions should expect nullable user columns).
+Parts are **column-sparse in general**: a column all-null within one flush batch is dropped
+from that part (its type is not yet knowable), so a column first appears in the part where
+it first has a real value. Readers must union schemas across parts (`read_output` does);
+naive first-fragment readers may miss late-appearing columns. For a fixed schema from part
+one, declare it: `pump(schema=...)` / `ParquetSink(schema=...)` — every part is cast to the
+declared schema, missing fields are written as nulls, and unknown fields raise.
 Per-row token/latency columns, when present, are copied verbatim from the response `usage` /
 measured by the client — blank, never guessed. Standard names when written:
 `prompt_tokens`, `completion_tokens`, `latency_s`. Not required in v1.
@@ -108,7 +114,10 @@ coordination convenience (datatrove's convention); resume correctness never depe
 A marker does not certify row-level success. v1 payload: the fixed sentinel `done`. The
 marker is written **last** — after the stats and telemetry writes have been *attempted*.
 Sidecar failures are non-fatal (logged to stderr), and short runs produce no telemetry
-ticks, so a marker guarantees ordering, not sidecar presence.
+ticks, so a marker guarantees ordering, not sidecar presence. Markers are also **sticky
+across reruns** of one output dir (fixed filename, datatrove's convention): during a re-run
+(e.g. `retry_errors`) the previous run's marker stays visible; coordinators that need
+current-run state should read `stats-{n}.json` contents/mtime, not marker existence.
 
 **`completions/stats-{n}.json`** (v1 addition, 2026-07-28): written beside the marker — the
 run's full Stats object plus `rank`/`world`. This is the console-facing exact summary: final
@@ -146,11 +155,11 @@ Stats v1 keys (frozen): `rows_total`, `rows_done_prior`, `rows_processed`, `rows
 
 ## 8. Non-guarantees
 
-No output ordering · no dedup beyond `id` · no cross-run schema migration (keep `parse`
-stable per output dir; *within* a run parts are cast to one unified schema, so an
-incompatible mid-run type change raises at flush instead of writing inconsistent parts) ·
-one request per row (rollouts/trajectories are a different primitive) · no dollar figures
-in the data.
+No output ordering · no dedup beyond `id` · no schema migration (keep `parse` types stable
+per output dir; without a declared schema, parts are column-sparse (§1) and a same-run type
+change raises at flush rather than writing inconsistent parts — a **declared schema** is
+the only fully stable option for arbitrary output) · one request per row
+(rollouts/trajectories are a different primitive) · no dollar figures in the data.
 
 ## The wrapper seam
 

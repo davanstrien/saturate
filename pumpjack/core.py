@@ -14,8 +14,8 @@ results, in completion order, adaptively concurrent.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import dataclasses
+import sys
 import time
 from collections.abc import AsyncIterator, Callable, Iterable
 
@@ -46,6 +46,9 @@ class _Slot:
         self._l = limiter
 
     async def __aenter__(self):
+        task = self._l._task  # r5: a dead controller fails admissions NOW, run-fatally —
+        if task and task.done() and not task.cancelled() and task.exception() is not None:
+            raise FatalTransportError(f"controller loop died: {task.exception()!r}")
         t = time.monotonic()
         await self._l.window.acquire()
         self._l._wait["acquire"] += time.monotonic() - t
@@ -98,8 +101,15 @@ class AdaptiveLimiter:
     async def __aexit__(self, *exc):
         if self._task:
             self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await self._task  # a crashed tick loop surfaces here, never dies silently
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                if not exc or exc[0] is None:
+                    raise
+                print("[pump] controller loop also failed (primary exception wins)",
+                      file=sys.stderr, flush=True)  # r5: never mask the body's exception
 
     async def _loop(self):
         last_tokens, t_last = 0, time.monotonic()

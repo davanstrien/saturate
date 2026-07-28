@@ -101,17 +101,18 @@ def pump(
     id_key: str | None = None,
     id_fn: Callable | None = None,
     signal_source: str = "auto",  # "auto" (scrape, blind fallback) | "none"
+    schema=None,  # pa.Schema: declared immutable output schema (CONTRACT §8) — else dynamic/sparse
 ) -> Stats:
     return asyncio.run(_pump(rows, to_request, parse, endpoint, output, window, shard,
                              flush_every, read_timeout, route, headers, retry_errors,
-                             id_key, id_fn, signal_source))
+                             id_key, id_fn, signal_source, schema))
 
 
 async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_every,
                 read_timeout, route, extra_headers, retry_errors, id_key, id_fn,
-                signal_source) -> Stats:
+                signal_source, schema=None) -> Stats:
     stats = Stats()
-    sink = as_sink(output, flush_every)
+    sink = as_sink(output, flush_every, schema=schema)
     hdrs = {"User-Agent": USER_AGENT + (" (agent)" if agent_mode() else ""),
             **(extra_headers or {})}
     t0 = time.monotonic()

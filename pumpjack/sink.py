@@ -28,13 +28,18 @@ def _log(msg: str) -> None:
 
 
 class ParquetSink:
-    def __init__(self, out_uri: str, flush_every: int = 10):
+    def __init__(self, out_uri: str, flush_every: int = 10, schema: pa.Schema | None = None):
         import fsspec
 
         self.fs, self.root = fsspec.url_to_fs(out_uri)
         self.flush_every = flush_every
         self._buf: list[dict] = []
-        self._schema: pa.Schema | None = None  # pinned at first flush; unified across parts
+        # declared mode (r5): an immutable schema every part is cast to — the only fully
+        # schema-stable option for arbitrary parse output. Must carry id + error.
+        if schema is not None and not {"id", "error"} <= set(schema.names):
+            raise ValueError("declared schema must include the id and error columns")
+        self._declared = schema
+        self._schema: pa.Schema | None = schema  # dynamic mode: pinned/unified across flushes
         self.rows_written = 0
         try:
             self.fs.makedirs(self.root, exist_ok=True)
@@ -76,16 +81,28 @@ class ParquetSink:
         if not self._buf:
             return
         name = f"part-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}.parquet"
-        keys = {k for r in self._buf for k in r}  # union: row 0 alone must not set the schema
-        table = pa.Table.from_pylist([{k: r.get(k) for k in keys} for r in self._buf])
-        # null-typed columns (all-None this batch: `error` on clean parts, sparse user columns)
-        # default to string, so parts stay union-compatible whichever order batches arrive in
-        table = table.cast(pa.schema([pa.field(f.name, pa.string()) if pa.types.is_null(f.type) else f
-                                      for f in table.schema]))
-        # user columns: pin schema at first flush, cast later parts (mid-run type change raises — §8)
-        self._schema = (table.schema if self._schema is None else
-                        pa.unify_schemas([self._schema, table.schema], promote_options="permissive"))
-        table = table.cast(pa.schema([self._schema.field(n) for n in table.schema.names]))
+        if self._declared is not None:  # declared mode: exact frame — missing fields null, extras raise
+            extra = {k for r in self._buf for k in r} - set(self._declared.names)
+            if extra:
+                raise ValueError(f"rows carry fields outside the declared schema: {sorted(extra)}")
+            table = pa.Table.from_pylist([{n: r.get(n) for n in self._declared.names}
+                                          for r in self._buf], schema=self._declared)
+        else:
+            keys = {k for r in self._buf for k in r}  # union: row 0 alone must not set the schema
+            table = pa.Table.from_pylist([{k: r.get(k) for k in keys} for r in self._buf])
+            # dynamic mode writes SPARSE parts (§1/§8): an all-null user column carries no
+            # information and its type is unknowable yet — drop it rather than guess a type
+            # that a later real value (float, list) would then conflict with on disk
+            table = table.drop_columns([f.name for f in table.schema
+                                        if pa.types.is_null(f.type) and f.name != "error"])
+            if pa.types.is_null(table.schema.field("error").type):  # error is required: pin to string
+                i = table.schema.get_field_index("error")
+                table = table.set_column(i, pa.field("error", pa.string()),
+                                         table["error"].cast(pa.string()))
+            # pin seen columns at first sight, cast later parts (mid-run type change raises — §8)
+            self._schema = (table.schema if self._schema is None else
+                            pa.unify_schemas([self._schema, table.schema], promote_options="permissive"))
+            table = table.cast(pa.schema([self._schema.field(n) for n in table.schema.names]))
         with self.fs.open(f"{self.root}/{name}", "wb") as f:
             pq.write_table(table, f, compression="zstd")
         try:  # manifest second: a crash in between leaves an uncovered part -> scanned
@@ -126,6 +143,8 @@ class FileSink:
     rows leave no record and simply retry on the next run."""
 
     def __init__(self, outdir: str, ext: str = ".txt", key: str = "text"):
+        if not ext.startswith(".") or "/" in ext or ".." in ext:  # ext lands in filenames + globs
+            raise ValueError(f"FileSink: unsafe ext {ext!r}")
         self.dir = Path(outdir)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.ext, self.key = ext, key
@@ -140,7 +159,9 @@ class FileSink:
         id_ = str(record["id"])
         if not id_ or id_ != Path(id_).name or id_.startswith("."):  # filenames; dotfiles hide from resume
             raise ValueError(f"FileSink: id {id_!r} is not a safe filename")
-        tmp = self.dir / f".{id_}{self.ext}.tmp"  # dot-prefix + .tmp: never matches existing_ids
+        # dot-prefix + .tmp never match existing_ids; uuid keeps concurrent duplicate-id writers
+        # from colliding on the temp name (last replace wins, both files complete)
+        tmp = self.dir / f".{id_}.{uuid.uuid4().hex[:6]}{self.ext}.tmp"
         tmp.write_text(str(record[self.key]))
         os.replace(tmp, self.dir / f"{id_}{self.ext}")  # atomic: no truncated files on crash
         self.rows_written += 1
@@ -149,10 +170,10 @@ class FileSink:
         pass  # write-through
 
 
-def as_sink(output, flush_every: int = 10):
+def as_sink(output, flush_every: int = 10, schema: pa.Schema | None = None):
     """A string or Path is a ParquetSink (the CONTRACT); anything with
     existing_ids/append/flush passes through."""
-    return ParquetSink(str(output), flush_every) if isinstance(output, (str, Path)) else output
+    return ParquetSink(str(output), flush_every, schema=schema) if isinstance(output, (str, Path)) else output
 
 
 async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
@@ -166,12 +187,19 @@ async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
     try:
         async for done in results:
             if done.error is None:
+                # id/error are reserved columns and ALWAYS win over parse output —
+                # a parse returning e.g. the OpenAI response id must not break resume
+                rec = {**done.out, "id": done.id, "error": None}
+                try:
+                    pa.array([rec])  # r5 #6: probe values BEFORE buffering — a non-serializable
+                except (TypeError, ValueError) as e:  # value must be an error row, not a flush crash
+                    stats.rows_failed += 1
+                    sink.append({"id": done.id, "error": f"parse output not arrow-serializable: {e}"})
+                    continue
                 stats.rows_processed += 1
                 stats.prompt_tokens += done.usage.get("prompt_tokens", 0)
                 stats.completion_tokens += done.usage.get("completion_tokens", 0)
-                # id/error are reserved columns and ALWAYS win over parse output —
-                # a parse returning e.g. the OpenAI response id must not break resume
-                sink.append({**done.out, "id": done.id, "error": None})
+                sink.append(rec)
             else:
                 stats.rows_failed += 1
                 sink.append({"id": done.id, "error": done.error})

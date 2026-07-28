@@ -59,6 +59,32 @@ values, FileSink ext validation + concurrent-duplicate tmp races.
 
 LOC ceiling renegotiated 1100 → 1120 for this round (4th renegotiation, decisions.md).
 
+## Round 5 addendum (re-review of e7a3a28/97bfe03, 2026-07-28)
+
+All six remaining blockers and all four mediums addressed — this time in full, with two
+deliberate rationales documented in place of code:
+
+| Blocker | Disposition |
+|---|---|
+| 1 Schema evolution (null→float, error-first column omission, …) | **FIXED, both halves of the reviewer's own prescription**: (a) declared-schema mode — `pump(schema=...)` / `ParquetSink(schema=...)`: immutable, every part framed+cast to it, missing fields null, extras raise; (b) dynamic mode now writes **column-sparse parts** (all-null columns dropped — no premature type guess can ever conflict with a later real value), documented §1/§8. Tested both, incl. null→float |
+| 2 Retry budget not a hard deadline | **FIXED**: retries get their read timeout capped to the remaining budget (first attempt keeps the full window — long generations are legitimate; the budget governs retrying). Breaker-open waits deliberately don't consume row budgets: a paused pump that recovers must resume rows, not fail them all (docstring'd). Tested via captured timeouts |
+| 3 Baseline decay near floor (3→2 halved it) | **FIXED**: decay scales proportionally with the actual reduction (`new/old`). Tested at 3→2 |
+| 4 Dead controller observed only at exit; tick error masks body error | **FIXED both**: admissions probe the tick task and raise run-fatally (routes through the FatalTransportError path — never row errors); at exit the primary body exception wins, the tick failure is logged. Both tested |
+| 5 Group teardown waits only on the leader | **FIXED in full**: pgid resolved while the leader is alive, leader reaped (a zombie can't hold the group open), then a SIGKILL sweep confirms the whole group is gone (50×0.1s). Tested with a SIGTERM-ignoring child surviving its exited leader |
+| 6 Non-serializable parse values crash flush with no record | **FIXED**: drain probes each success row (`pa.array`) before buffering; failures become healable error rows. Flush/IO errors still propagate (never swallowed as row errors). Tested |
+
+Mediums: probe revert under queue pressure **FIXED** (independent reduction voids the probe,
+tested); marker stickiness across reruns **CONTRACT-DOCUMENTED** (§5 — fixed filenames are
+the datatrove convention; current-run state = stats-{n}.json, changing the name would break
+the convention markers exist for); readiness **PARAMETERIZED** (`route=`/`payload=` on
+wait_for_health + Engine `ready_route`/`ready_payload`; the <500 default stays, documented
+as alive-not-workload — probing the workload is now one argument away); FileSink **FIXED**
+(ext validated at construction; uuid'd temp names remove the duplicate-writer race).
+
+LOC ceiling 1120 → 1200 (5th renegotiation): the declared-schema mode is deliberate new
+surface (the reviewer's prescribed fix); the rest is robustness, which per the clarified
+intent raises the ceiling rather than golfing under it.
+
 ## Design direction (review's closing suggestion)
 
 Typed fatal-vs-row-error outcome: **adopted** (#1). Frozen output schema: adopted within-run

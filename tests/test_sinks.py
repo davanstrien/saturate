@@ -74,22 +74,72 @@ def test_error_row_first_keeps_success_columns(tmp_path):
     assert recs["ok"]["text"] == "hi" and recs["bad"]["text"] is None
 
 
-def test_null_first_then_typed_column_stays_readable(tmp_path):
-    """Codex r4 blocker #1: the REVERSE order — an all-null column in part 1,
-    real strings in part 2 — must also leave the dataset readable (part 1 is
-    already on disk, so its type must default sanely, not to null)."""
-    import pyarrow.dataset as ds
-
+def test_null_first_then_typed_column_evolves(tmp_path):
+    """Codex r4/r5 blocker #1: all-null columns are dropped from their part
+    (sparse, §1) so a later real type — string OR float — can never conflict
+    with a premature guess already on disk. read_output unifies across parts."""
     from pumpjack import ParquetSink
 
     sink = ParquetSink(str(tmp_path), flush_every=1)
-    sink.append({"id": "a", "text": None, "error": None})     # part 1: all-null text
-    sink.append({"id": "b", "text": "hi", "error": None})     # part 2: string text
-    sink.append({"id": "c", "error": "http 400: nope"})       # part 3: error-only
+    sink.append({"id": "a", "text": None, "score": None, "error": None})  # part 1: sparse {id,error}
+    sink.append({"id": "b", "text": "hi", "score": 1.5, "error": None})   # part 2: real types appear
+    sink.append({"id": "c", "error": "http 400: nope"})                   # part 3: error-only
+    for part in tmp_path.glob("part-*.parquet"):
+        pq.read_table(part)  # every part individually readable, no null/typed conflicts
+    got = dict(read_output(str(tmp_path)))
+    assert got == {"a": {}, "b": {"text": "hi", "score": 1.5}}
+
+
+def test_declared_schema_is_stable_in_any_order(tmp_path):
+    """Codex r5 blocker #1: a declared schema is the fully-stable option — every
+    part frames to it (missing fields null), whatever order rows arrive in."""
+    import pyarrow.dataset as ds
+    import pytest
+
+    from pumpjack import ParquetSink
+
+    schema = pa.schema([("id", pa.string()), ("error", pa.string()),
+                        ("text", pa.string()), ("score", pa.float64())])
+    sink = ParquetSink(str(tmp_path), flush_every=1, schema=schema)
+    sink.append({"id": "e", "error": "http 400: nope"})                  # error-only first
+    sink.append({"id": "a", "score": None, "error": None})               # null before type
+    sink.append({"id": "b", "text": "hi", "score": 1.5, "error": None})  # full row last
     parts = sorted(str(p) for p in tmp_path.glob("part-*.parquet"))
     t = ds.dataset(parts, format="parquet").to_table()
-    got = dict(zip(t["id"].to_pylist(), t["text"].to_pylist(), strict=True))
-    assert got == {"a": None, "b": "hi", "c": None}
+    assert t.schema.field("score").type == pa.float64() and len(t) == 3
+    with pytest.raises(ValueError, match="outside the declared schema"):
+        sink.append({"id": "x", "surprise": 1, "error": None})
+        sink.flush()
+    with pytest.raises(ValueError, match="id and error"):
+        ParquetSink(str(tmp_path), schema=pa.schema([("text", pa.string())]))
+
+
+def test_nonserializable_parse_value_becomes_error_row(tmp_path):
+    """Codex r5 blocker #6: {'value': object()} passed the dict check but died
+    at flush with no durable record — must become a healable error row."""
+    import asyncio
+
+    from pumpjack import ParquetSink
+    from pumpjack.core import Done
+    from pumpjack.sink import drain
+
+    async def results():
+        yield Done("bad", {}, {"value": object()}, None, {})
+        yield Done("good", {}, {"value": 1}, None, {})
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (1, 1)
+    assert sink.existing_ids(retry_errors=True) == {"good"}  # bad is healable
+
+
+def test_filesink_rejects_unsafe_ext(tmp_path):
+    """Codex r5: ext lands in filenames and the resume glob."""
+    import pytest
+
+    for bad in ("txt", ".t/xt", "..txt"):
+        with pytest.raises(ValueError, match="unsafe ext"):
+            FileSink(tmp_path / "out", ext=bad)
 
 
 def test_all_null_column_inherits_pinned_type(tmp_path):

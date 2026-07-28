@@ -50,6 +50,45 @@ def test_client_closed_when_tick_loop_crashed(monkeypatch):
     assert holder[0]._client.is_closed
 
 
+def test_admission_fails_fast_after_tick_death(monkeypatch):
+    """Codex r5 blocker #4a: a long run must not continue with a dead
+    controller — the next admission raises run-fatally (never a row error)."""
+    from pumpjack import FatalTransportError
+
+    monkeypatch.setattr(core, "TICK_S", 0.01)
+
+    class BadSignals:
+        async def read(self):
+            raise RuntimeError("scrape bug")
+
+    async def go():
+        async with AdaptiveLimiter(signals=BadSignals()) as lim:
+            await asyncio.sleep(0.05)  # let the tick loop die
+            async with lim.slot():
+                pass
+
+    with pytest.raises(FatalTransportError, match="controller loop died"):
+        asyncio.run(go())
+
+
+def test_body_exception_wins_over_tick_crash(monkeypatch):
+    """Codex r5 blocker #4b: a tick-loop exception at exit must not mask the
+    primary body exception."""
+    monkeypatch.setattr(core, "TICK_S", 0.01)
+
+    class BadSignals:
+        async def read(self):
+            raise RuntimeError("scrape bug")
+
+    async def go():
+        async with AdaptiveLimiter(signals=BadSignals()):
+            await asyncio.sleep(0.05)
+            raise ValueError("primary")
+
+    with pytest.raises(ValueError, match="primary"):
+        asyncio.run(go())
+
+
 def test_fixed_zero_raises():
     with pytest.raises(ValueError, match=">= 1"):
         Fixed(0)

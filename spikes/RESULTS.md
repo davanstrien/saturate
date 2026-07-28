@@ -197,3 +197,36 @@ across arms, which is what the comparison needs.
 
 Single run per arm; 0.5B text-only; short prompts; A10G. Fusion-cliff effects (vLLM #48757)
 won't show at this model size — don't over-extrapolate the flatness to big models.
+
+# Sources validation — dataset_rows across three workload types (2026-07-28/29, feat/sources)
+
+All four jobs on a10g-small, wheel built from this branch (staged at
+pumpjack-spike/feat-sources/). Drivers: src_embed.py, src_gen.py,
+lighton_ocr2_pumpjack.py (staged alongside; the OCR port is the decision-11
+pilot, private — no public PR).
+
+## 1. Embeddings (TEI bge-m3) + resume — dataset_rows feeding caller-side batching
+
+- fineweb-edu train, columns=["text"], limit=6400 → 64-text batches, batch id =
+  first member's index id (deterministic across runs).
+- Run 1 (job JOBID_EMBED): PENDING
+- Run 2, same command (job JOBID_EMBED2 — the id-stability receipt): PENDING
+
+## 2. Generation (vLLM Qwen/Qwen3.5-4B) — prompt-in-column, ids="content"
+
+- fka/awesome-chatgpt-prompts, row-per-request chat, content ids (dedup demo).
+- Job JOBID_GEN: PENDING
+
+## 3. OCR recipe port (LightOnOCR-2-1B) — the "how much does it help" A/B
+
+- uv-scripts lighton-ocr2-server.py vs pumpjack port, same 100 pages of
+  davanstrien/bhl-impact-groundtruth (ids = gt_page_id column: natural key on
+  an image dataset, where content-hash refuses by design), same model flags,
+  sampling, image (vllm/vllm-openai:v0.22.1), flavor.
+- Static: 651 → 88 lines (574 → 68 non-blank), −87%. Dropped: CLI args, card
+  generation, inference_info column (publish concerns, live elsewhere).
+  Gained: adaptive window (vs --concurrency 32), exact resume, durable per-row
+  error records (vs "[OCR ERROR]" strings + "results are lost" on failed
+  push), incremental parquet (vs all-in-RAM + end-of-run push), telemetry.
+- Old recipe (job JOBID_OLD): PENDING
+- Port (job JOBID_NEW): PENDING

@@ -50,10 +50,36 @@ def test_column_ids():
 
 
 def test_callable_ids_trusted_as_is():
-    rows = list(dataset_rows(ds(), ids=lambda row: f"pg-{row['key']}"))
+    rows = list(dataset_rows(ds(), ids=lambda ex: f"pg-{ex['key']}"))
     assert [i for i, _ in rows] == ["pg-a1", "pg-b2", "pg-c3", "pg-a4"]
 
 
 def test_unknown_id_column_raises():
     with pytest.raises(KeyError):
         list(dataset_rows(ds(), ids="nope"))
+
+
+def test_revision_or_token_with_loaded_object_raises():
+    # silent no-op would void the index-id stability caveat (codex HIGH)
+    with pytest.raises(ValueError, match="repo id string"):
+        list(dataset_rows(ds(), revision="some-branch"))
+    with pytest.raises(ValueError, match="repo id string"):
+        list(dataset_rows(ds(), token="hf_x"))
+
+
+def test_empty_columns_means_empty_rows_not_all():
+    # columns=[] must not be treated as columns=None (codex MEDIUM)
+    rows = list(dataset_rows(ds(), columns=[], limit=1))
+    assert rows == [("train-000000000", {})]
+
+
+def test_id_strategy_producing_none_raises_loudly():
+    # a broken callable must not collide every row on "None" (codex MEDIUM)
+    with pytest.raises(ValueError, match="produced no id"):
+        list(dataset_rows(ds(), ids=lambda ex: None))
+
+
+def test_id_column_need_not_be_in_columns():
+    # id lookup happens on the full example, pre-filter (codex MEDIUM)
+    rows = list(dataset_rows(ds(), columns=["text"], ids="key", limit=2))
+    assert rows == [("a1", {"text": "alpha"}), ("b2", {"text": "beta"})]

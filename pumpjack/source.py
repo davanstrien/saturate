@@ -19,7 +19,8 @@ def _reject_non_json(o):
     raise TypeError(
         f"row contains a non-JSON value ({type(o).__name__}) — its str() is not stable "
         "across runs, so a content id would break resume. Pass (id, row) tuples, "
-        "id_key=, or id_fn= for rows carrying objects (images, audio, tensors)."
+        "id_key=, or id_fn= for rows carrying objects (images, audio, tensors); "
+        "from dataset_rows use ids=<key column>, a callable, or the index default."
     )
 
 

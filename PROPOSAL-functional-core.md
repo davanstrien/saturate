@@ -104,6 +104,23 @@ Refs: NVIDIA-NeMo/DataDesigner — `engine/models/request_admission/controller.p
 `clients/base.py` (ModelClient Protocol), `clients/model_request_executor.py`,
 `clients/retry.py` (the 429-passthrough invariant), `clients/factory.py`.
 
+## Staged output: bucket-hot, dataset-published (Daniel's steer 2026-07-28)
+
+The scale ceilings of dataset-repo sinks are commit-shaped (2 commits/flush; 409 contention
+at fan-out K). The staging pattern dissolves them: **pump to a bucket (S3 PUTs, no commits,
+no contention), then compile to a dataset repo as a separate publish step** (viewer, card,
+one commit — the things dataset repos are actually for).
+
+- Write side: `ParquetSink` already accepts `hf://buckets/...` — **needs the validation run**
+  (the never-done Tier-2 item; FUSE/bucket gotchas say assume nothing). Do next, ~$0.30.
+- Compile side: `publish(src, dataset_repo, *, shard_mb=256)` IN pumpjack post-v1 — it must
+  apply the CONTRACT (healing reader rule, error rows dropped/side-filed, dupes collapsed,
+  parts consolidated to viewer-friendly shards, single commit). Contract knowledge lives
+  here; ~40 LOC over `read_output()`.
+- NOT in pumpjack: generic bucket tooling (sync/browse/lifecycle) — hf CLI / platform land.
+- README guidance once validated: hot path → bucket, publish → dataset; small `flush_every`
+  is free on buckets.
+
 ## Open choices (confirm/veto)
 
 0. **(settled with Daniel 2026-07-28, stream-first steer) Sink protocol — resumability as a

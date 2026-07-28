@@ -106,12 +106,19 @@ Refs: NVIDIA-NeMo/DataDesigner — `engine/models/request_admission/controller.p
 
 ## Open choices (confirm/veto)
 
-0. **(added from Daniel's stream-first steer, 2026-07-28)** `skip_done` accepts an external
-   done-set/callable, not only an output dir: `skip_done(rows, done={ids} | callable | output_dir)`.
-   Makes `through()`-plus-your-own-sink (OCR→.md files, audio→transcripts, filenames = ids)
-   fully resumable — the filesystem is the manifest. File sinks trade away the error-row
-   guarantee (failed ≙ absent ≙ un-attempted); documented, theirs to accept. No `drain_files()`
-   in v1 — `through()` + 3 lines covers it; promote to a blessed helper only if recipes repeat it.
+0. **(settled with Daniel 2026-07-28, stream-first steer) Sink protocol — resumability as a
+   contract any IO can satisfy.** The invariant, one sentence: *an id returned by
+   `existing_ids()` implies its record is durable; an id not returned implies re-processing
+   it is safe (idempotent write or reader-resolved duplicate).* Protocol (duck-typed):
+   `existing_ids() -> set[str]` · `append(done)` · `flush()`.
+   - `ParquetSink` = today's code = the full CONTRACT (exact resume + error rows/healing +
+     reader rule). `pump(output="...")` string → ParquetSink, unchanged.
+   - `FileSink(outdir, ext, key)` = second blessed impl (~25 LOC): id → `{outdir}/{id}.md`;
+     the filesystem is the manifest; naturally idempotent; failed = absent = retried next
+     run (no error records — documented trade). Covers OCR→md, audio→transcript.
+   - Non-resumable IO = same protocol, empty `existing_ids()` — degradation, not a second
+     interface. `skip_done(rows, sink)` always just calls `sink.existing_ids()`.
+   Two blessed sinks is the v1 line; a protocol with one impl is just a class.
 1. Names: `stream / skip_done / through / drain` — happy to bikeshed (`amap`? `pump_through`?).
 2. `through()` yields `(id, row, result)` triples with `result["error"]` convention, or a
    small `Done(id, row, out, error)` dataclass? (Lean: dataclass — self-documenting.)

@@ -84,3 +84,15 @@ Tier 2 (~$30–50) is sprint-week material, flagged before spend.
 - [ ] why.md: replace the two second-hand rows (Ray Data, Daft) with directly-fetched sources.
 - [ ] Daniel voice pass on README + why.md (writing-review).
 - [ ] PyPI name registration; decide public-repo timing vs the embeddings showcase.
+
+## Console-gap findings (2026-07-28, from the UI POC — storage-only dashboard build)
+
+The POC's job was to find where the CONTRACT makes a console awkward. It found five (G1–G5);
+dispositions:
+
+| gap | disposition |
+|---|---|
+| G5 exact counts need parquet · G2 world undiscoverable | **FIXED in pumpjack**: `completions/stats-{n}.json` (full Stats + rank/world, CONTRACT §5). Telemetry Σok stays approximate mid-run — documented |
+| G1 no progress denominator · G4 items-per-row not in storage | **Wrapper layer** (`run.json` launch-spec sidecar: expected rows, world, items_per_row, written by the pipelines layer at launch — it's intent, not output; pumpjack stays a recorder of what happened). Spec belongs in the inference-pipelines design |
+| G2 dead-on-arrival shard (live case) | run.json's `world` covers it at launch time; stats-{n}.json covers it at completion |
+| G3 liveness (stalled vs slow) | **DEFERRED with tension named**: a heartbeat needs the CONTRACT to promise a telemetry flush cadence, which costs commits on dataset-repo sinks (free on buckets). Candidate: periodic telemetry flush (default ~60s, configurable), cadence advisory. Decide alongside the staged-output (bucket-hot) work — heartbeats and buckets want each other |

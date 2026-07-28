@@ -72,3 +72,12 @@ Tier 0: oracle `ORACLE_ADAPTER=clean` → 9 passed / 0 xfail; ruff clean; LOC ch
 Tier 1 (≤$20, signal-first): throughput parity vs bare-httpx/POC on one real model →
 kill/resume on a real Job → 50-page OCR parity → engine boots if budget remains.
 Tier 2 (~$30–50) is sprint-week material, flagged before spend.
+
+## Pre-public checklist (added 2026-07-28 — none of these block internal sharing)
+
+- [ ] Docstring de-storying: strip design-history references from code (keep constraints,
+      move stories here / RESULTS). After the Codex fix-diff re-review closes.
+- [ ] Scrub `docs/history/` + this file for internal thread quotes/names before flipping public.
+- [ ] why.md: replace the two second-hand rows (Ray Data, Daft) with directly-fetched sources.
+- [ ] Daniel voice pass on README + why.md (writing-review).
+- [ ] PyPI name registration; decide public-repo timing vs the embeddings showcase.

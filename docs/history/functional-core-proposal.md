@@ -1,3 +1,5 @@
+> **ARCHIVED (2026-07-28).** Historical working document, kept for provenance. The current architecture is [docs/design.md](../design.md); decisions and their outcomes are in [docs/decisions.md](../decisions.md). Nothing here is authoritative.
+
 # Proposal: functional core — combinators + AdaptiveClient (2026-07-28)
 
 Motivated by two steers (Daniel, overnight): decouple IO from the inference middle so

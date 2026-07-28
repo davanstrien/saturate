@@ -1,3 +1,5 @@
+> **ARCHIVED (2026-07-28).** Historical working document, kept for provenance. The current architecture is [docs/design.md](../design.md); decisions and their outcomes are in [docs/decisions.md](../decisions.md). Nothing here is authoritative.
+
 # pumpjack
 
 Batch inference for datasets: rows in, any OpenAI-compatible endpoint, resumable parquet out.

@@ -75,6 +75,11 @@ class ParquetSink:
             return
         name = f"part-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}.parquet"
         table = pa.Table.from_pylist(self._buf)
+        # pin `error` to string: an all-null column otherwise infers as null type,
+        # which breaks cross-part schema unions for external readers (viewer,
+        # pq.read_table over the dir) the moment another part has real errors
+        i = table.schema.get_field_index("error")
+        table = table.set_column(i, pa.field("error", pa.string()), table["error"].cast(pa.string()))
         with self.fs.open(f"{self.root}/{name}", "wb") as f:
             pq.write_table(table, f, compression="zstd")
         try:  # manifest second: a crash in between leaves an uncovered part -> scanned

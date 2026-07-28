@@ -30,6 +30,22 @@ def test_read_output_healing_rule(tmp_path):
     assert got == {"x": {"out": "good"}, "z": {"out": "fine"}}
 
 
+def test_mixed_success_error_parts_union(tmp_path):
+    """A dir holding success-only AND error-only parts must stay readable by
+    external consumers (the shapes-run finding: null-typed error column)."""
+    import pyarrow.dataset as ds
+
+    from pumpjack import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "ok1", "response": "fine", "error": None})   # part 1: all-null error
+    sink.append({"id": "bad1", "error": "http 400: nope"})          # part 2: string error
+    parts = sorted(str(p) for p in tmp_path.glob("part-*.parquet"))  # the CONTRACT reader pattern
+    t = ds.dataset(parts, format="parquet").to_table()
+    recs = {r["id"]: r for r in t.to_pylist()}
+    assert recs["ok1"]["error"] is None and recs["bad1"]["error"].startswith("http 400")
+
+
 def test_skip_done_with_external_set():
     stats = Stats()
     rows = [("a", {}), ("b", {}), ("b", {}), ("c", {})]

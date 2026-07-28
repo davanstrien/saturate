@@ -82,7 +82,9 @@ class Auto:
         if self._cooldown:
             self._cooldown -= 1
             return limit
-        if obs.kv is not None and obs.hits is not None and obs.kv >= self.kv_hi and obs.hits < self.hits_lo:
+        # two-condition cut; with no hits signal at all (prefix caching off), high
+        # KV is unverifiably benign -> cut conservatively (shapes-run finding)
+        if obs.kv is not None and obs.kv >= self.kv_hi and (obs.hits is None or obs.hits < self.hits_lo):
             return self._cut(limit)
         if obs.input_bound:
             return limit

@@ -119,6 +119,10 @@ Refs: NVIDIA-NeMo/DataDesigner — `engine/models/request_admission/controller.p
    - Non-resumable IO = same protocol, empty `existing_ids()` — degradation, not a second
      interface. `skip_done(rows, sink)` always just calls `sink.existing_ids()`.
    Two blessed sinks is the v1 line; a protocol with one impl is just a class.
+0b. **(from Daniel's final README pass)** `read_output(out) -> Iterator[(id, row)]` — reads a
+   pumpjack output dir back as a source, applying the CONTRACT §4.2 reader rule (error IS
+   NULL wins, healed duplicates collapse, error-only rows skipped). The missing link for
+   stage-chaining through storage; ~15 LOC; was already promised by the CONTRACT.
 1. Names: `stream / skip_done / through / drain` — happy to bikeshed (`amap`? `pump_through`?).
 2. `through()` yields `(id, row, result)` triples with `result["error"]` convention, or a
    small `Done(id, row, out, error)` dataclass? (Lean: dataclass — self-documenting.)

@@ -81,7 +81,9 @@ async with AdaptiveClient(endpoint, window=Auto()) as client:
 
 # chaining is just more piping — e.g. OCR then judge:
 #   pages -> through(ocr_client, ...) -> drain(stage1_out)
-#   stream_output(stage1_out) -> through(judge_client, ...) -> drain(stage2_out)
+#   read_output(stage1_out) -> through(judge_client, ...) -> drain(stage2_out)
+# read_output() reads a pumpjack output dir back as an (id, row) source, applying the
+# healing reader rule (the error-IS-NULL record wins) — so stage 2 sees clean rows.
 ```
 
 Two rules keep this honest:

@@ -74,10 +74,35 @@ AdaptiveClient    = AdaptiveLimiter + HTTP transport + retry + breaker  <- our o
 through/drain/... = combinators over AdaptiveClient                  <- pump(), wrappers
 ```
 
-### NVIDIA DataDesigner
+### NVIDIA DataDesigner (recon 2026-07-28, source-verified)
 
-Recon in progress (early signal: it may contain a `request_admission` module with
-pressure/controller concepts — being verified; findings land here).
+**Prior-art correction: DataDesigner ships runtime-adaptive AIMD admission, on by default**
+(`request_admission/controller.py` — "AIMD-backed request admission controller with exact
+request leases"). "No datagen framework adapts at runtime" is retired from our narrative.
+What survives, precisely:
+- Their signal is **429s only** — no latency, no throughput gradient, no server metrics.
+  It cannot find the optimum on endpoints that saturate *without* 429ing — i.e. self-hosted
+  vLLM/SGLang, pumpjack's core case (and vLLM never 429s; its queue is unbounded).
+- It ramps **down from a static cap** (`max_parallel_requests`, default **4**; +1 per 25
+  consecutive successes) — throttling a user guess, not discovering capacity.
+- Engine-embedded, not a reusable client; per-request admission, no batch/source/sink shape.
+
+**Design validation**: they independently converged on the same split the datatrove check
+gave us — **admission (adaptive window, leases, outcome-classified release) separated from
+transport (HTTP + non-429 retries)**, with the explicit invariant that 429 is never retried
+at transport so the signal reaches the admission loop. Their admission seam is a Protocol:
+`try_acquire / acquire_async / release(lease, outcome)` — structurally `AdaptiveLimiter`'s
+`slot()/observe()`. Consequences adopted:
+- `observe()` takes a classified outcome (`ok | rate_limited(retry_after) | timeout |
+  failure`), not a bare bool — fits both host shapes (datatrove's dumb-semaphore hosts embed
+  the limiter; DataDesigner-style engines could mount it at their admission seam via a thin
+  Protocol shim).
+- Their pressure-snapshot/event-sink observability pattern endorses open choice #4
+  (`on_tick` callback): yes.
+
+Refs: NVIDIA-NeMo/DataDesigner — `engine/models/request_admission/controller.py`,
+`clients/base.py` (ModelClient Protocol), `clients/model_request_executor.py`,
+`clients/retry.py` (the 429-passthrough invariant), `clients/factory.py`.
 
 ## Open choices (confirm/veto)
 

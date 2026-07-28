@@ -23,6 +23,17 @@ not substrate: `pumpjack-poc` is frozen; this repo is judged by `pumpjack-oracle
 | 14 | Pacer | DEFER post-v1; seams only (header-dialect slot, 429 taxonomy in controller) |
 | 15 | In-process async transports | Harry (2026-07-27): "use AsyncLLM, manage concurrency with asyncio, skip /metrics." SGLang parallel: `sgl.Engine.async_generate`. Verdict: **transport option, not redesign** — neither has persistence/resume/admission/remote; `Transport` is a protocol from day 0 (HTTP-only impl in MVP); the adaptive controller is a remote/shared-endpoint thesis, in-process degenerates to a Fixed feed-ahead window |
 
+## Prior-art correction (2026-07-28, DataDesigner recon)
+
+**NVIDIA DataDesigner ships runtime-adaptive AIMD admission, default-on** — the exception to
+round-1's "nothing adapts" sweep (which had it as "fixed, user-set": wrong; the sweep saw the
+config knob, not the `request_admission` controller behind it). Precise surviving claim for
+all external writing: *pumpjack is the only standalone client whose controller **discovers**
+capacity (throughput-primary + gauges) — DataDesigner's controller **throttles down** from a
+static cap (default 4) on 429s only, which self-hosted engines never send.* Full analysis:
+PROPOSAL-functional-core.md §plumb-check. Their admission/transport split independently
+validates the AdaptiveLimiter layering.
+
 ## Thread receipts informing the design (2026-07-27)
 
 - **vLLM PR #48757, Harry's own benchmark comment (read in full 2026-07-27)**: residual-add+RMSNorm

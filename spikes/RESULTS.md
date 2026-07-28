@@ -272,5 +272,10 @@ pilot, private — no public PR).
 - Library receipts, same 20 images: prefetch=8 read 30MB in 3.9s vs 13.6s
   sequential (3.5x, bounded window); skip-all re-list 0 rows in ~0s (id-first
   resume: listing only, zero transfer).
-- OCR-from-bucket job (glob -> LightOnOCR-2): job JOBID_B1 PENDING_B1
-- Re-run (skip=existing_ids wired in-driver): job JOBID_B2 PENDING_B2
+- OCR-from-bucket job (glob -> LightOnOCR-2, a10g-small): job
+  6a69296aa9f4e0ab00b2bfe3 — **20/20 pages, 0 failed, 33.8s pump**, contract
+  output with path-ids.
+- Re-run, same command (job 6a692b95a9f4e0ab00b2c013): driver printed
+  `skip-before-read: 20 already durable`, then **rows_total=0, elapsed 0.61s** —
+  the source filtered by id before reading a single byte. Id-first resume for
+  buckets (issue #9's mechanism), end-to-end on Jobs.

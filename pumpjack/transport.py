@@ -155,7 +155,7 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
         elif 400 <= r.status_code < 500:
             return None, f"http {r.status_code}: {r.text[:300]}"  # poison, no retry, no breaker
         else:
-            events["backpressure"] += 1  # intermittent 5xx IS server pressure (Codex #5)
+            events["backpressure"] += 1  # intermittent 5xx IS server pressure
             breaker.fail()
         if attempt == 4 or not budget_left():
             return None, f"http {r.status_code} after retries"

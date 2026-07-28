@@ -68,10 +68,9 @@ def wait_for_health(endpoint: str, timeout_s: int = 1800, proc: subprocess.Popen
                     consecutive: int = 3, headers: dict | None = None,
                     poll_interval: float = 1.0) -> None:
     """Readiness = N consecutive health 200s + one server-generated response on
-    the API route. Health endpoints lie during warm-up (the 35B GGUF incident:
-    one 200 while the completion path was still dark); any status <500 on a
-    real POST is a server that parsed a request — the only readiness signal
-    worth trusting."""
+    the API route. Health endpoints can return 200 while the completion path is
+    still dark; any status <500 on a real POST is a server that parsed a
+    request — the only readiness signal worth trusting."""
     base = endpoint.rsplit("/v1", 1)[0]
     deadline = time.time() + timeout_s
     ok_streak = 0

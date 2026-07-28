@@ -48,8 +48,7 @@ class Auto:
     """Hold the engine's queue small-and-positive; never outgrow delivered throughput.
 
     - slow-start doubles until a queue *durably* forms (debounced exit — one
-      cold-prefill spike must not end the ramp; the 12-shard traces showed the
-      POC quit ~5x too early, then crawled ~90s to equilibrium)
+      cold-prefill spike must not end the ramp)
     - growth is gated by the throughput plateau: if delivered tok/s stopped
       improving, hold even when the queue reports headroom (KV != throughput)
     - two-condition cut: high KV with a *healthy* prefix-hit rate is benign;
@@ -70,10 +69,10 @@ class Auto:
         self._queue_ticks = 0  # consecutive ticks with a standing queue (debounce)
         self._best_tok = 0.0
         self._seen_ok = False  # ACK-clock: no growth before the first completion ever
-        # probe-and-revert (the 10k-parity lesson): real generations lag the tick,
-        # so a plateau reading can be stale — the gate must not block exploration
-        # forever. When growth is plateau-blocked, probe +step on a backoff
-        # schedule; revert if throughput doesn't confirm within the settle window.
+        # probe-and-revert: real generations lag the tick, so a plateau reading
+        # can be stale — the gate must not block exploration forever. When growth
+        # is plateau-blocked, probe +step on a backoff schedule; revert if
+        # throughput doesn't confirm within the settle window.
         self._probe_wait = 0
         self._probe_cooldown = 4
         self._probe_from: int | None = None
@@ -91,17 +90,16 @@ class Auto:
         if self._cooldown:
             self._cooldown -= 1
             return limit
-        # two-condition cut; with no hits signal at all (prefix caching off), high
-        # KV is unverifiably benign -> cut conservatively (shapes-run finding)
+        # two-condition cut; with no hits signal at all (prefix caching off),
+        # high KV is unverifiably benign -> cut conservatively
         if obs.kv is not None and obs.kv >= self.kv_hi and (obs.hits is None or obs.hits < self.hits_lo):
             return self._cut(limit)
         if obs.input_bound:
             return limit
-        # ACK-clocked slow start (the 5k-vision OOM lesson): with long generations,
-        # ticks pass with zero completions while gauges show phantom headroom
-        # (multimodal preprocessing queues ahead of the scheduler's gauges) —
-        # doubling on that evidence is how a client OOMs the box. TCP rule:
-        # never widen a window nothing has ever been acknowledged through.
+        # ACK-clocked slow start: with long generations, ticks pass with zero
+        # completions while gauges show phantom headroom (preprocessing queues
+        # sit ahead of the scheduler's gauges). Never widen a window nothing
+        # has ever been acknowledged through.
         self._seen_ok = self._seen_ok or obs.successes > 0
         if not self._seen_ok:
             return limit

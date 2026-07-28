@@ -1,3 +1,14 @@
+# HEAD regression + first field firing of the reworked breaker (2026-07-28 PM)
+
+Fresh 1k-row generation on the fully-fixed wheel (both Codex rounds; job 6a68ad82):
+**1000/1000, 0 failed, window 8→128, 4.4k tok/s.** Bonus receipt: a post-readiness warm-up
+burst of 5xx opened the breaker (**its first real firing since the rework**) — probe got a
+404 (<500 = server parsing), closed immediately, every retried row healed. Working as
+designed; also a live demonstration of why the breaker exists even after a readiness gate
+passes. (The "144 consecutive failures" in the log = counter racing ahead of the first gate
+observation across ~128 in-flight workers — cosmetic.) A prior run same day also verified
+the pure-resume path on HEAD: 5,000 skips via Hub manifest in 19.8s, zero requests sent.
+
 # Extensibility probe: TTS bucket-to-bucket (2026-07-28) — PASS, seams held
 
 An agent playing END USER (package modification forbidden) shipped an unsupported

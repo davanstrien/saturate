@@ -4,7 +4,7 @@ docstrings to sneak under)."""
 
 from pathlib import Path
 
-CEILING = 800
+CEILING = 1000  # renegotiated 2026-07-28 with the functional core (see DECISIONS.md)
 PKG = Path(__file__).parent.parent / "pumpjack"
 
 

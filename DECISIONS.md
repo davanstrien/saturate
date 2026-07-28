@@ -55,6 +55,10 @@ validates the AdaptiveLimiter layering.
 - LOC ceiling set to **800** (was ~700): the clean split carries module boundaries, the typed
   Request union, manifest sidecars, SignalSource seam, and the observable breaker the POC
   lacked. Enforced in CI; renegotiate downward after M3 trims, not by deleting docstrings.
+- **Renegotiated to 1000 (2026-07-28)** with the approved functional core: `core.py`
+  (AdaptiveLimiter/AdaptiveClient/through, 187) + FileSink/read_output/drain are new public
+  surface with named consumers, not bloat — the facade itself *shrank* 203→123. Current
+  total 971. Same rule: trim honestly later, never by stripping docs.
 - Markers: **advisory** (CONTRACT §5). Sparse error rows kept (§1). Per-row token columns
   standardized-when-present, not required (§1). Telemetry: all four proposed keys enter v1
   (the controller consumes them; a v2 bump later would be sillier).

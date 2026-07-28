@@ -37,11 +37,13 @@ validates the AdaptiveLimiter layering.
 ## Thread receipts informing the design (2026-07-27)
 
 - **vLLM PR #48757, Harry's own benchmark comment (read in full 2026-07-27)**: residual-add+RMSNorm
-  fusion gives **+18.3% tok/s / −15.7% TPOT at concurrency 32, nil at ~1000 running** — FlashInfer's
-  allreduce fusion has a 51-token size gate on SM90/TP8, so *which kernels run depends on the
-  concurrency the client picks*, with hardware/TP/version-specific thresholds. The efficiency-vs-
-  concurrency landscape is non-monotonic and unknowable in advance → runtime delivered-throughput
-  watching is the only general answer. Decision 5's receipt, from a vLLM maintainer's bench.
+  fusion gives **+18.3% tok/s / −15.7% TPOT at concurrency 32, and no measurable gain in an
+  UNCAPPED 1000-prompt run** (noise ±34%) — FlashInfer's allreduce fusion has a 51-token size gate
+  on SM90/TP8, so *which kernels run depends on the concurrency the client picks*. Cross-hardware
+  kicker (same PR, comment 5100074377): on 8×MI355X the identical `--max-concurrency 32` gives only
+  **+2.9%** — thresholds are hardware/TP/version-specific. The efficiency-vs-concurrency landscape
+  is non-monotonic and unknowable in advance → runtime delivered-throughput watching is the only
+  general answer. Decision 5's receipt, from a vLLM maintainer's bench.
   **Bench rule banked from the same comment**: `--dataset-name random` regenerates identical
   prompts (his prefix-cache hit rate climbed 20%→98% across trials) — Tier 1/2 runs use unique
   prompts or disable prefix caching on both arms.
@@ -58,7 +60,8 @@ validates the AdaptiveLimiter layering.
 - **Renegotiated to 1000 (2026-07-28)** with the approved functional core: `core.py`
   (AdaptiveLimiter/AdaptiveClient/through, 187) + FileSink/read_output/drain are new public
   surface with named consumers, not bloat — the facade itself *shrank* 203→123. Current
-  total 971. Same rule: trim honestly later, never by stripping docs.
+  total 971 **non-blank lines** (the CI measure: `grep -cve '^\s*$' pumpjack/*.py`; raw
+  `wc -l` reads ~1190). Same rule: trim honestly later, never by stripping docs.
 - Markers: **advisory** (CONTRACT §5). Sparse error rows kept (§1). Per-row token columns
   standardized-when-present, not required (§1). Telemetry: all four proposed keys enter v1
   (the controller consumes them; a v2 bump later would be sillier).

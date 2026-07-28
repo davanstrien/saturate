@@ -2,17 +2,20 @@
 
 ## Fan-out — 4 Jobs, 4 engines, ONE output: FLAWLESS
 4×1000 dolly rows, strided assignment. Verified: 80 parts, **4,000 records / 4,000 unique /
-0 dupes**, markers shard-0..3.done, 4 telemetry files. Each shard's controller found its own
-equilibrium independently (final windows 80/80/72/32) — per-shard adaptivity with zero
+0 dupes**, markers shard-0..3.done, 4 telemetry files. Each shard's controller settled
+independently (final windows 80/80/72/32 over ~6–8 min runs — settled values, not claimed as
+equilibria; same caveat as the shape-matrix short arms) — per-shard adaptivity with zero
 coordination is the fan-out-to-storage argument, demonstrated.
 
 ## Embeddings (vLLM pooling) — zero library changes: PASS
 `route="/embeddings"` + micro-batch-as-row (500 rows × 64 texts = 32k fineweb-edu texts).
 500/500, 0 failed, 7.85M tokens at 33.5k tok/s; 1024-dim array columns landed in parquet on
-hf://. **Controller discovered the server ceiling downward**: vLLM pooling served one 64-seq
-batch at a time → window shrank to final_limit=2 instead of queueing into it, and the advisor
-fired its first real hint. Advisor nuance found: it counts requests, not items — normalize by
-items-per-request for micro-batch workloads (decision 12 note). Flag churn: `--task embed` is
+hf://. **Controller shrank to the serving pattern**: vLLM pooling served one 64-seq batch at a
+time → window settled at final_limit=2 *requests* — which is ~128 texts in flight, so mind the
+units: neither the window value nor the advisor's `--max-num-seqs 2` suggestion is
+items-normalized (decision 12 note: normalize BOTH the advisor arithmetic and the narrative by
+items-per-request for micro-batch workloads). The advisor fired its first real hint here;
+correct diagnosis, request-unit arithmetic. Flag churn: `--task embed` is
 gone; current = `--runner pooling --convert embed`.
 
 ## TEI — third serving stack, Job-to-Job, BLIND MODE: PASS

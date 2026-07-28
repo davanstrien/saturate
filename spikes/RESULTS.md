@@ -209,13 +209,21 @@ pilot, private — no public PR).
 
 - fineweb-edu train, columns=["text"], limit=6400 → 64-text batches, batch id =
   first member's index id (deterministic across runs).
-- Run 1 (job JOBID_EMBED): PENDING
-- Run 2, same command (job JOBID_EMBED2 — the id-stability receipt): PENDING
+- Run 1 (job 6a691deb15e81eca66a8d664): **100/100 batch-rows (6,400 texts), 0 failed,
+  57,725 tok/s, 30.0s inference**, window settled at 7.
+- Run 2, same command, separate Job (6a691ee4a9f4e0ab00b2bf04): **rows_done_prior=100,
+  rows_processed=0, 6.8s** — fresh streaming pass, anti-join skipped everything.
+  dataset_rows index ids (and batch ids derived from them) are stable across Jobs: the
+  id-stability caveat holds in practice, not just in the docstring.
 
 ## 2. Generation (vLLM Qwen/Qwen3.5-4B) — prompt-in-column, ids="content"
 
-- fka/awesome-chatgpt-prompts, row-per-request chat, content ids (dedup demo).
-- Job JOBID_GEN: PENDING
+- fka/awesome-chatgpt-prompts, row-per-request chat, content ids.
+- Job 6a691deca9f4e0ab00b2befa: the dataset turned out to hold 2,066 prompts (not the
+  ~200 expected — full-size receipt for free): **2,052 processed, 10 durable error
+  rows, rows_deduped=4** — content ids caught 4 real duplicate prompts in the wild
+  dataset, exactly the strategy's pitch. 1.08M prompt + 0.82M completion tokens,
+  702.8s, 2,699 tok/s, window settled at 51, 0 breaker opens.
 
 ## 3. OCR recipe port (LightOnOCR-2-1B) — the "how much does it help" A/B
 
@@ -228,5 +236,30 @@ pilot, private — no public PR).
   Gained: adaptive window (vs --concurrency 32), exact resume, durable per-row
   error records (vs "[OCR ERROR]" strings + "results are lost" on failed
   push), incremental parquet (vs all-in-RAM + end-of-run push), telemetry.
-- Old recipe (job JOBID_OLD): PENDING
-- Port (job JOBID_NEW): PENDING
+- **Round 1 (accidental error-path A/B)**: the first-100 slice of the input turned out
+  to carry 62 rows with `image=None` — junk for throughput, gold for error semantics:
+  - Old recipe (job 6a691df215e81eca66a8d668): 62 instant failures **pushed into the
+    output dataset as `"[OCR ERROR]"` strings** mixed with real results; 1.96 img/s
+    reported incl. the instant errors.
+  - Port (job 6a691ded15e81eca66a8d666): **38 processed + 62 durable error rows**
+    (to_request exceptions recorded per-id in `_manifest`, separable/retryable), run
+    completed normally, stats honest (rows_failed=62). Exactly the CONTRACT behavior.
+  - Neither side's throughput number is meaningful at n=38-real-pages.
+- **Round 2 (clean A/B)**: 100 non-null pages → `davanstrien/sources-ab-pages`
+  (built by CPU job 6a6921baa9f4e0ab00b2bf3a), each arm run TWICE:
+  - Old recipe (jobs 6a69220615e81eca66a8d69f, 6a692366a9f4e0ab00b2bf5d): **0.80 img/s
+    both runs** (its own inference-only metric — dataset fully materialized BEFORE the
+    timer; total processing time 4.4 min).
+  - Port (jobs 6a692202a9f4e0ab00b2bf48, 6a692362a9f4e0ab00b2bf5b): **138.6s / 138.1s
+    for the whole pump = 0.72 img/s INCLUDING streaming the images from the Hub inline**
+    (input_bound=false, window at the 48 cap, 100/100, 0 failed, ~2,080 tok/s both runs).
+  - Honest read: pure-inference throughput is a ~10% edge to fixed conc-32 when input
+    cost is excluded from its timer; end-to-end productive time favors the port
+    (~138s vs ~264s) because streaming overlaps input with inference instead of paying
+    materialization up front. Neither gap is the story — the port's case is the
+    capability delta (resume, durable separable errors, incremental output, −87% code)
+    at comparable throughput.
+  - **Correctness (migration faithful)**: outputs joined on gt_page_id, 100/100 pairs,
+    0 errors either side, length ratio mean 0.998 / median 1.000, difflib similarity
+    mean 0.986 / median 1.000 (most pages byte-identical at temp 0.2); one page at 0.66
+    = ordinary sampling divergence.

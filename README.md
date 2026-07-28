@@ -10,7 +10,8 @@ resume. Killing it at any point is fine. Re-running the same command is always s
 
 ```bash
 uv pip install 'pumpjack[hf]'   # not yet on PyPI — pip install 'pumpjack[hf] @ git+https://github.com/davanstrien/pumpjack'
-# the [hf] extra pulls huggingface_hub, needed for hf:// output paths; plain pumpjack works for local output
+# the [hf] extra pulls huggingface_hub + datasets: hf:// output paths and Hub dataset
+# input (dataset_rows); plain pumpjack works with your own iterables + local output
 ```
 
 ## Quickstart: one model, one Job, one dataset
@@ -35,6 +36,17 @@ print(stats.rows_processed, stats.tokens_per_sec)
 Already have an endpoint (a colleague's server, an exposed Job, a hosted API)? Skip
 `Engine` and pass its URL as `endpoint=` — everything else is identical.
 
+Where do `rows` come from? Any iterable works; for Hub datasets there's a built-in
+(streaming by default — `load_dataset(streaming=True)` now runs at local-SSD speed for
+this one-sequential-pass access pattern, see hf.co/blog/streaming-datasets):
+
+```python
+from pumpjack import dataset_rows
+
+rows = dataset_rows("HuggingFaceFW/fineweb-edu", split="train", columns=["text"],
+                    limit=100_000)          # (id, row) stream; ids="index"|"content"|column
+```
+
 Notes on what you didn't have to do:
 
 - **No concurrency number.** The in-flight window tunes itself: it backs off when the
@@ -53,6 +65,13 @@ Notes on what you didn't have to do:
 - **`kill -9` it, re-run the same command.** Output is append-only parquet with a manifest
   sidecar; resume is an exact anti-join on id — it re-pays at most one flush buffer, never
   duplicates a row. This holds across separate Jobs writing at different times.
+- **Choosing the output path**: parts stream incrementally to `hf://datasets/…` and
+  `hf://buckets/…` alike, but the risk profile differs with parallel writers — dataset
+  repos are git-backed (every flush is a commit; several shards flushing concurrently
+  means commit contention and rate-limit exposure), buckets are object storage with no
+  commit path. Rule of thumb: **buckets for fan-out (world>1), dataset repos fine for
+  single-writer runs** and as the final publish target (both shapes have live receipts:
+  the 4-writer fan-out and the bucket-sink round-trip in `spikes/RESULTS.md`).
 
 ## Task wrappers live above this library
 

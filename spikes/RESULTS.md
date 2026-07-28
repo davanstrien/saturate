@@ -32,8 +32,17 @@ the SGLang undercount) → slow-start doubled unopposed 8→512 in ~12s → hund
 been acknowledged through** — `Auto` now holds until the first completion. Plus multimodal
 guidance: cap `max_limit` (~128) as a host-RAM guard. Oracle after fix: 9/9.
 
-## Soak v2 (5k MOH pages, ACK-clocked, max_limit=128)
-Running at consolidation time; result appended when it lands.
+## Soak (5k MOH pages, ACK-clocked, max_limit=128): PASS — including an unplanned resume
+v2 ran healthy for ~68 min (no OOM — the ACK-clock + RAM cap held) and was SIGTERM'd
+platform-side at 4,450/5,000 durable. Identical relaunch: `rows_done_prior: 4450,
+processed: 550, failed: 0`, window settled 58. **Verified: 100 parts, 5,000 records,
+5,000 unique, 0 dupes** — a second cross-job resume proof at 10× Job A's scale, unplanned.
+
+**Design note found by the resume**: the tail run took ~25 min for 550 pages because the
+source generator downloads + base64-encodes every image BEFORE the anti-join skips it —
+resume re-pays source-side materialization for already-done rows. Fix direction (post-v1):
+id-first streaming (derive id before expensive payload work, or push the done-set down into
+the source). Banked for the source module.
 
 ---
 

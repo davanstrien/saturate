@@ -33,6 +33,7 @@ class ParquetSink:
         self.fs, self.root = fsspec.url_to_fs(out_uri)
         self.flush_every = flush_every
         self._buf: list[dict] = []
+        self._schema: pa.Schema | None = None  # pinned at first flush; unified across parts
         self.rows_written = 0
         try:
             self.fs.makedirs(self.root, exist_ok=True)
@@ -74,12 +75,18 @@ class ParquetSink:
         if not self._buf:
             return
         name = f"part-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}.parquet"
-        table = pa.Table.from_pylist(self._buf)
+        keys = {k for r in self._buf for k in r}  # union: row 0 alone must not set the schema
+        table = pa.Table.from_pylist([{k: r.get(k) for k in keys} for r in self._buf])
         # pin `error` to string: an all-null column otherwise infers as null type,
         # which breaks cross-part schema unions for external readers (viewer,
         # pq.read_table over the dir) the moment another part has real errors
         i = table.schema.get_field_index("error")
         table = table.set_column(i, pa.field("error", pa.string()), table["error"].cast(pa.string()))
+        # same hazard for user columns: pin the schema at first flush and cast every
+        # later part to it (an incompatible parse type change raises here, by design)
+        self._schema = (table.schema if self._schema is None else
+                        pa.unify_schemas([self._schema, table.schema], promote_options="permissive"))
+        table = table.cast(pa.schema([self._schema.field(n) for n in table.schema.names]))
         with self.fs.open(f"{self.root}/{name}", "wb") as f:
             pq.write_table(table, f, compression="zstd")
         try:  # manifest second: a crash in between leaves an uncovered part -> scanned

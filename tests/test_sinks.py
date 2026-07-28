@@ -46,6 +46,35 @@ def test_mixed_success_error_parts_union(tmp_path):
     assert recs["ok1"]["error"] is None and recs["bad1"]["error"].startswith("http 400")
 
 
+def test_error_row_first_keeps_success_columns(tmp_path):
+    """Codex r3 #2: from_pylist takes the schema from row 0 — an error row at
+    the head of a batch must not silently drop later success columns."""
+    from pumpjack import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=2)
+    sink.append({"id": "bad", "error": "http 400: nope"})
+    sink.append({"id": "ok", "text": "hi", "error": None})
+    part = sorted(tmp_path.glob("part-*.parquet"))[0]
+    recs = {r["id"]: r for r in pq.read_table(part).to_pylist()}
+    assert recs["ok"]["text"] == "hi" and recs["bad"]["text"] is None
+
+
+def test_all_null_column_inherits_pinned_type(tmp_path):
+    """Codex r3 #5: an all-null user column in a later part must keep the type
+    pinned at first flush, so cross-part dataset reads stay schema-stable."""
+    import pyarrow.dataset as ds
+
+    from pumpjack import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "a", "text": "hi", "error": None})     # part 1 pins text: string
+    sink.append({"id": "b", "text": None, "error": None})     # part 2: all-null text
+    parts = sorted(str(p) for p in tmp_path.glob("part-*.parquet"))
+    t = ds.dataset(parts, format="parquet").to_table()
+    assert t.schema.field("text").type == pa.string()
+    assert dict(zip(t["id"].to_pylist(), t["text"].to_pylist(), strict=True)) == {"a": "hi", "b": None}
+
+
 def test_skip_done_with_external_set():
     stats = Stats()
     rows = [("a", {}), ("b", {}), ("b", {}), ("c", {})]

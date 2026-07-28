@@ -133,8 +133,10 @@ Stats v1 keys (frozen): `rows_total`, `rows_done_prior`, `rows_processed`, `rows
 ## 8. Non-guarantees
 
 No output ordering · no dedup beyond `id` · no cross-run schema migration (keep `parse`
-stable per output dir) · one request per row (rollouts/trajectories are a different
-primitive) · no dollar figures in the data.
+stable per output dir; *within* a run parts are cast to one unified schema, so an
+incompatible mid-run type change raises at flush instead of writing inconsistent parts) ·
+one request per row (rollouts/trajectories are a different primitive) · no dollar figures
+in the data.
 
 ## The wrapper seam
 

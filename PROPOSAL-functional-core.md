@@ -45,6 +45,40 @@ Mechanical: extract the worker/window/poller wiring from `__init__._pump` into
 composition. Oracle is the gate — it touches only `pump()` + storage layout, so **9/9
 before and after is the entire review**. LOC estimate: +60 net, still under the 800 ceiling.
 
+## Plumb-check: how this embeds elsewhere (Daniel's annotation #5)
+
+### datatrove (verified against local checkout, 2026-07-28)
+
+Their loop: `semaphore = asyncio.Semaphore(config.max_concurrent_generations)` created once
+in `run_async` (`run_inference.py:560`); `_send_request(server, payload, semaphore)` does
+`async with semaphore:` around **their own transport** (`InferenceServer.send_request` —
+not raw HTTP; they keep their retries, their checkpointing, their metrics).
+
+Consequence: the innermost primitive should be transport-agnostic — an **adaptive
+semaphore**, not a client:
+
+```python
+# pumpjack's innermost layer:
+limiter = AdaptiveLimiter(window=Auto(), signals=HttpScrape(endpoint))  # signals optional
+async with limiter.slot():
+    result = await server.send_request(payload)     # THEIR transport, unchanged
+limiter.observe(ok=True, tokens=n)                   # feedback drives the controller
+```
+
+The datatrove integration is then a ~5-line diff in `_send_request` + one constructor swap,
+touching none of their checkpointing/caching/metrics. Layering becomes:
+
+```
+AdaptiveLimiter   window + controller + signals; slot()/observe()   <- datatrove, DataDesigner
+AdaptiveClient    = AdaptiveLimiter + HTTP transport + retry + breaker  <- our own through()
+through/drain/... = combinators over AdaptiveClient                  <- pump(), wrappers
+```
+
+### NVIDIA DataDesigner
+
+Recon in progress (early signal: it may contain a `request_admission` module with
+pressure/controller concepts — being verified; findings land here).
+
 ## Open choices (confirm/veto)
 
 1. Names: `stream / skip_done / through / drain` — happy to bikeshed (`amap`? `pump_through`?).

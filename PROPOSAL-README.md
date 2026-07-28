@@ -12,48 +12,58 @@ resume. Killing it at any point is fine. Re-running the same command is always s
 uv pip install pumpjack   # not yet on PyPI — pip install git+https://github.com/davanstrien/pumpjack
 ```
 
-## Quickstart
+## Quickstart: one model, one Job, one dataset
 
-```python
-from pumpjack import pump, Auto
-
-stats = pump(
-    rows,                                  # any iterable of dicts — streams, never materializes
-    to_request=lambda row: {"model": "m", "messages": [{"role": "user", "content": row["text"]}]},
-    parse=lambda row, resp: {"answer": resp["choices"][0]["message"]["content"]},
-    endpoint="http://127.0.0.1:8000/v1",
-    output="hf://datasets/you/results/data", # or a local path, or hf://buckets/...
-)
-print(stats.rows_processed, stats.tokens_per_sec)
-```
-
-That's the whole API for most jobs. Notes on what you didn't have to do:
-
-- **No concurrency number.** The window starts small and adapts: delivered throughput is the
-  primary signal, the engine's own `/metrics` gauges (vLLM, SGLang, llama.cpp, TEI) accelerate
-  it when reachable, and against opaque endpoints it falls back to latency/error-driven AIMD.
-  It grows only after the first completion arrives, cuts on real pressure, and freezes when
-  your *source* is the bottleneck instead of the server (it tells you which).
-- **No id column needed.** Rows get a stable content-hash id (pass `id_key=` to use your own).
-  Identical input rows dedupe for free.
-- **`kill -9` it, re-run the same command.** Output is append-only parquet with a manifest
-  sidecar; resume is an exact anti-join on id — it re-pays at most one flush buffer, never
-  duplicates a row. This holds across separate Jobs writing at different times.
-
-## Serving the model yourself (e.g. inside one HF Job)
+The most common shape — boot the model and pump a dataset through it, all in one process
+(e.g. a single GPU Job on HF Jobs):
 
 ```python
 from pumpjack import pump, Engine
 
 with Engine("lightonai/LightOnOCR-2-1B", engine="vllm") as endpoint:   # vllm | sglang | llamacpp
-    stats = pump(rows, to_request, parse, endpoint, output)
+    stats = pump(
+        rows,                              # any iterable of dicts — streams, never materializes
+        to_request=lambda row: {...},      # row -> OpenAI-style request body
+        parse=lambda row, resp: {...},     # response -> your output columns
+        endpoint=endpoint,
+        output="hf://datasets/you/results/data",   # or a local path, or hf://buckets/...
+    )
+print(stats.rows_processed, stats.tokens_per_sec)
 ```
 
-`Engine` boots the server in its own process group, health-gates it properly (health checks
-lie during warm-up; readiness requires a real completion), and kills it on exit. On HF Jobs
-this is the whole one-GPU recipe.
+Already have an endpoint (a colleague's server, an exposed Job, a hosted API)? Skip
+`Engine` and pass its URL as `endpoint=` — everything else is identical.
 
-## The composable layer
+Notes on what you didn't have to do:
+
+- **No concurrency number.** The in-flight window tunes itself: it backs off when the
+  server shows pressure (errors, timeouts, a growing queue) and creeps up while delivered
+  throughput keeps improving — the same idea TCP uses for network congestion. When the
+  engine's `/metrics` gauges are reachable (vLLM, SGLang, llama.cpp, TEI) they sharpen the
+  decisions; against opaque endpoints it works from latency and errors alone. It grows only
+  after the first completion arrives, and it freezes (and tells you) when your *source* is
+  the bottleneck rather than the server.
+  Want control anyway? `window=Fixed(64)` pins it; `window=Auto(initial=32, max_limit=128)`
+  sets the starting point and ceiling (do cap it for vision workloads — in-flight images
+  live in RAM).
+- **Ids are yours if you want them.** Pass `(id, row)` tuples, or `id_key="my_column"`, or
+  an `id_fn=` callable. Default: a stable content-hash of the row — identical input rows
+  then dedupe for free.
+- **`kill -9` it, re-run the same command.** Output is append-only parquet with a manifest
+  sidecar; resume is an exact anti-join on id — it re-pays at most one flush buffer, never
+  duplicates a row. This holds across separate Jobs writing at different times.
+
+## Task wrappers live above this library
+
+`pump()` is deliberately the highest level here: two lambdas, no task opinions. Nicer
+task-shaped wrappers ("OCR this dataset with model X") belong a layer up — recipe scripts
+and product surfaces build them out of `pump()`; this library stays small underneath them.
+```
+
+(`Engine` boots the server in its own process group, health-gates it properly — health
+checks lie during warm-up, so readiness requires a real completion — and kills it on exit.)
+
+## The composable layer (for building on top — datatrove-shaped stacks, power users)
 
 `pump()` is a composition of four small stages. Use them directly when you want to pipe:
 

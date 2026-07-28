@@ -130,6 +130,21 @@ content-hash default: it works on image/audio columns and costs nothing. Lives u
 hf:// URIs landed in hub 1.19; datasets 5.0 carries the streaming overhaul), lazy-imported
 so the core pays nothing.
 
+**bucket_rows (2026-07-29, follow-up PR)**: raw objects by fsspec glob ->
+(id, {path, bytes}); id = path relative to the glob's static prefix (natural,
+stable). datasets/imagefolder was probed and REJECTED for this: measured 1.6x
+slower on a real bucket and, decisively, streaming imagefolder drops the file
+path — no stable id to hang resume on. `skip=` filters paths BEFORE reading
+(id-first resume for buckets — partially answers #9: a re-run with
+skip=existing_ids pays listing only); `prefetch` is a BOUNDED rolling
+read-ahead window (unbounded prefetch = bucket-sized RAM; the vision-OOM
+lesson), measured 3.5x over sequential on 20 real pages. **PDF-to-pages (and
+any decode-to-N-rows transform) deliberately excluded**: one object becoming N
+rows silently changes id semantics (resume/dedup keyed on the object would
+lose pages; keyed on pages needs a paging scheme the source cannot invent) —
+that is caller/task-layer territory; the driver-side pattern is a 5-line
+wrapper over (id, bytes).
+
 Boundary held: sources yield rows, **never construct content** — prompt building, batching
 opinions, multi-stage pipelines stay above (datatrove is that layer). Deliberate new
 surface, recorded per the decision-1 scope rule (the numeric ceiling was retired the same

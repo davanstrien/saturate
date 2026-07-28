@@ -94,3 +94,90 @@ def dataset_rows(
                 'collide rows on "None"/""; fix the callable/column or use ids="index"'
             )
         yield str(rid), row
+
+
+def bucket_rows(
+    pattern: str,
+    *,
+    ids: str | Callable = "path",
+    skip: set[str] | None = None,
+    limit: int | None = None,
+    read: bool = True,
+    prefetch: int = 8,
+) -> Iterator[tuple[str, dict]]:
+    """Objects matching an fsspec glob -> (id, {"path", "bytes"}) — the raw-object
+    input shape (an input dir of images, scans, PDFs...). Works on any fsspec
+    URI: hf://buckets/org/name/scans/**/*.png, s3://..., or a local directory
+    (which is what the tests use).
+
+    Chosen over datasets/imagefolder deliberately: measured 1.6x faster on a
+    real bucket and — decisively — streaming imagefolder drops the file path,
+    leaving no stable id to hang resume on. Here the id IS the path relative
+    to the glob's static prefix ("path", default; or any callable path -> id).
+
+    `skip` filters paths BEFORE any bytes are read — id-first resume for
+    buckets: pass `existing_ids(output)` and a re-run pays listing only, not
+    transfer. `read=False` yields {"path"} rows without fetching (manifest /
+    counting passes). `prefetch` reads ahead with a BOUNDED window of that
+    many in-flight fetches — sequential remote reads would starve a fast
+    consumer, and an unbounded prefetch would hold a bucket's worth of bytes
+    in RAM (the vision-OOM lesson).
+
+    No decode, no transforms (PDF-to-pages etc. stay a caller concern —
+    decode explodes one object into N rows, which silently changes id
+    semantics; see docs/decisions.md).
+    """
+    import fsspec
+
+    fs, _ = fsspec.core.url_to_fs(pattern)
+    # ids are relative to the static prefix (chars before the first wildcard)
+    static = pattern.split("*")[0].split("?")[0]
+    base = static[: static.rfind("/") + 1]
+    _, base_path = fsspec.core.url_to_fs(base + "x")  # resolve scheme prefix
+    base_path = base_path[:-1]
+    raw = pattern.split("://")[-1] if "://" in pattern else pattern
+    infos = fs.glob(raw, detail=True)
+    paths = sorted(p for p, i in infos.items() if i.get("type") != "directory")
+
+    def rid_of(path: str) -> str:
+        rel = path[len(base_path):] if path.startswith(base_path) else path
+        return str(ids(path)) if callable(ids) else rel
+
+    selected = []
+    for p in paths:
+        rid = rid_of(p)
+        if not rid:
+            raise ValueError(f"id strategy produced no id for {p!r}")
+        if skip and rid in skip:
+            continue
+        selected.append((rid, p))
+        if limit is not None and len(selected) >= limit:
+            break
+
+    if not read:
+        for rid, p in selected:
+            yield rid, {"path": p}
+        return
+
+    from collections import deque
+    from concurrent.futures import ThreadPoolExecutor
+
+    def fetch(item):
+        rid, p = item
+        with fs.open(p, "rb") as f:
+            return rid, {"path": p, "bytes": f.read()}
+
+    window = max(1, prefetch)
+    with ThreadPoolExecutor(max_workers=window) as pool:
+        pending: deque = deque()
+        it = iter(selected)
+        for item in it:  # prime the window
+            pending.append(pool.submit(fetch, item))
+            if len(pending) >= window:
+                break
+        while pending:  # rolling: one out, one in — never > window bytes-in-flight
+            fut = pending.popleft()
+            nxt = next(it, None)
+            if nxt is not None:
+                pending.append(pool.submit(fetch, nxt))
+            yield fut.result()

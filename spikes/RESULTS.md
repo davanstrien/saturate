@@ -263,3 +263,14 @@ pilot, private — no public PR).
     0 errors either side, length ratio mean 0.998 / median 1.000, difflib similarity
     mean 0.986 / median 1.000 (most pages byte-identical at temp 0.2); one page at 0.66
     = ordinary sampling divergence.
+
+## 4. bucket_rows — raw-object input (feat/bucket-sources, 2026-07-29)
+
+- Probe (20 real page images, 30MB, hf://buckets, home connection):
+  datasets/imagefolder 24.6s vs fsspec-direct 15.6s — and imagefolder drops
+  the path (no stable id), which decided the design more than the 1.6x.
+- Library receipts, same 20 images: prefetch=8 read 30MB in 3.9s vs 13.6s
+  sequential (3.5x, bounded window); skip-all re-list 0 rows in ~0s (id-first
+  resume: listing only, zero transfer).
+- OCR-from-bucket job (glob -> LightOnOCR-2): job JOBID_B1 PENDING_B1
+- Re-run (skip=existing_ids wired in-driver): job JOBID_B2 PENDING_B2

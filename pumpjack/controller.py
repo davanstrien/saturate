@@ -70,6 +70,14 @@ class Auto:
         self._queue_ticks = 0  # consecutive ticks with a standing queue (debounce)
         self._best_tok = 0.0
         self._seen_ok = False  # ACK-clock: no growth before the first completion ever
+        # probe-and-revert (the 10k-parity lesson): real generations lag the tick,
+        # so a plateau reading can be stale — the gate must not block exploration
+        # forever. When growth is plateau-blocked, probe +step on a backoff
+        # schedule; revert if throughput doesn't confirm within the settle window.
+        self._probe_wait = 0
+        self._probe_cooldown = 4
+        self._probe_from: int | None = None
+        self._probe_age = 0
 
     def _cut(self, limit: int) -> int:
         self._cooldown, self._slow_start = 2, False
@@ -105,8 +113,22 @@ class Auto:
             self._queue_ticks = self._queue_ticks + 1 if obs.waiting >= self.lo else 0
             if self._queue_ticks >= 2:  # debounced slow-start exit
                 self._slow_start = False
-            if obs.waiting < self.lo and obs.inflight >= int(limit * 0.8) and grew is not False:
-                return min(self.max, limit * 2 if self._slow_start else limit + self.step)
+            if self._probe_from is not None:  # a probe is settling: confirm or revert
+                self._probe_age += 1
+                if grew is True:
+                    self._probe_from, self._probe_cooldown = None, 4  # confirmed
+                elif self._probe_age >= 3:
+                    back, self._probe_from = self._probe_from, None
+                    self._probe_cooldown = min(self._probe_cooldown * 2, 32)
+                    return max(self.min, back)  # revert: the plateau was real
+            if obs.waiting < self.lo and obs.inflight >= int(limit * 0.8):
+                if grew is not False:
+                    return min(self.max, limit * 2 if self._slow_start else limit + self.step)
+                if self._probe_from is None:  # plateau-blocked: probe on backoff
+                    self._probe_wait += 1
+                    if self._probe_wait >= self._probe_cooldown:
+                        self._probe_wait, self._probe_from, self._probe_age = 0, limit, 0
+                        return min(self.max, limit + self.step)
             if obs.waiting > self.hi:
                 return max(self.min, limit - self.step)
             return limit

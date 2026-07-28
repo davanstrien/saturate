@@ -488,6 +488,16 @@ never duplicates, and never the whole output.
 read parquet, without importing pumpjack, from a laptop, a Job, or DuckDB. A database is a
 service to run, a schema to migrate, and a credential to pass into every Job.
 
+**Sharp edge, stated rather than hidden.** Error rows are sparse — `{id, error}` with no user
+columns — so a directory containing both success and error parts has two schemas in it, and a
+naive `pq.read_table(dir)` will fail to union them. Readers doing strict schema unions must
+expect nullable user columns. This is a real cost of "error rows, not lost rows" and it is in
+the contract, not a surprise, but it does qualify the "any parquet reader" promise above.
+
+> Receipt: `CONTRACT.md` §1 required-columns note; observed live on the shape-matrix run
+> (job `6a6867146026358f64019236`), partially mitigated since by pinning the `error` column to
+> string with a mixed-parts test (commit `4044793`).
+
 **The escape hatch is a protocol, not a fork.** Resume is one invariant — *an id in
 `existing_ids()` means its record is durable; an id absent means re-processing it is safe* — and
 any sink satisfying it gets resume. `FileSink` is the second blessed implementation: one file per

@@ -150,18 +150,20 @@ async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
     from pumpjack import Stats  # local import: avoid cycle
 
     stats = stats if stats is not None else Stats()
-    async for done in results:
-        if done.error is None:
-            stats.rows_processed += 1
-            stats.prompt_tokens += done.usage.get("prompt_tokens", 0)
-            stats.completion_tokens += done.usage.get("completion_tokens", 0)
-            # id/error are reserved columns and ALWAYS win over parse output —
-            # a parse returning e.g. the OpenAI response id must not break resume
-            sink.append({**done.out, "id": done.id, "error": None})
-        else:
-            stats.rows_failed += 1
-            sink.append({"id": done.id, "error": done.error})
-    sink.flush()
+    try:
+        async for done in results:
+            if done.error is None:
+                stats.rows_processed += 1
+                stats.prompt_tokens += done.usage.get("prompt_tokens", 0)
+                stats.completion_tokens += done.usage.get("completion_tokens", 0)
+                # id/error are reserved columns and ALWAYS win over parse output —
+                # a parse returning e.g. the OpenAI response id must not break resume
+                sink.append({**done.out, "id": done.id, "error": None})
+            else:
+                stats.rows_failed += 1
+                sink.append({"id": done.id, "error": done.error})
+    finally:
+        sink.flush()  # a fatal abort must still land the rows already paid for
     if hasattr(sink, "write_marker"):
         sink.write_marker(shard)
     return stats

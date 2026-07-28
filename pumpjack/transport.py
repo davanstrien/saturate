@@ -25,6 +25,10 @@ RETRY_ACTIVE = True  # kill-switch: flip off in tests for determinism
 RETRY_BUDGET_S = 300.0  # total retry wall-clock per row
 
 
+class FatalTransportError(RuntimeError):
+    """Run-level failure (breaker gave up): aborts the run — never a durable row error."""
+
+
 @dataclasses.dataclass
 class Request:
     """Typed request union: json XOR multipart, discriminated by `kind`."""
@@ -79,7 +83,7 @@ class Breaker:
         wait on the close event (no double-counted opens)."""
         while True:
             if self.dead:
-                raise RuntimeError(
+                raise FatalTransportError(
                     f"circuit breaker gave up after {self.max_open_s}s — server is not coming back")
             if self._open:
                 await self._closed.wait()
@@ -97,7 +101,7 @@ class Breaker:
             while True:
                 if time.monotonic() - opened > self.max_open_s:
                     self.dead = True  # waiters released below; they raise on re-check
-                    raise RuntimeError(
+                    raise FatalTransportError(
                         f"circuit breaker open for {self.max_open_s}s — server is not coming back")
                 try:
                     r = await client.post(probe_url, json={"model": "readiness-probe", "messages": [

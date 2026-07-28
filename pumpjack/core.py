@@ -23,7 +23,7 @@ import httpx2 as httpx
 from pumpjack.controller import Auto, Fixed, Obs
 from pumpjack.signals import HttpScrape, Null
 from pumpjack.telemetry import tick_record
-from pumpjack.transport import Breaker, Request, call_endpoint, coerce_request
+from pumpjack.transport import Breaker, FatalTransportError, Request, call_endpoint, coerce_request
 from pumpjack.window import Window
 
 TICK_S = 2.0
@@ -197,9 +197,14 @@ async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]],
         try:
             body, err = await client.post(to_request(row), route)
             if err is None:
-                await queue.put(Done(id_, row, parse(row, body), None, body.get("usage") or {}))
+                out = parse(row, body)
+                if not isinstance(out, dict):  # storage contract: rows are dicts
+                    raise TypeError(f"parse must return a dict, got {type(out).__name__}")
+                await queue.put(Done(id_, row, out, None, body.get("usage") or {}))
             else:
                 await queue.put(Done(id_, row, None, err))
+        except FatalTransportError as e:  # run-fatal: surfaced to the consumer, never a row error
+            await queue.put(e)
         except Exception as e:  # to_request/parse bugs become error results, not lost rows
             await queue.put(Done(id_, row, None, f"client: {type(e).__name__}: {e}"))
 
@@ -230,6 +235,8 @@ async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]],
             except asyncio.TimeoutError:
                 continue
             served += 1
+            if isinstance(item, BaseException):
+                raise item  # fatal transport: abort the pump, no durable error rows
             yield item
         if feed_error:
             raise feed_error[0]

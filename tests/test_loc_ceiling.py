@@ -1,10 +1,10 @@
-"""Decision 1: the package stays small. Ceiling enforced in CI (DECISIONS.md
+"""Decision 1: the package stays small. Ceiling enforced in CI (docs/decisions.md
 records the 800 figure and the renegotiation rule — trim at M3, don't delete
 docstrings to sneak under)."""
 
 from pathlib import Path
 
-CEILING = 1050  # renegotiated again 2026-07-28: +probe-and-revert (the 10k-parity fix; see DECISIONS.md)
+CEILING = 1050  # renegotiated again 2026-07-28: +probe-and-revert (the 10k-parity fix; see docs/decisions.md)
 PKG = Path(__file__).parent.parent / "pumpjack"
 
 

@@ -172,4 +172,4 @@ No live clusters: scaling is shards writing to storage.
 
 ## More
 
-[WHY.md](WHY.md) answers "why not just use X" with receipts. [CONTRACT.md](CONTRACT.md) is the storage protocol. [spikes/RESULTS.md](spikes/RESULTS.md) holds every benchmark number with job ids. Design history in [design/](design/).
+[docs/design.md](docs/design.md) is the architecture; [docs/why.md](docs/why.md) answers "why not just use X" with receipts; [CONTRACT.md](CONTRACT.md) is the storage protocol; [spikes/RESULTS.md](spikes/RESULTS.md) holds every benchmark number with job ids; [docs/decisions.md](docs/decisions.md) is the decision log.

@@ -121,7 +121,9 @@ class Breaker:
 
 async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
                         events: dict, breaker: Breaker) -> tuple[dict | None, str | None]:
-    """Returns (response_json, error). Poison rows (4xx) never retry."""
+    """Returns (response_json, error). Poison rows (4xx) never retry. Multipart
+    requests are single-attempt: their file objects are consumed by the wire, and
+    a blind re-send would post empty bodies."""
     url = f"{base.rstrip('/')}{req.route}"
     delay, t0 = 1.0, time.monotonic()
 
@@ -130,7 +132,8 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
 
     async def backoff(retry_after: float | None = None) -> None:
         nonlocal delay
-        await asyncio.sleep(retry_after if retry_after is not None else random.uniform(0, delay))
+        wait = retry_after if retry_after is not None else random.uniform(0, delay)
+        await asyncio.sleep(min(wait, max(0.0, RETRY_BUDGET_S - (time.monotonic() - t0))))
         delay = min(delay * 2, 60.0)
 
     probe_url = f"{base.rstrip('/')}/chat/completions"
@@ -144,7 +147,7 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
         except (httpx.TimeoutException, httpx.TransportError) as e:
             events["backpressure"] += 1
             breaker.fail()
-            if attempt == 4 or not budget_left():
+            if attempt == 4 or req.files is not None or not budget_left():
                 return None, f"transport: {type(e).__name__}: {e}"
             await backoff()
             continue
@@ -161,7 +164,7 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
         else:
             events["backpressure"] += 1  # intermittent 5xx IS server pressure
             breaker.fail()
-        if attempt == 4 or not budget_left():
+        if attempt == 4 or req.files is not None or not budget_left():
             return None, f"http {r.status_code} after retries"
         await backoff(_parse_retry_after(retry_after))
     return None, "unreachable"

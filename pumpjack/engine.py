@@ -51,8 +51,14 @@ class Engine:
     def __enter__(self) -> str:
         cmd = self.cmd or _boot(self.engine, self.model, self.port, self.extra_args)
         _log(f"engine: {' '.join(cmd)}")
-        self.proc = subprocess.Popen(cmd, start_new_session=True)  # own process group
-        wait_for_health(self.endpoint, self.boot_timeout, proc=self.proc)
+        # own process group; stdout=2 sends engine chatter to stderr so it can
+        # never corrupt the single Stats JSON line on stdout (CONTRACT §7)
+        self.proc = subprocess.Popen(cmd, start_new_session=True, stdout=2)
+        try:
+            wait_for_health(self.endpoint, self.boot_timeout, proc=self.proc)
+        except BaseException:
+            self.__exit__()  # a failed boot must not orphan the server process group
+            raise
         return self.endpoint
 
     def __exit__(self, *exc) -> None:

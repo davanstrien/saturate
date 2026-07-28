@@ -53,7 +53,9 @@ measured by the client — blank, never guessed. Standard names when written:
 re-runs**. The v1 default is a **content hash**: `sha1(canonical-JSON of the row's id-relevant
 fields)[:16]`, via `pumpjack.source.content_id(row)` — order-independent, re-shard-safe. A
 caller-designated key column or a global-index id is equally conformant (the contract requires
-the two invariants, not the derivation).
+the two invariants, not the derivation). Scale caveat: 16 hex chars ≈ 64 bits — collision odds
+are negligible at the ~10M-row scale v1 targets (~3×10⁻⁶) but reach coin-flip around 5×10⁹
+rows; beyond that, widen the hash or supply your own ids.
 
 Fan-out: K shards write to one output; each selects its slice by strided assignment
 `keep(idx) = (idx - skip) % world == rank`. Ids derive from row content or global position —
@@ -75,8 +77,13 @@ The done-set is assembled **manifest-first, exactly**:
 3. A part or manifest file that cannot be read is skipped and its rows re-paid (cost:
    ≤ `flush_every` rows of rework — never a hard error, never blocks resume).
 
-A manifest entry without a surviving part still counts as done (the manifest is complete for
-what was flushed; parts-absent is the oracle's probe for manifest-based resume).
+A manifest entry without a surviving part still counts as done: **resume trusts manifests**.
+Consequence: if a part file is deleted or corrupted out-of-band, its rows are neither
+reprocessed (the manifest says done) nor returned by readers (`read_output` skips
+absent/unreadable parts, logging unreadable ones to stderr). To recover such rows, run
+against a fresh output directory — or delete the orphaned `_manifest/ids-*` sidecars,
+accepting up to `flush_every` rows of re-spend per part. (Parts-absent is also the oracle's
+probe for manifest-based resume.)
 
 ## 4. Error rows and healing
 

@@ -12,6 +12,9 @@ dependencies = [
     "fsspec>=2024.2",
 ]
 
+[project.optional-dependencies]
+hf = ["huggingface_hub>=0.26"]  # HfFileSystem for the advertised hf:// output paths
+
 [dependency-groups]
 dev = [
     "pytest>=8",

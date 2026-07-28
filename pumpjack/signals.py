@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 
-import httpx
+import httpx2 as httpx
 
 _PAT = re.compile(
     r"^(?:"

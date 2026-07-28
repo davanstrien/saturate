@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 
-import httpx
+import httpx2 as httpx
 
 
 def _log(msg: str) -> None:

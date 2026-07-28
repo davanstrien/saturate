@@ -19,7 +19,7 @@ import random
 import sys
 import time
 
-import httpx
+import httpx2 as httpx
 
 RETRY_ACTIVE = True  # kill-switch: flip off in tests for determinism
 RETRY_BUDGET_S = 300.0  # total retry wall-clock per row

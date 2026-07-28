@@ -18,7 +18,7 @@ import dataclasses
 import time
 from collections.abc import AsyncIterator, Callable, Iterable
 
-import httpx
+import httpx2 as httpx
 
 from pumpjack.controller import Auto, Fixed, Obs
 from pumpjack.signals import HttpScrape, Null

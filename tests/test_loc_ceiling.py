@@ -8,7 +8,7 @@ never its target: update NOTE alongside the decision entry, don't golf."""
 import warnings
 from pathlib import Path
 
-NOTE = 1216  # last noted size (2026-07-28, codex r5/r6 robustness rounds); see docs/decisions.md
+NOTE = 1222  # last noted size (2026-07-28, codex r5-r7 robustness rounds); see docs/decisions.md
 PKG = Path(__file__).parent.parent / "pumpjack"
 
 

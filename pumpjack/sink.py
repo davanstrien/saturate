@@ -42,6 +42,9 @@ class ParquetSink:
             if (schema.field("id").type != pa.string() or schema.field("error").type != pa.string()
                     or not schema.field("error").nullable):
                 raise ValueError("declared schema: id and error must be string, error nullable")
+            bad = [f.name for f in schema if f.name != "id" and not f.nullable]
+            if bad:  # r7: error rows write user fields as null — non-nullable would crash the flush
+                raise ValueError(f"declared schema: fields must be nullable (error rows are sparse): {bad}")
         self._declared = schema
         self._schema: pa.Schema | None = schema  # dynamic mode: pinned/unified across flushes
         self.rows_written = 0
@@ -205,21 +208,24 @@ async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
     from pumpjack import Stats  # local import: avoid cycle
 
     stats = stats if stats is not None else Stats()
-    probe = getattr(sink, "probe", None) or (lambda rec: pa.array([rec]))
+    # r7: validation is the SINK'S contract — only a sink that supplies probe() gets it.
+    # A generic duck-typed sink (FileSink str()s its values) must not inherit Arrow's rules.
+    probe = getattr(sink, "probe", None)
     try:
         async for done in results:
             if done.error is None:
                 # id/error are reserved columns and ALWAYS win over parse output —
                 # a parse returning e.g. the OpenAI response id must not break resume
                 rec = {**done.out, "id": done.id, "error": None}
-                try:  # r5/r6 #6: validate against the sink's ACTUAL schema before buffering —
-                    probe(rec)  # a bad value must become an error row, not a flush crash
-                except (TypeError, ValueError, OverflowError) as e:
-                    stats.rows_failed += 1
-                    stats.prompt_tokens += done.usage.get("prompt_tokens", 0)  # tokens were spent
-                    stats.completion_tokens += done.usage.get("completion_tokens", 0)
-                    sink.append({"id": done.id, "error": f"parse output not storable: {e}"})
-                    continue
+                if probe is not None:
+                    try:  # r5/r6 #6: validate against the sink's ACTUAL schema before buffering —
+                        probe(rec)  # a bad value must become an error row, not a flush crash
+                    except (TypeError, ValueError, OverflowError) as e:
+                        stats.rows_failed += 1
+                        stats.prompt_tokens += done.usage.get("prompt_tokens", 0)  # tokens were spent
+                        stats.completion_tokens += done.usage.get("completion_tokens", 0)
+                        sink.append({"id": done.id, "error": f"parse output not storable: {e}"})
+                        continue
                 stats.rows_processed += 1
                 stats.prompt_tokens += done.usage.get("prompt_tokens", 0)
                 stats.completion_tokens += done.usage.get("completion_tokens", 0)

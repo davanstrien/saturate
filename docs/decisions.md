@@ -10,7 +10,7 @@ not substrate: `pumpjack-poc` is frozen; this repo is judged by `pumpjack-oracle
 | 1 | Layout | 9 modules; LOC ceiling CI-checked (see `tests/test_loc_ceiling.py`) |
 | 2 | Request | Typed union json⊕multipart, `.kind` discriminator; `_files` hack dead |
 | 3 | parse | `parse(row, resp)` row passthrough; single-arg `parse(resp)` also accepted (introspected) — keeps oracle + POC recipes working |
-| 4 | Engine | Boot templates (vllm/sglang/sgl-omni/llamacpp) + ceiling-flag table; readiness = health×N + trial completion; killpg lifecycle; GGUF = download weights |
+| 4 | Engine | Boot templates (vllm/sglang/sgl-omni/llamacpp) + ceiling-flag table; readiness = health×N + trial response (**alive-only by default**: <500 incl. 404; workload-strict via `ready_accept=`); killpg group lifecycle; GGUF = download weights |
 | 5 | Controller | Sans-IO `decide(obs, limit)`; **throughput-primary, gauges secondary, blind AIMD floor**; debounced slow-start exit (the traces' priority fix); two-condition cut (kv high AND hits low); fixed band pending calibration grid; 429+Retry-After honored, never cut; `breaker_max_open_s` so a dead server exits |
 | 6 | Signals | `SignalSource` seam: `http-scrape` (MVP) / `in-process` (post-v1) / `none`. Scrape table keyed on GAIE model-server-protocol semantics, **dual prefix spellings** (`vllm:`/`vllm_`, `sglang:`/`sglang_`) — SGLang broke once (#12618), vLLM flip is roadmapped |
 | 7 | Sink | `_manifest/` sidecar 1:1 with parts; manifest-first **exact** resume (unmatched parts scanned individually — kill-safe, no dupes); minimal-effort implementation per Daniel's steer |

@@ -60,8 +60,11 @@ Notes on what you didn't have to do:
 task-shaped wrappers ("OCR this dataset with model X") belong a layer up — recipe scripts
 and product surfaces build them out of `pump()`; this library stays small underneath them.
 
-(`Engine` boots the server in its own process group, health-gates it properly — health
-checks lie during warm-up, so readiness requires a real completion — and kills it on exit.)
+(`Engine` boots the server in its own process group, health-gates it, and kills it on exit.
+Health checks lie during warm-up, so readiness also POSTs a trial request — but the default
+acceptance is **alive-only**: any response below 500, including 404, counts, because it
+proves the API path parses requests. To gate readiness on your actual workload, pass
+`ready_route=`/`ready_payload=` and `ready_accept=lambda r: r.status_code == 200`.)
 
 ## The composable layer (for building on top — datatrove-shaped stacks, power users)
 

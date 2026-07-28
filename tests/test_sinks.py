@@ -149,6 +149,60 @@ def test_declared_schema_requires_contract_types(tmp_path):
         ParquetSink(str(tmp_path), schema=pa.schema([("id", pa.int64()), ("error", pa.string())]))
 
 
+def test_declared_schema_rejects_nonnullable_user_fields(tmp_path):
+    """Codex r7 #1: error rows write user fields as null — a declared
+    non-nullable field would crash the Parquet write with no durable record."""
+    import pytest
+
+    from pumpjack import ParquetSink
+
+    with pytest.raises(ValueError, match="nullable"):
+        ParquetSink(str(tmp_path), schema=pa.schema([
+            ("id", pa.string()), ("error", pa.string()),
+            pa.field("score", pa.float64(), nullable=False)]))
+
+
+def test_declared_schema_error_row_is_durable(tmp_path):
+    """Codex r7 #1: an ordinary error Done under a declared schema must land as
+    a durable sparse error row."""
+    import asyncio
+
+    from pumpjack import ParquetSink
+    from pumpjack.core import Done
+    from pumpjack.sink import drain
+
+    schema = pa.schema([("id", pa.string()), ("error", pa.string()), ("score", pa.float64())])
+    sink = ParquetSink(str(tmp_path), flush_every=1, schema=schema)
+    asyncio.run(drain(iter_async([Done("x", {}, None, "http 500 after retries", {})]), sink))
+    assert sink.existing_ids() == {"x"}
+
+
+def iter_async(items):
+    async def gen():
+        for x in items:
+            yield x
+    return gen()
+
+
+def test_generic_sink_not_subject_to_arrow_rules(tmp_path):
+    """Codex r7 #2: FileSink str()s its values — a stringable object its own
+    append() can persist must NOT be rejected by an Arrow probe it never asked
+    for (validation belongs to sinks that supply probe())."""
+    import asyncio
+
+    from pumpjack.core import Done
+    from pumpjack.sink import drain
+
+    class Rendered:
+        def __str__(self):
+            return "# rendered"
+
+    sink = FileSink(tmp_path / "out", ext=".md", key="markdown")
+    stats = asyncio.run(drain(iter_async([Done("a", {}, {"markdown": Rendered()}, None, {})]), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (1, 0)
+    assert (tmp_path / "out" / "a.md").read_text() == "# rendered"
+
+
 def test_dynamic_type_change_raises_at_flush(tmp_path):
     """Codex r6 blocker #4: int64 -> double was permissively widened only in
     the NEW part, breaking multi-part reads while CONTRACT §8 promised a raise.

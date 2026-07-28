@@ -38,12 +38,13 @@ class Engine:
     def __init__(self, model: str, engine: str = "vllm", port: int = 8000,
                  extra_args: list[str] | None = None, boot_timeout: int = 1800,
                  cmd: list[str] | None = None, ready_route: str = "/chat/completions",
-                 ready_payload: dict | None = None):
+                 ready_payload: dict | None = None, ready_accept=None):
         self.model, self.engine, self.port = model, engine, port
         self.extra_args = extra_args or []
         self.boot_timeout = boot_timeout
         self.cmd = cmd  # full command override (e.g. sgl-omni, vendor images)
         self.ready_route, self.ready_payload = ready_route, ready_payload  # workload probe (r5)
+        self.ready_accept = ready_accept  # response validator, e.g. lambda r: r.status_code == 200
         self.proc: subprocess.Popen | None = None
 
     @property
@@ -57,7 +58,8 @@ class Engine:
         self.proc = subprocess.Popen(cmd, start_new_session=True, stdout=2)
         try:
             wait_for_health(self.endpoint, self.boot_timeout, proc=self.proc,
-                            route=self.ready_route, payload=self.ready_payload)
+                            route=self.ready_route, payload=self.ready_payload,
+                            accept=self.ready_accept)
         except BaseException:
             self.__exit__()  # a failed boot must not orphan the server process group
             raise
@@ -71,11 +73,16 @@ class Engine:
         except ProcessLookupError:
             pgid = self.proc.pid
         if self.proc.poll() is None:
-            os.killpg(pgid, signal.SIGTERM)
             try:
+                os.killpg(pgid, signal.SIGTERM)
                 self.proc.wait(timeout=30)
+            except ProcessLookupError:
+                pass  # r6: group exited between poll() and the signal — that IS teardown
             except subprocess.TimeoutExpired:
-                os.killpg(pgid, signal.SIGKILL)
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
         self.proc.wait()  # reap the leader so a zombie can't hold the group open below
         for _ in range(50):  # r5: the GROUP is the teardown unit — a leader that exited on
             try:            # SIGTERM can leave children behind; kill and confirm they're gone
@@ -89,13 +96,13 @@ class Engine:
 def wait_for_health(endpoint: str, timeout_s: int = 1800, proc: subprocess.Popen | None = None,
                     consecutive: int = 3, headers: dict | None = None,
                     poll_interval: float = 1.0, route: str = "/chat/completions",
-                    payload: dict | None = None) -> None:
+                    payload: dict | None = None, accept=None) -> None:
     """Readiness = N consecutive health 200s + one server-generated response on
-    the API route. Health endpoints can return 200 while the completion path is
-    still dark; any status <500 on a real POST is a server that parsed a
-    request — readiness means ALIVE, deliberately not "this workload works"
-    (a 404/400 is a live server; auth and route fit are the caller's to probe).
-    Pass route=/payload= to probe the actual workload (e.g. /embeddings)."""
+    the API route. The default acceptance (<500) means ALIVE, deliberately not
+    "this workload works" — a 404/400 is a live server. To gate on the workload
+    itself, pass route=/payload= AND accept= (a response predicate, e.g.
+    `lambda r: r.status_code == 200`) — readiness then requires YOUR route to
+    answer the way you expect (r6)."""
     base = endpoint.rsplit("/v1", 1)[0]
     deadline = time.time() + timeout_s
     ok_streak = 0
@@ -117,7 +124,7 @@ def wait_for_health(endpoint: str, timeout_s: int = 1800, proc: subprocess.Popen
                                 "messages": [{"role": "user", "content": "hi"}],
                                 "max_tokens": 1},
                                timeout=30, headers=headers)
-                if r.status_code < 500:
+                if accept(r) if accept is not None else r.status_code < 500:
                     _log(f"engine ready (health x{consecutive} + trial {r.status_code})")
                     return
             except httpx.HTTPError:

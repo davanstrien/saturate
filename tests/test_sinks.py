@@ -114,6 +114,76 @@ def test_declared_schema_is_stable_in_any_order(tmp_path):
         ParquetSink(str(tmp_path), schema=pa.schema([("text", pa.string())]))
 
 
+def test_declared_type_mismatch_becomes_error_row(tmp_path):
+    """Codex r6 blocker #1: declared score: float64 + {'score': 'not-a-number'}
+    previously passed the inferred-schema probe, counted as processed, then
+    died at flush with no record. The probe now validates against the DECLARED
+    schema; overflow ints and extra fields are error rows too."""
+    import asyncio
+
+    from pumpjack import ParquetSink
+    from pumpjack.core import Done
+    from pumpjack.sink import drain
+
+    schema = pa.schema([("id", pa.string()), ("error", pa.string()), ("score", pa.float64())])
+
+    async def results():
+        yield Done("bad-type", {}, {"score": "not-a-number"}, None, {})
+        yield Done("bad-overflow", {}, {"score": 10**1000}, None, {})
+        yield Done("bad-extra", {}, {"score": 1.0, "surprise": 1}, None, {})
+        yield Done("good", {}, {"score": 1.5}, None, {})
+
+    sink = ParquetSink(str(tmp_path), flush_every=1, schema=schema)
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (1, 3)
+    assert sink.existing_ids(retry_errors=True) == {"good"}  # bad rows durable + healable
+
+
+def test_declared_schema_requires_contract_types(tmp_path):
+    """Codex r6 blocker #1: declared id/error must satisfy the contract."""
+    import pytest
+
+    from pumpjack import ParquetSink
+
+    with pytest.raises(ValueError, match="must be string"):
+        ParquetSink(str(tmp_path), schema=pa.schema([("id", pa.int64()), ("error", pa.string())]))
+
+
+def test_dynamic_type_change_raises_at_flush(tmp_path):
+    """Codex r6 blocker #4: int64 -> double was permissively widened only in
+    the NEW part, breaking multi-part reads while CONTRACT §8 promised a raise.
+    Strict unify makes the documented behavior true."""
+    import pytest
+
+    from pumpjack import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "a", "score": 1, "error": None})
+    with pytest.raises((TypeError, ValueError)):
+        sink.append({"id": "b", "score": 1.5, "error": None})
+
+
+def test_schema_rejected_for_custom_sink_objects():
+    """Codex r6 follow-up (fixed now): pump(schema=) must never be silently
+    ignored when the output is a custom sink object."""
+    import pytest
+
+    from pumpjack.sink import as_sink
+
+    class Custom:
+        def existing_ids(self, retry_errors=False):
+            return set()
+
+        def append(self, r):
+            pass
+
+        def flush(self):
+            pass
+
+    with pytest.raises(ValueError, match="pass it to your sink"):
+        as_sink(Custom(), schema=pa.schema([("id", pa.string()), ("error", pa.string())]))
+
+
 def test_nonserializable_parse_value_becomes_error_row(tmp_path):
     """Codex r5 blocker #6: {'value': object()} passed the dict check but died
     at flush with no durable record — must become a healable error row."""

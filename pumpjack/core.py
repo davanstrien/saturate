@@ -45,13 +45,21 @@ class _Slot:
     def __init__(self, limiter: AdaptiveLimiter):
         self._l = limiter
 
-    async def __aenter__(self):
-        task = self._l._task  # r5: a dead controller fails admissions NOW, run-fatally —
+    def _check(self):
+        task = self._l._task  # r5: a dead controller fails admissions run-fatally, never row errors
         if task and task.done() and not task.cancelled() and task.exception() is not None:
             raise FatalTransportError(f"controller loop died: {task.exception()!r}")
+
+    async def __aenter__(self):
+        self._check()  # before queueing on the window...
         t = time.monotonic()
         await self._l.window.acquire()
         self._l._wait["acquire"] += time.monotonic() - t
+        try:
+            self._check()  # ...and after (r6): the controller may have died while we were queued
+        except BaseException:
+            await self._l.window.release()
+            raise
 
     async def __aexit__(self, *exc):
         await self._l.window.release()

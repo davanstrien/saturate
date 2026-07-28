@@ -57,6 +57,10 @@ validates the AdaptiveLimiter layering.
 - LOC ceiling set to **800** (was ~700): the clean split carries module boundaries, the typed
   Request union, manifest sidecars, SignalSource seam, and the observable breaker the POC
   lacked. Enforced in CI; renegotiate downward after M3 trims, not by deleting docstrings.
+- **Ceiling → NOTE (2026-07-28, owner steer, final form)**: the LOC check no longer fails CI.
+  It *warns* past the noted figure so that new surface area gets a deliberate decision here —
+  a feature-creep note, not a budget. Five renegotiations in one day showed the hard gate was
+  taxing correctness work, which was never the point.
 - **Renegotiated to 1200 (2026-07-28, 5th)**: codex round-5 robustness batch — declared-schema
   mode (the one genuinely new, deliberate surface: `schema=` on pump/ParquetSink, the reviewer's
   correct answer to schema stability), full process-group teardown verification, per-attempt

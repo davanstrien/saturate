@@ -85,6 +85,29 @@ LOC ceiling 1120 → 1200 (5th renegotiation): the declared-schema mode is delib
 surface (the reviewer's prescribed fix); the rest is robustness, which per the clarified
 intent raises the ceiling rather than golfing under it.
 
+## Round 6 addendum (re-review of 8e7ef58, 2026-07-28 — "final focused round")
+
+| Blocker | Disposition |
+|---|---|
+| 1 Declared-schema failures could still abort without an error row | **FIXED**: sink exposes `probe(record)` — drain validates each success row against the sink's ACTUAL schema (declared: extras + per-field types via single-row `from_pylist(schema=)`; dynamic: inferred) and catches TypeError/ValueError/OverflowError into healable error rows. Declared id/error must be string (error nullable), validated at construction. Tested: bad type, 10**1000 overflow, extra field |
+| 2 Retries could exceed the remaining budget | **FIXED**: hard wall-clock deadline — no attempt starts past it, retry attempts run under `asyncio.wait_for(remaining)` with the exact remaining budget (1s floor removed), and breaker-open time is credited back to `t0` so the docstring's promise is now code. Kill-switch (`RETRY_ACTIVE=False`) semantics preserved. Tested: no-floor, breaker-credit |
+| 3 Blocked admission proceeded after controller death | **FIXED**: the dead-controller check re-runs after `window.acquire()`, releasing the slot before raising run-fatally. Tested with a waiter queued behind a full window |
+| 4 Dynamic int→double contradicted CONTRACT §8 | **FIXED**: strict `unify_schemas` (no permissive promotion) — a same-run type change now raises at flush exactly as documented, instead of silently writing incompatible parts. Tested |
+| 5 Parameterized readiness accepted a missing workload route | **FIXED**: `accept=` response predicate on `wait_for_health` + `Engine(ready_accept=)` — workload-gated readiness requires the caller's expected answer; the <500 default keeps alive-only semantics, docstring'd. Tested: 404 rejected under accept, accepted under default |
+| — killpg race in `Engine.__exit__` | **FIXED**: ProcessLookupError caught around both TERM and KILL sends (group exiting between poll and signal IS teardown) |
+
+Also from the follow-up list, fixed now rather than deferred: `pump(schema=)` raises for
+custom sink objects (never silently ignored); serialization-error rows count their spent
+tokens; FileSink rejects backslashes in ids; CI installs `[hf]` and constructs HfFileSystem.
+
+**LOC check → feature-creep NOTE (owner steer)**: the check now warns instead of failing —
+this also adopts the original finding #27's "advisory" suggestion, on the owner's terms.
+
+Remaining follow-up issues (filed on the repo): stale throughput baseline after
+queue-driven step-downs; FileSink glob/platform extension hardening; the Aug-3 design
+batch (#8 bounded results, #9 async source/sink, #19 shard dedup, #21 read_output
+streaming, #22 retry-status table, #25 apump, #26 flush policy).
+
 ## Design direction (review's closing suggestion)
 
 Typed fatal-vs-row-error outcome: **adopted** (#1). Frozen output schema: adopted within-run

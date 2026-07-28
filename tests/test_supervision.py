@@ -71,6 +71,31 @@ def test_admission_fails_fast_after_tick_death(monkeypatch):
         asyncio.run(go())
 
 
+def test_blocked_admission_fails_after_tick_death(monkeypatch):
+    """Codex r6 blocker #3: a waiter already queued behind a full window passed
+    the pre-acquire check, then proceeded after the controller died. The check
+    re-runs post-acquire (and releases the slot before raising)."""
+    from pumpjack import FatalTransportError
+
+    monkeypatch.setattr(core, "TICK_S", 0.01)
+
+    class BadSignals:
+        async def read(self):
+            raise RuntimeError("scrape bug")
+
+    async def go():
+        async with AdaptiveLimiter(window=Fixed(1), signals=BadSignals()) as lim:
+            first = lim.slot()
+            await first.__aenter__()  # fill the window
+            waiter = asyncio.create_task(lim.slot().__aenter__())
+            await asyncio.sleep(0.05)  # controller dies while the waiter is queued
+            await first.__aexit__(None, None, None)  # waiter acquires now
+            await waiter
+
+    with pytest.raises(FatalTransportError, match="controller loop died"):
+        asyncio.run(go())
+
+
 def test_body_exception_wins_over_tick_crash(monkeypatch):
     """Codex r5 blocker #4b: a tick-loop exception at exit must not mask the
     primary body exception."""

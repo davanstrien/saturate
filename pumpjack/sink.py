@@ -35,9 +35,13 @@ class ParquetSink:
         self.flush_every = flush_every
         self._buf: list[dict] = []
         # declared mode (r5): an immutable schema every part is cast to — the only fully
-        # schema-stable option for arbitrary parse output. Must carry id + error.
-        if schema is not None and not {"id", "error"} <= set(schema.names):
-            raise ValueError("declared schema must include the id and error columns")
+        # schema-stable option for arbitrary parse output. Must carry contract-typed id + error.
+        if schema is not None:
+            if not {"id", "error"} <= set(schema.names):
+                raise ValueError("declared schema must include the id and error columns")
+            if (schema.field("id").type != pa.string() or schema.field("error").type != pa.string()
+                    or not schema.field("error").nullable):
+                raise ValueError("declared schema: id and error must be string, error nullable")
         self._declared = schema
         self._schema: pa.Schema | None = schema  # dynamic mode: pinned/unified across flushes
         self.rows_written = 0
@@ -72,6 +76,18 @@ class ParquetSink:
                 self._read_id_error(path, done, failed)
         return done if retry_errors else done | failed
 
+    def probe(self, record: dict) -> None:
+        """Raise (TypeError/ValueError/OverflowError) if this record cannot serialize into
+        THIS sink's schema — drain turns that into an error row before buffering (r6: the
+        inferred-schema check alone missed declared-type mismatches like score='oops')."""
+        if self._declared is None:
+            pa.array([record])
+            return
+        extra = record.keys() - set(self._declared.names)
+        if extra:
+            raise ValueError(f"fields outside the declared schema: {sorted(extra)}")
+        pa.Table.from_pylist([{n: record.get(n) for n in self._declared.names}], schema=self._declared)
+
     def append(self, record: dict) -> None:
         self._buf.append(record)
         if len(self._buf) >= self.flush_every:
@@ -99,9 +115,10 @@ class ParquetSink:
                 i = table.schema.get_field_index("error")
                 table = table.set_column(i, pa.field("error", pa.string()),
                                          table["error"].cast(pa.string()))
-            # pin seen columns at first sight, cast later parts (mid-run type change raises — §8)
+            # pin seen columns at first sight; a same-run type change raises here (§8) — r6:
+            # strict unify, since silently widening only the NEW part breaks multi-part reads
             self._schema = (table.schema if self._schema is None else
-                            pa.unify_schemas([self._schema, table.schema], promote_options="permissive"))
+                            pa.unify_schemas([self._schema, table.schema]))
             table = table.cast(pa.schema([self._schema.field(n) for n in table.schema.names]))
         with self.fs.open(f"{self.root}/{name}", "wb") as f:
             pq.write_table(table, f, compression="zstd")
@@ -157,7 +174,7 @@ class FileSink:
         if record.get("error") is not None:
             return
         id_ = str(record["id"])
-        if not id_ or id_ != Path(id_).name or id_.startswith("."):  # filenames; dotfiles hide from resume
+        if not id_ or id_ != Path(id_).name or "\\" in id_ or id_.startswith("."):  # unsafe filename
             raise ValueError(f"FileSink: id {id_!r} is not a safe filename")
         # dot-prefix + .tmp never match existing_ids; uuid keeps concurrent duplicate-id writers
         # from colliding on the temp name (last replace wins, both files complete)
@@ -173,7 +190,11 @@ class FileSink:
 def as_sink(output, flush_every: int = 10, schema: pa.Schema | None = None):
     """A string or Path is a ParquetSink (the CONTRACT); anything with
     existing_ids/append/flush passes through."""
-    return ParquetSink(str(output), flush_every, schema=schema) if isinstance(output, (str, Path)) else output
+    if isinstance(output, (str, Path)):
+        return ParquetSink(str(output), flush_every, schema=schema)
+    if schema is not None:  # r6: never silently ignore a declared schema
+        raise ValueError("schema= applies to ParquetSink outputs; pass it to your sink directly")
+    return output
 
 
 async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
@@ -184,17 +205,20 @@ async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
     from pumpjack import Stats  # local import: avoid cycle
 
     stats = stats if stats is not None else Stats()
+    probe = getattr(sink, "probe", None) or (lambda rec: pa.array([rec]))
     try:
         async for done in results:
             if done.error is None:
                 # id/error are reserved columns and ALWAYS win over parse output —
                 # a parse returning e.g. the OpenAI response id must not break resume
                 rec = {**done.out, "id": done.id, "error": None}
-                try:
-                    pa.array([rec])  # r5 #6: probe values BEFORE buffering — a non-serializable
-                except (TypeError, ValueError) as e:  # value must be an error row, not a flush crash
+                try:  # r5/r6 #6: validate against the sink's ACTUAL schema before buffering —
+                    probe(rec)  # a bad value must become an error row, not a flush crash
+                except (TypeError, ValueError, OverflowError) as e:
                     stats.rows_failed += 1
-                    sink.append({"id": done.id, "error": f"parse output not arrow-serializable: {e}"})
+                    stats.prompt_tokens += done.usage.get("prompt_tokens", 0)  # tokens were spent
+                    stats.completion_tokens += done.usage.get("completion_tokens", 0)
+                    sink.append({"id": done.id, "error": f"parse output not storable: {e}"})
                     continue
                 stats.rows_processed += 1
                 stats.prompt_tokens += done.usage.get("prompt_tokens", 0)

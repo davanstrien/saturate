@@ -56,6 +56,42 @@ def test_retry_attempts_get_budget_capped_timeouts(monkeypatch):
     assert len(client.timeouts) >= 2  # it did retry, with capped windows
 
 
+def test_no_timeout_floor_below_budget(monkeypatch):
+    """Codex r6 blocker #2: max(1.0, remaining) granted a full second when only
+    milliseconds remained. Retry timeouts must be the exact remaining budget."""
+    monkeypatch.setattr(transport, "RETRY_BUDGET_S", 0.05)
+    client = _Client(_Resp(429, {"retry-after": "0"}))  # zero backoff: attempts spin freely
+    body, err = asyncio.run(call_endpoint(
+        client, "http://x", make_json_request("/chat/completions", {}),
+        {"backpressure": 0, "successes": 0}, Breaker()))
+    assert body is None
+    assert all(isinstance(t, float) and t <= 0.05 for t in client.timeouts[1:])
+
+
+def test_breaker_open_time_credited_back_to_budget(monkeypatch):
+    """Codex r6 blocker #2: the docstring promises breaker-open waits don't
+    consume row budgets — now the code makes it true (t0 is credited)."""
+    monkeypatch.setattr(transport, "RETRY_BUDGET_S", 0.05)
+
+    class SlowGate(Breaker):
+        async def gate(self, client, probe_url):
+            await asyncio.sleep(0.1)  # longer than the entire budget
+
+    class _SeqClient:
+        def __init__(self):
+            self.resps = [_Resp(429, {"retry-after": "0"}), _Resp(200)]
+
+        async def post(self, url, data=None, files=None, json=None, timeout="absent"):
+            r = self.resps.pop(0)
+            r.json = lambda: {"ok": True}
+            return r
+
+    body, err = asyncio.run(call_endpoint(
+        _SeqClient(), "http://x", make_json_request("/chat/completions", {}),
+        {"backpressure": 0, "successes": 0}, SlowGate()))
+    assert err is None and body == {"ok": True}  # the retry survived two 0.1s breaker waits
+
+
 def test_multipart_never_retries():
     client = _Client(_Resp(500))
     body, err = asyncio.run(call_endpoint(

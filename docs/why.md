@@ -82,7 +82,7 @@ the whole answer.
 **Vision workloads: serving beats offline, and we know the mechanism.** Pumping a served endpoint
 ran 1.19× offline `LLM()` on vision OCR, same job, same GPU, same model.
 
-> Receipt: `pumpjack-deep-dive-2026-07-17.md` evidence ledger — 1.19× (v3 clean; 1.26× v2;
+> Receipt: internal evidence ledger (2026-07-17) — 1.19× (v3 clean; 1.26× v2;
 > 1.51× v1 superseded), marked launch-grade.
 
 The mechanism is not hand-waved: a `max_tokens=1` probe A/B isolates preprocessing from
@@ -95,8 +95,7 @@ preprocessing with the GPU's work.
 
 Independently, the uv-scripts OCR sweep measured server-mode at 1.2–1.8× offline across recipes.
 
-> Receipt: `uv-scripts-ocr-server-mode-sweep-2026-07-16` (PRs #93/#94) via
-> `pumpjack-deep-dive-2026-07-17.md` Jul 16 entry.
+> Receipt: internal OCR server-mode sweep notes (2026-07-16; uv-scripts PRs #93/#94).
 
 **All-or-nothing.** `LLM.generate` hands back results when the whole list finishes. Crash at 90%
 and you have nothing. There is no partial-output story and no resume.
@@ -106,7 +105,7 @@ offline ahead by 1.76×. That was a client slow-start artifact and was fixed the
 honest reading stands — for text at moderate scale, in-memory input, and a single owned engine,
 offline is a perfectly good answer and the pump's margin is not the reason to adopt it.
 
-> Receipt: `pumpjack-deep-dive-2026-07-17.md` evidence ledger — "Text short run: offline **wins
+> Receipt: internal evidence ledger (2026-07-17) — "Text short run: offline **wins
 > 1.76×** (honest loss → slow-start fix)".
 
 Also honest: the 1.19× is one model, one GPU class, vision. It is not a general "serving is
@@ -123,7 +122,7 @@ found bare-pooled-httpx 163.5s, datatrove-raw 162.4s, datatrove-pooled 162.5s. A
 equally full (effective concurrency ≈ 240/256 in every arm). datatrove's client path costs
 nothing at its normal operating point.
 
-> Receipt: `datatrove-overhead-probe-2026-07-17.md` §GPU A/B — job `6a59f921d216bd6f3a1fad87`,
+> Receipt: internal datatrove-overhead probe notes (2026-07-17) §GPU A/B — job `6a59f921d216bd6f3a1fad87`,
 > a100-large, Qwen3.5-4B, 2,500 rows, conc 256, max_tokens 512.
 
 The original 2.8× was almost certainly node contention during a busy overnight fleet run, not
@@ -145,7 +144,7 @@ actual rate. At ≤216 req/s the two are identical.
   1×80GB with a big model (sigquit ~90s after memory-pool init, before any generation). 64 is
   safe; 128 verified on a100x4; test one step up at a time. Concurrency bump 64→128 bought only
   1.4× (prefill-bound)."
-  > Receipt: `~/.claude/skills/datatrove-jobs/SKILL.md:51-54`.
+  > Receipt: internal datatrove-jobs operational notes.
   That paragraph is the product case in one quote: a number that OOMs the job if too high,
   under-delivers if too low, must be re-derived per model and per GPU, and is only discoverable
   by hand.
@@ -212,7 +211,7 @@ number when latency rises, which is precisely when you want it to fall.
 **lm-deluge / BatchLLM / NeMo Curator** all take user-set limits (NeMo Curator defaults to 5
 in-flight, and its docs tell you to reduce it by hand on 429).
 
-> Receipt: `pumpjack-prior-art-deep-dive-2026-07-27.md` §5 (source-verified sweep). BatchLLM is
+> Receipt: the internal prior-art deep dive (2026-07-27) §5 (source-verified sweep). BatchLLM is
 > named as prior art extended — it ships fingerprinted checkpoints and per-row token columns.
 
 **Honest counter.** Against a commercial API with a published quota, Curator's model is the
@@ -241,7 +240,7 @@ adapts to endpoint state.
   unfinished requests per replica" as *future work* — i.e. they have identified the same signal
   and have not shipped it.
 
-> Receipt for both: `pumpjack-prior-art-deep-dive-2026-07-27.md` §5 table (source-verified
+> Receipt for both: the internal prior-art deep dive (2026-07-27) §5 table (source-verified
 > sweep, 2026-07-27). **Caveat: these two rows are second-hand to this document — I did not
 > re-verify the Ray/Daft source or re-locate the Daft blog post URL. Get a direct link before
 > either appears in public writing.**
@@ -359,7 +358,7 @@ assuming names are stable.
 **So the two halves are in different components.** Gauges feed a gate (admit / hold); status
 codes feed the ramp. Nobody feeds the gauges *into* the ramp. That is a sharper and more
 defensible statement than "llm-d does AIMD on scraped metrics", which conflates them — an earlier
-internal note did conflate them and should be corrected.
+draft of this analysis conflated them; corrected here.
 
 **And it is not something you can `uv run`.** Prerequisites: PostgreSQL 12+, Redis 6+ or Valkey
 8+, and S3-compatible object storage or a filesystem, deployed as separate API server, batch
@@ -373,7 +372,7 @@ for one person with a dataset, an endpoint and a Job. Routing across replicas is
 scope: through a load balancer, per-endpoint gauges are wrong, and the honest behaviour is to
 require a direct endpoint or degrade to blind mode.
 
-> Receipt: `pumpjack-prior-art-deep-dive-2026-07-27.md` §Harry risk list — "Multi-replica LB:
+> Receipt: internal prior-art deep dive (2026-07-27), engine-side risk list — "Multi-replica LB:
 > genuinely wrong through an LB".
 
 ---
@@ -436,7 +435,7 @@ work.
 uv-scripts OCR recipes use a fixed concurrency of 32; the same class of workload self-ranged to
 376 in POC testing — roughly 10× headroom that a static recipe simply never claims.
 
-> Receipt: `Projects/pumpjack.md` sprint item 11 — "the conc-32 vs window-376 gap (~10×
+> Receipt: internal sprint notes, item 11 — "the conc-32 vs window-376 gap (~10×
 > headroom)".
 
 **(e) It also finds ceilings downward, which is the part people don't expect.** Against vLLM
@@ -563,10 +562,10 @@ about pumpjack.
 
 | Claim | Status | Why |
 |---|---|---|
-| "datatrove's client costs 2.1× / 2.8×" | **REFUTED** | Controlled GPU A/B: 1.00×, all three arms. Cause was node contention. Receipt: `datatrove-overhead-probe-2026-07-17.md` §GPU A/B, job `6a59f921d216bd6f3a1fad87`. |
+| "datatrove's client costs 2.1× / 2.8×" | **REFUTED** | Controlled GPU A/B: 1.00×, all three arms. Cause was node contention. Receipt: internal datatrove-overhead probe notes (2026-07-17) §GPU A/B, job `6a59f921d216bd6f3a1fad87`. |
 | "No datagen framework adapts at runtime" / "nobody adapts" | **RETIRED** | DataDesigner ships AIMD admission, default-on. Use the narrowed claim in Q6. Receipt: `DECISIONS.md` §Prior-art correction. |
 | "Nobody owns cost tracking" | **RETIRED** | batchata and BatchLLM ship budget-as-run-parameter; LiteLLM owns gateway budgets. Defensible remainder: per-row dollar *provenance* in the output data, self-hosted cost modeling, HF-native resumable parquet. Receipt: `synthetic-data-library-design.md` §1 finding 3 (corrected). |
-| "The keep-alive HTTP client is a performance fix" | **RETIRED** | raw == pooled == bare at 1.00× on a real vLLM. Pooled only helps at ~1000+ req/s with very short outputs. Receipt: `datatrove-overhead-probe-2026-07-17.md` §What this means. |
+| "The keep-alive HTTP client is a performance fix" | **RETIRED** | raw == pooled == bare at 1.00× on a real vLLM. Pooled only helps at ~1000+ req/s with very short outputs. Receipt: internal datatrove-overhead probe notes (2026-07-17) §What this means. |
 | "llm-d-async does AIMD on scraped /metrics" | **IMPRECISE** | The gauge-scrape gate is in `llm-d-async`; the AIMD dispatcher is in `llm-d-batch-gateway` and its signal is response status. See Q7. |
 | "The gauges are contractual" (unqualified) | **NARROW IT** | GAIE requires the metric *types and semantics*, explicitly not the names, and the proposal is marked *Partially implemented*. See Q7. |
 | "Serving beats offline" (unqualified) | **NARROW IT** | 1.19× is vision, one model, one GPU class. Text short-run showed offline winning 1.76× before the slow-start fix. See Q2. |

@@ -1,8 +1,8 @@
 # DECISIONS.md — build decisions (kickoff 2026-07-27)
 
-Confirmed at kickoff (Daniel, 2026-07-27, Slack-thread-day). Source lineage: the 14 staged
-sprint decisions (vault: `pumpjack-clean-poc-proposal-2026-07-17` §9 + project note items
-11–14), amended by the prior-art deep dive and the validation-thread replies. POC = oracle,
+Confirmed at kickoff (2026-07-27). Source lineage: the 14 staged sprint decisions
+(internal planning notes), amended by the prior-art deep dive and the
+validation-thread replies. POC = oracle,
 not substrate: `pumpjack-poc` is frozen; this repo is judged by `pumpjack-oracle` (9 tests).
 
 | # | Decision | Resolution |
@@ -19,9 +19,9 @@ not substrate: `pumpjack-poc` is frozen; this repo is judged by `pumpjack-oracle
 | 10 | Schemas | Telemetry v1 = 8 core + `tok_s`/`kv`/`hits`/`preempts`; Stats v1 = POC 11 keys + `breaker_opens`. Frozen in CONTRACT §6–7 |
 | 11 | Recipes | uv-scripts stay static mini-pumps; pilot = lighton-ocr2 transport swap, gate: name + CONTRACT + pilot green. Not this build |
 | 12 | Micro-batch-as-row | **PROVEN LIVE for embeddings** (64/req vLLM, 32/req TEI — array input is OpenAI-spec and effectively universal on `/v1/embeddings`). Route matrix (2026-07-28): `/embeddings` universal · `/completions` accepts `prompt: [list]` on vLLM+SGLang → a cheap high-rate escape for base-model workloads, worth trying BEFORE the in-process transport · `/chat/completions` never batches (spec: one conversation/request; `n`=samples) → chat keeps the in-process case alive |
-| 13 | Embeddings/TEI | DEFER. Alvaro (2026-07-27): TEI router is **token-based** (`--max-batch-tokens`, opt. `--max-batch-requests`); `/embed` takes string or list → batch-per-request natively supported; right admission unit is likely tokens. TEI dialect gauge ready when needed: `te_queue_size` (canonical KEDA signal). Ref: his FineWiki/Cloud Run example (hf.co/docs/google-cloud) |
+| 13 | Embeddings/TEI | DEFER. TEI-side steer (2026-07-27): TEI router is **token-based** (`--max-batch-tokens`, opt. `--max-batch-requests`); `/embed` takes string or list → batch-per-request natively supported; right admission unit is likely tokens. TEI dialect gauge ready when needed: `te_queue_size` (canonical KEDA signal). Ref: the TEI FineWiki/Cloud Run example (hf.co/docs/google-cloud) |
 | 14 | Pacer | DEFER post-v1; seams only (header-dialect slot, 429 taxonomy in controller) |
-| 15 | In-process async transports | Harry (2026-07-27): "use AsyncLLM, manage concurrency with asyncio, skip /metrics." SGLang parallel: `sgl.Engine.async_generate`. Verdict: **transport option, not redesign** — neither has persistence/resume/admission/remote; `Transport` is a protocol from day 0 (HTTP-only impl in MVP); the adaptive controller is a remote/shared-endpoint thesis, in-process degenerates to a Fixed feed-ahead window |
+| 15 | In-process async transports | Engine-side steer (2026-07-27): use AsyncLLM, manage concurrency with asyncio, skip /metrics. SGLang parallel: `sgl.Engine.async_generate`. Verdict: **transport option, not redesign** — neither has persistence/resume/admission/remote; `Transport` is a protocol from day 0 (HTTP-only impl in MVP); the adaptive controller is a remote/shared-endpoint thesis, in-process degenerates to a Fixed feed-ahead window |
 
 ## Prior-art correction (2026-07-28, DataDesigner recon)
 
@@ -36,7 +36,7 @@ validates the AdaptiveLimiter layering.
 
 ## Thread receipts informing the design (2026-07-27)
 
-- **vLLM PR #48757, Harry's own benchmark comment (read in full 2026-07-27)**: residual-add+RMSNorm
+- **vLLM PR #48757, the author's benchmark comment (read in full 2026-07-27)**: residual-add+RMSNorm
   fusion gives **+18.3% tok/s / −15.7% TPOT at concurrency 32, and no measurable gain in an
   UNCAPPED 1000-prompt run** (noise ±34%) — FlashInfer's allreduce fusion has a 51-token size gate
   on SM90/TP8, so *which kernels run depends on the concurrency the client picks*. Cross-hardware
@@ -45,11 +45,11 @@ validates the AdaptiveLimiter layering.
   is non-monotonic and unknowable in advance → runtime delivered-throughput watching is the only
   general answer. Decision 5's receipt, from a vLLM maintainer's bench.
   **Bench rule banked from the same comment**: `--dataset-name random` regenerates identical
-  prompts (his prefix-cache hit rate climbed 20%→98% across trials) — Tier 1/2 runs use unique
-  prompts or disable prefix caching on both arms.
-- Julien: "find a good catchy name and then we'll build an official UI for it" → the wrapper
-  seam in CONTRACT ("The wrapper seam") is the interface that UI builds on.
-- Quentin: datatrove-rebranding/home suggestion → position held: lightweight primitive datatrove
+  prompts (the reported prefix-cache hit rate climbed 20%→98% across trials) — Tier 1/2 runs use
+  unique prompts or disable prefix caching on both arms.
+- Product steer: name first, then an official UI built on it → the wrapper seam in CONTRACT
+  ("The wrapper seam") is the interface that UI builds on.
+- A datatrove-home suggestion was raised → position held: lightweight primitive datatrove
   can *build on*, not built inside (interop via the storage contract + `completions/` convention).
 
 ## Deviations from staged defaults
@@ -80,7 +80,9 @@ Tier 2 (~$30–50) is sprint-week material, flagged before spend.
 
 - [ ] Docstring de-storying: strip design-history references from code (keep constraints,
       move stories here / RESULTS). After the Codex fix-diff re-review closes.
-- [ ] Scrub `docs/history/` + this file for internal thread quotes/names before flipping public.
+- [x] Scrub `docs/history/` + this file for internal thread quotes/names (done 2026-07-28,
+      codex-r3 branch; originals preserved in internal notes + git history — squash/rewrite
+      history before flipping public).
 - [ ] why.md: replace the two second-hand rows (Ray Data, Daft) with directly-fetched sources.
 - [ ] Daniel voice pass on README + why.md (writing-review).
 - [ ] PyPI name registration; decide public-repo timing vs the embeddings showcase.

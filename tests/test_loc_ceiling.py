@@ -1,6 +1,8 @@
-"""Decision 1: the package stays small. Ceiling enforced in CI (docs/decisions.md
-records the 800 figure and the renegotiation rule — trim at M3, don't delete
-docstrings to sneak under)."""
+"""Decision 1: the package stays small. The ceiling is a feature-creep tripwire,
+not a line budget: it exists to force a documented decision before new surface
+area (a fourth building block, a DAG layer) lands — never to squeeze correctness
+fixes or make comments fight for space. When a legitimate fix trips it, raise it
+and record why in docs/decisions.md; don't golf docstrings to sneak under."""
 
 from pathlib import Path
 

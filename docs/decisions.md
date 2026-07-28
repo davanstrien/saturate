@@ -59,8 +59,12 @@ validates the AdaptiveLimiter layering.
   lacked. Enforced in CI; renegotiate downward after M3 trims, not by deleting docstrings.
 - **Renegotiated to 1120 (2026-07-28, 4th)**: codex round-3/4 correctness fixes (fatal-abort
   path, schema pinning, retry-budget deadline, teardown/leak guards, input validation).
-  Round 3 landed inside 1100; round 4's blockers needed ~+10. Reliability fixes are exactly
-  what the ceiling must not squeeze out — but they still pay the toll here, in the open.
+  **Intent clarified with this bump (owner steer)**: the ceiling is a *feature-creep
+  tripwire* — it forces a documented decision before new surface area lands (a fourth
+  building block, DAG authoring, live-cluster features). It is NOT a line budget:
+  correctness fixes, input validation, and honest comments never need to golf against it —
+  just raise it and record why. Trips should be read as "is this new scope?", not "find
+  lines to delete".
 - **Renegotiated to 1100 (2026-07-28 PM)**: +10 for the `completions/stats-{n}.json` sidecar
   (console-gap findings G2/G5 from the UI POC — exact counts + shard geometry for
   storage-only readers). Prior step was 1050 for probe-and-revert.

@@ -12,6 +12,7 @@ manifest, overwrites are idempotent; failed rows leave no record (they retry).
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 import uuid
@@ -136,9 +137,16 @@ class FileSink:
         return {p.name.removesuffix(self.ext) for p in self.dir.glob(f"*{self.ext}")}
 
     def append(self, record: dict) -> None:
-        if record.get("error") is None:
-            (self.dir / f"{record['id']}{self.ext}").write_text(str(record[self.key]))
-            self.rows_written += 1
+        if record.get("error") is not None:
+            return
+        id_ = str(record["id"])
+        if not id_ or id_ != Path(id_).name or id_.startswith("."):  # ids become filenames;
+            # dotfiles are also invisible to existing_ids' glob, silently breaking resume
+            raise ValueError(f"FileSink: id {id_!r} is not a safe filename")
+        tmp = self.dir / f".{id_}{self.ext}.tmp"  # dot-prefix + .tmp: never matches existing_ids
+        tmp.write_text(str(record[self.key]))
+        os.replace(tmp, self.dir / f"{id_}{self.ext}")  # atomic: no truncated files on crash
+        self.rows_written += 1
 
     def flush(self) -> None:
         pass  # write-through

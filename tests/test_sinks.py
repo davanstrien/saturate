@@ -18,6 +18,21 @@ def test_filesink_resume_roundtrip(tmp_path):
     assert (tmp_path / "out" / "a.md").read_text() == "# A2"
 
 
+def test_filesink_rejects_unsafe_ids_and_writes_atomically(tmp_path):
+    """Codex r3 #3/#15: ids become filenames — traversal/dotfile ids must raise
+    (never write outside the dir or invisibly to resume); writes are atomic."""
+    import pytest
+
+    sink = FileSink(tmp_path / "out")
+    for bad in ("../evil", "a/b", "", ".", "..", ".hidden"):
+        with pytest.raises(ValueError, match="not a safe filename"):
+            sink.append({"id": bad, "text": "x", "error": None})
+    assert not (tmp_path / "evil.txt").exists()
+    sink.append({"id": "ok", "text": "x", "error": None})
+    assert sink.existing_ids() == {"ok"}
+    assert not list((tmp_path / "out").glob("*.tmp"))  # atomic replace leaves no temp files
+
+
 def test_read_output_healing_rule(tmp_path):
     rows = [
         {"id": "x", "out": None, "error": "transport: boom"},   # healed later

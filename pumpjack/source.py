@@ -15,10 +15,20 @@ import json
 from collections.abc import Iterable, Iterator
 
 
+def _reject_non_json(o):
+    raise TypeError(
+        f"row contains a non-JSON value ({type(o).__name__}) — its str() is not stable "
+        "across runs, so a content id would break resume. Pass (id, row) tuples, "
+        "id_key=, or id_fn= for rows carrying objects (images, audio, tensors)."
+    )
+
+
 def content_id(row: dict, keys: list[str] | None = None) -> str:
-    """Stable 16-hex content hash of the row (or of `keys` fields only)."""
+    """Stable 16-hex content hash of the row (or of `keys` fields only).
+    Strict by design: refuses non-JSON values rather than hashing an unstable
+    repr (a PIL image's str() embeds its memory address)."""
     src = {k: row[k] for k in keys} if keys else row
-    blob = json.dumps(src, sort_keys=True, default=str, ensure_ascii=False)
+    blob = json.dumps(src, sort_keys=True, default=_reject_non_json, ensure_ascii=False)
     return hashlib.sha1(blob.encode()).hexdigest()[:16]
 
 

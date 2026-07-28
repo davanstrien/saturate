@@ -143,7 +143,9 @@ async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
             stats.rows_processed += 1
             stats.prompt_tokens += done.usage.get("prompt_tokens", 0)
             stats.completion_tokens += done.usage.get("completion_tokens", 0)
-            sink.append({"id": done.id, **done.out, "error": None})
+            # id/error are reserved columns and ALWAYS win over parse output —
+            # a parse returning e.g. the OpenAI response id must not break resume
+            sink.append({**done.out, "id": done.id, "error": None})
         else:
             stats.rows_failed += 1
             sink.append({"id": done.id, "error": done.error})

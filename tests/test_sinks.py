@@ -52,3 +52,42 @@ def test_skip_done_with_external_set():
     kept = [i for i, _ in skip_done(iter(rows), done={"a"}, stats=stats)]
     assert kept == ["b", "c"]
     assert (stats.rows_total, stats.rows_done_prior, stats.rows_deduped) == (4, 1, 1)
+
+
+def test_reserved_columns_win_over_parse(tmp_path):
+    """Codex finding #2: parse returning its own 'id' must not break resume."""
+    import asyncio
+
+    from pumpjack import ParquetSink
+    from pumpjack.core import Done
+    from pumpjack.sink import drain
+
+    async def results():
+        yield Done("row-1", {}, {"id": "chatcmpl-xyz", "text": "hi"}, None, {})
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    asyncio.run(drain(results(), sink))
+    assert sink.existing_ids() == {"row-1"}
+
+
+def test_content_id_rejects_objects():
+    """Codex finding #3: unstable reprs must be refused, not silently hashed."""
+    import pytest
+
+    from pumpjack.source import content_id
+
+    class FakeImage:
+        pass
+
+    with pytest.raises(TypeError, match="non-JSON"):
+        content_id({"image": FakeImage()})
+
+
+def test_retry_after_http_date():
+    """Codex finding #6: RFC 9110 HTTP-date form."""
+    from pumpjack.transport import _parse_retry_after
+
+    assert _parse_retry_after("3.5") == 3.5
+    assert _parse_retry_after(None) is None
+    assert _parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT") == 0.0  # past date clamps
+    assert _parse_retry_after("not-a-date") is None

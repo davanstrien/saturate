@@ -62,6 +62,7 @@ class Breaker:
         self.threshold, self.probe_interval, self.max_open_s = threshold, probe_interval, max_open_s
         self.consecutive = 0
         self.opens = 0
+        self.dead = False  # set when max_open_s expires: every gate raises, run ends
         self._open = False
         self._closed = asyncio.Event()
         self._closed.set()
@@ -77,9 +78,12 @@ class Breaker:
         pauses the whole pump, not just new rows. One caller probes; the rest
         wait on the close event (no double-counted opens)."""
         while True:
+            if self.dead:
+                raise RuntimeError(
+                    f"circuit breaker gave up after {self.max_open_s}s — server is not coming back")
             if self._open:
                 await self._closed.wait()
-                continue  # re-check: the breaker may have re-opened
+                continue  # re-check: the breaker may have re-opened (or died)
             if self.consecutive < self.threshold:
                 return
             break  # we are the opener (no await between check and set: atomic)
@@ -89,20 +93,24 @@ class Breaker:
         print(f"[pump] circuit OPEN after {self.consecutive} consecutive 5xx/transport "
               "failures — pausing admission, probing", file=sys.stderr, flush=True)
         opened = time.monotonic()
-        while True:
-            if time.monotonic() - opened > self.max_open_s:
-                raise RuntimeError(f"circuit breaker open for {self.max_open_s}s — server is not coming back")
-            try:
-                r = await client.post(probe_url, json={"model": "readiness-probe", "messages": [
-                    {"role": "user", "content": "hi"}], "max_tokens": 1}, timeout=30)
-                if r.status_code < 500:
-                    break
-            except (httpx.TimeoutException, httpx.TransportError):
-                pass
-            await asyncio.sleep(self.probe_interval)
-        self.consecutive = 0
-        self._open = False
-        self._closed.set()
+        try:
+            while True:
+                if time.monotonic() - opened > self.max_open_s:
+                    self.dead = True  # waiters released below; they raise on re-check
+                    raise RuntimeError(
+                        f"circuit breaker open for {self.max_open_s}s — server is not coming back")
+                try:
+                    r = await client.post(probe_url, json={"model": "readiness-probe", "messages": [
+                        {"role": "user", "content": "hi"}], "max_tokens": 1}, timeout=30)
+                    if r.status_code < 500:
+                        break
+                except (httpx.TimeoutException, httpx.TransportError):
+                    pass
+                await asyncio.sleep(self.probe_interval)
+            self.consecutive = 0
+        finally:
+            self._open = False
+            self._closed.set()  # NEVER strand waiters — even when the opener raises
         print("[pump] circuit CLOSED — server responding again, resuming admission",
               file=sys.stderr, flush=True)
 
@@ -147,9 +155,24 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
         elif 400 <= r.status_code < 500:
             return None, f"http {r.status_code}: {r.text[:300]}"  # poison, no retry, no breaker
         else:
+            events["backpressure"] += 1  # intermittent 5xx IS server pressure (Codex #5)
             breaker.fail()
         if attempt == 4 or not budget_left():
             return None, f"http {r.status_code} after retries"
-        ra = float(retry_after) if retry_after and retry_after.replace(".", "").isdigit() else None
-        await backoff(ra)
+        await backoff(_parse_retry_after(retry_after))
     return None, "unreachable"
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Retry-After is either delta-seconds or an HTTP-date (RFC 9110)."""
+    if not value:
+        return None
+    if value.replace(".", "").isdigit():
+        return float(value)
+    try:
+        from email.utils import parsedate_to_datetime
+
+        dt = parsedate_to_datetime(value)
+        return max(0.0, dt.timestamp() - time.time())
+    except (TypeError, ValueError):
+        return None

@@ -181,9 +181,11 @@ async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]],
                   route: str = "/chat/completions") -> AsyncIterator[Done]:
     """(id, row) stream -> Done stream, in completion order, adaptively concurrent.
 
-    The feeder runs ahead of completions by at most ~2x the current window, so a
-    100M-row source never materializes; source wait time is reported to the
-    limiter so input-bound detection keeps working.
+    The feeder runs ahead of completions by at most ~2x the current window, so
+    row PAYLOADS never materialize. Honest bound: the id SETS are in-memory —
+    resume holds the done-set and dedup holds admitted ids (~60B/id: fine to
+    ~10M rows, plan shard-scoped done-sets beyond that). Source wait time is
+    reported to the limiter so input-bound detection keeps working.
     """
     queue: asyncio.Queue = asyncio.Queue()
     tasks: set[asyncio.Task] = set()  # strong refs: asyncio only weak-refs tasks

@@ -18,6 +18,21 @@ def test_filesink_resume_roundtrip(tmp_path):
     assert (tmp_path / "out" / "a.md").read_text() == "# A2"
 
 
+def test_filesink_rejects_unsafe_ids_and_writes_atomically(tmp_path):
+    """Codex r3 #3/#15: ids become filenames — traversal/dotfile ids must raise
+    (never write outside the dir or invisibly to resume); writes are atomic."""
+    import pytest
+
+    sink = FileSink(tmp_path / "out")
+    for bad in ("../evil", "a/b", "", ".", "..", ".hidden"):
+        with pytest.raises(ValueError, match="not a safe filename"):
+            sink.append({"id": bad, "text": "x", "error": None})
+    assert not (tmp_path / "evil.txt").exists()
+    sink.append({"id": "ok", "text": "x", "error": None})
+    assert sink.existing_ids() == {"ok"}
+    assert not list((tmp_path / "out").glob("*.tmp"))  # atomic replace leaves no temp files
+
+
 def test_read_output_healing_rule(tmp_path):
     rows = [
         {"id": "x", "out": None, "error": "transport: boom"},   # healed later
@@ -44,6 +59,227 @@ def test_mixed_success_error_parts_union(tmp_path):
     t = ds.dataset(parts, format="parquet").to_table()
     recs = {r["id"]: r for r in t.to_pylist()}
     assert recs["ok1"]["error"] is None and recs["bad1"]["error"].startswith("http 400")
+
+
+def test_error_row_first_keeps_success_columns(tmp_path):
+    """Codex r3 #2: from_pylist takes the schema from row 0 — an error row at
+    the head of a batch must not silently drop later success columns."""
+    from pumpjack import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=2)
+    sink.append({"id": "bad", "error": "http 400: nope"})
+    sink.append({"id": "ok", "text": "hi", "error": None})
+    part = sorted(tmp_path.glob("part-*.parquet"))[0]
+    recs = {r["id"]: r for r in pq.read_table(part).to_pylist()}
+    assert recs["ok"]["text"] == "hi" and recs["bad"]["text"] is None
+
+
+def test_null_first_then_typed_column_evolves(tmp_path):
+    """Codex r4/r5 blocker #1: all-null columns are dropped from their part
+    (sparse, §1) so a later real type — string OR float — can never conflict
+    with a premature guess already on disk. read_output unifies across parts."""
+    from pumpjack import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "a", "text": None, "score": None, "error": None})  # part 1: sparse {id,error}
+    sink.append({"id": "b", "text": "hi", "score": 1.5, "error": None})   # part 2: real types appear
+    sink.append({"id": "c", "error": "http 400: nope"})                   # part 3: error-only
+    for part in tmp_path.glob("part-*.parquet"):
+        pq.read_table(part)  # every part individually readable, no null/typed conflicts
+    got = dict(read_output(str(tmp_path)))
+    assert got == {"a": {}, "b": {"text": "hi", "score": 1.5}}
+
+
+def test_declared_schema_is_stable_in_any_order(tmp_path):
+    """Codex r5 blocker #1: a declared schema is the fully-stable option — every
+    part frames to it (missing fields null), whatever order rows arrive in."""
+    import pyarrow.dataset as ds
+    import pytest
+
+    from pumpjack import ParquetSink
+
+    schema = pa.schema([("id", pa.string()), ("error", pa.string()),
+                        ("text", pa.string()), ("score", pa.float64())])
+    sink = ParquetSink(str(tmp_path), flush_every=1, schema=schema)
+    sink.append({"id": "e", "error": "http 400: nope"})                  # error-only first
+    sink.append({"id": "a", "score": None, "error": None})               # null before type
+    sink.append({"id": "b", "text": "hi", "score": 1.5, "error": None})  # full row last
+    parts = sorted(str(p) for p in tmp_path.glob("part-*.parquet"))
+    t = ds.dataset(parts, format="parquet").to_table()
+    assert t.schema.field("score").type == pa.float64() and len(t) == 3
+    with pytest.raises(ValueError, match="outside the declared schema"):
+        sink.append({"id": "x", "surprise": 1, "error": None})
+        sink.flush()
+    with pytest.raises(ValueError, match="id and error"):
+        ParquetSink(str(tmp_path), schema=pa.schema([("text", pa.string())]))
+
+
+def test_declared_type_mismatch_becomes_error_row(tmp_path):
+    """Codex r6 blocker #1: declared score: float64 + {'score': 'not-a-number'}
+    previously passed the inferred-schema probe, counted as processed, then
+    died at flush with no record. The probe now validates against the DECLARED
+    schema; overflow ints and extra fields are error rows too."""
+    import asyncio
+
+    from pumpjack import ParquetSink
+    from pumpjack.core import Done
+    from pumpjack.sink import drain
+
+    schema = pa.schema([("id", pa.string()), ("error", pa.string()), ("score", pa.float64())])
+
+    async def results():
+        yield Done("bad-type", {}, {"score": "not-a-number"}, None, {})
+        yield Done("bad-overflow", {}, {"score": 10**1000}, None, {})
+        yield Done("bad-extra", {}, {"score": 1.0, "surprise": 1}, None, {})
+        yield Done("good", {}, {"score": 1.5}, None, {})
+
+    sink = ParquetSink(str(tmp_path), flush_every=1, schema=schema)
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (1, 3)
+    assert sink.existing_ids(retry_errors=True) == {"good"}  # bad rows durable + healable
+
+
+def test_declared_schema_requires_contract_types(tmp_path):
+    """Codex r6 blocker #1: declared id/error must satisfy the contract."""
+    import pytest
+
+    from pumpjack import ParquetSink
+
+    with pytest.raises(ValueError, match="must be string"):
+        ParquetSink(str(tmp_path), schema=pa.schema([("id", pa.int64()), ("error", pa.string())]))
+
+
+def test_declared_schema_rejects_nonnullable_user_fields(tmp_path):
+    """Codex r7 #1: error rows write user fields as null — a declared
+    non-nullable field would crash the Parquet write with no durable record."""
+    import pytest
+
+    from pumpjack import ParquetSink
+
+    with pytest.raises(ValueError, match="nullable"):
+        ParquetSink(str(tmp_path), schema=pa.schema([
+            ("id", pa.string()), ("error", pa.string()),
+            pa.field("score", pa.float64(), nullable=False)]))
+
+
+def test_declared_schema_error_row_is_durable(tmp_path):
+    """Codex r7 #1: an ordinary error Done under a declared schema must land as
+    a durable sparse error row."""
+    import asyncio
+
+    from pumpjack import ParquetSink
+    from pumpjack.core import Done
+    from pumpjack.sink import drain
+
+    schema = pa.schema([("id", pa.string()), ("error", pa.string()), ("score", pa.float64())])
+    sink = ParquetSink(str(tmp_path), flush_every=1, schema=schema)
+    asyncio.run(drain(iter_async([Done("x", {}, None, "http 500 after retries", {})]), sink))
+    assert sink.existing_ids() == {"x"}
+
+
+def iter_async(items):
+    async def gen():
+        for x in items:
+            yield x
+    return gen()
+
+
+def test_generic_sink_not_subject_to_arrow_rules(tmp_path):
+    """Codex r7 #2: FileSink str()s its values — a stringable object its own
+    append() can persist must NOT be rejected by an Arrow probe it never asked
+    for (validation belongs to sinks that supply probe())."""
+    import asyncio
+
+    from pumpjack.core import Done
+    from pumpjack.sink import drain
+
+    class Rendered:
+        def __str__(self):
+            return "# rendered"
+
+    sink = FileSink(tmp_path / "out", ext=".md", key="markdown")
+    stats = asyncio.run(drain(iter_async([Done("a", {}, {"markdown": Rendered()}, None, {})]), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (1, 0)
+    assert (tmp_path / "out" / "a.md").read_text() == "# rendered"
+
+
+def test_dynamic_type_change_raises_at_flush(tmp_path):
+    """Codex r6 blocker #4: int64 -> double was permissively widened only in
+    the NEW part, breaking multi-part reads while CONTRACT §8 promised a raise.
+    Strict unify makes the documented behavior true."""
+    import pytest
+
+    from pumpjack import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "a", "score": 1, "error": None})
+    with pytest.raises((TypeError, ValueError)):
+        sink.append({"id": "b", "score": 1.5, "error": None})
+
+
+def test_schema_rejected_for_custom_sink_objects():
+    """Codex r6 follow-up (fixed now): pump(schema=) must never be silently
+    ignored when the output is a custom sink object."""
+    import pytest
+
+    from pumpjack.sink import as_sink
+
+    class Custom:
+        def existing_ids(self, retry_errors=False):
+            return set()
+
+        def append(self, r):
+            pass
+
+        def flush(self):
+            pass
+
+    with pytest.raises(ValueError, match="pass it to your sink"):
+        as_sink(Custom(), schema=pa.schema([("id", pa.string()), ("error", pa.string())]))
+
+
+def test_nonserializable_parse_value_becomes_error_row(tmp_path):
+    """Codex r5 blocker #6: {'value': object()} passed the dict check but died
+    at flush with no durable record — must become a healable error row."""
+    import asyncio
+
+    from pumpjack import ParquetSink
+    from pumpjack.core import Done
+    from pumpjack.sink import drain
+
+    async def results():
+        yield Done("bad", {}, {"value": object()}, None, {})
+        yield Done("good", {}, {"value": 1}, None, {})
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (1, 1)
+    assert sink.existing_ids(retry_errors=True) == {"good"}  # bad is healable
+
+
+def test_filesink_rejects_unsafe_ext(tmp_path):
+    """Codex r5: ext lands in filenames and the resume glob."""
+    import pytest
+
+    for bad in ("txt", ".t/xt", "..txt"):
+        with pytest.raises(ValueError, match="unsafe ext"):
+            FileSink(tmp_path / "out", ext=bad)
+
+
+def test_all_null_column_inherits_pinned_type(tmp_path):
+    """Codex r3 #5: an all-null user column in a later part must keep the type
+    pinned at first flush, so cross-part dataset reads stay schema-stable."""
+    import pyarrow.dataset as ds
+
+    from pumpjack import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "a", "text": "hi", "error": None})     # part 1 pins text: string
+    sink.append({"id": "b", "text": None, "error": None})     # part 2: all-null text
+    parts = sorted(str(p) for p in tmp_path.glob("part-*.parquet"))
+    t = ds.dataset(parts, format="parquet").to_table()
+    assert t.schema.field("text").type == pa.string()
+    assert dict(zip(t["id"].to_pylist(), t["text"].to_pylist(), strict=True)) == {"a": "hi", "b": None}
 
 
 def test_skip_done_with_external_set():

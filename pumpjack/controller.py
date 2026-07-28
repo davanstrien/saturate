@@ -36,6 +36,8 @@ def as_obs(obs: Obs | dict) -> Obs:
 
 class Fixed:
     def __init__(self, n: int):
+        if n < 1:
+            raise ValueError(f"Fixed window must be >= 1, got {n}")  # 0 deadlocks admission
         self.n = n
 
     initial = property(lambda self: self.n)
@@ -60,6 +62,8 @@ class Auto:
     def __init__(self, target_waiting: int = 8, initial: int = 16, min_limit: int = 2,
                  max_limit: int = 512, step: int = 8, kv_hi: float = 0.9,
                  hits_lo: float = 0.5, improve: float = 1.05):
+        if min_limit < 1 or max_limit < min_limit or step < 1:
+            raise ValueError("Auto requires 1 <= min_limit <= max_limit and step >= 1")  # 0 deadlocks
         self.lo, self.hi = max(1, target_waiting // 4), target_waiting * 2
         self.min, self.max, self.step = min_limit, max_limit, step
         self.initial = max(min_limit, min(initial, max_limit))  # clamp into [min, max]
@@ -81,7 +85,10 @@ class Auto:
     def _cut(self, limit: int) -> int:
         self._cooldown, self._slow_start = 2, False
         self._probe_from, self._probe_wait = None, 0  # a cut voids any in-flight probe
-        return max(self.min, limit // 2)
+        new = max(self.min, limit // 2)
+        if new < limit:  # scale the baseline WITH the reduction (r5: 3->2 must not halve it) —
+            self._best_tok *= new / limit  # at the floor, flat throughput is not growth
+        return new
 
     def decide(self, obs: Obs | dict, limit: int) -> int:
         obs = as_obs(obs)
@@ -129,6 +136,7 @@ class Auto:
                         self._probe_wait, self._probe_from, self._probe_age = 0, limit, 0
                         return min(self.max, limit + self.step)
             if obs.waiting > self.hi:
+                self._probe_from, self._probe_wait = None, 0  # r5: independent reduction voids probe
                 return max(self.min, limit - self.step)
             return limit
         # blind floor: creep on sustained success unless throughput plateaued.

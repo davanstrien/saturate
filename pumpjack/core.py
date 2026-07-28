@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import sys
 import time
 from collections.abc import AsyncIterator, Callable, Iterable
 
@@ -23,7 +24,7 @@ import httpx2 as httpx
 from pumpjack.controller import Auto, Fixed, Obs
 from pumpjack.signals import HttpScrape, Null
 from pumpjack.telemetry import tick_record
-from pumpjack.transport import Breaker, Request, call_endpoint, coerce_request
+from pumpjack.transport import Breaker, FatalTransportError, Request, call_endpoint, coerce_request
 from pumpjack.window import Window
 
 TICK_S = 2.0
@@ -44,10 +45,21 @@ class _Slot:
     def __init__(self, limiter: AdaptiveLimiter):
         self._l = limiter
 
+    def _check(self):
+        task = self._l._task  # r5: a dead controller fails admissions run-fatally, never row errors
+        if task and task.done() and not task.cancelled() and task.exception() is not None:
+            raise FatalTransportError(f"controller loop died: {task.exception()!r}")
+
     async def __aenter__(self):
+        self._check()  # before queueing on the window...
         t = time.monotonic()
         await self._l.window.acquire()
         self._l._wait["acquire"] += time.monotonic() - t
+        try:
+            self._check()  # ...and after (r6): the controller may have died while we were queued
+        except BaseException:
+            await self._l.window.release()
+            raise
 
     async def __aexit__(self, *exc):
         await self._l.window.release()
@@ -97,14 +109,24 @@ class AdaptiveLimiter:
     async def __aexit__(self, *exc):
         if self._task:
             self._task.cancel()
+            try:
+                await self._task  # a crashed tick loop surfaces here, never dies silently
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                if not exc or exc[0] is None:
+                    raise
+                print("[pump] controller loop also failed (primary exception wins)",
+                      file=sys.stderr, flush=True)  # r5: never mask the body's exception
 
     async def _loop(self):
-        last_tokens = 0
+        last_tokens, t_last = 0, time.monotonic()
         while True:
             await asyncio.sleep(TICK_S)
             gauges = await self.signals.read()
-            tok_s = (self.tokens_total - last_tokens) / TICK_S
-            last_tokens = self.tokens_total
+            now = time.monotonic()  # actual elapsed, not TICK_S: scrape latency skews the rate
+            tok_s = (self.tokens_total - last_tokens) / (now - t_last)
+            last_tokens, t_last = self.tokens_total, now
             total_wait = self._wait["source"] + self._wait["acquire"]
             input_bound = (total_wait > 0 and self._wait["source"] / total_wait > 0.5
                            and self.window.inflight < int(self.window.limit * 0.5))
@@ -155,8 +177,10 @@ class AdaptiveClient:
         return self
 
     async def __aexit__(self, *exc):
-        await self.limiter.__aexit__(*exc)
-        await self._client.aclose()
+        try:
+            await self.limiter.__aexit__(*exc)  # may re-raise a crashed tick loop
+        finally:
+            await self._client.aclose()  # ... which must never leak the HTTP client
 
     @property
     def dialect(self) -> str | None:
@@ -197,9 +221,14 @@ async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]],
         try:
             body, err = await client.post(to_request(row), route)
             if err is None:
-                await queue.put(Done(id_, row, parse(row, body), None, body.get("usage") or {}))
+                out = parse(row, body)
+                if not isinstance(out, dict):  # storage contract: rows are dicts
+                    raise TypeError(f"parse must return a dict, got {type(out).__name__}")
+                await queue.put(Done(id_, row, out, None, body.get("usage") or {}))
             else:
                 await queue.put(Done(id_, row, None, err))
+        except FatalTransportError as e:  # run-fatal: surfaced to the consumer, never a row error
+            await queue.put(e)
         except Exception as e:  # to_request/parse bugs become error results, not lost rows
             await queue.put(Done(id_, row, None, f"client: {type(e).__name__}: {e}"))
 
@@ -230,6 +259,8 @@ async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]],
             except asyncio.TimeoutError:
                 continue
             served += 1
+            if isinstance(item, BaseException):
+                raise item  # fatal transport: abort the pump, no durable error rows
             yield item
         if feed_error:
             raise feed_error[0]
@@ -237,3 +268,4 @@ async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]],
         feeder.cancel()
         for t in tasks:
             t.cancel()
+        await asyncio.gather(feeder, *tasks, return_exceptions=True)  # reap, don't abandon

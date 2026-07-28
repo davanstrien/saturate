@@ -25,14 +25,14 @@ from pumpjack.signals import CEILING_FLAG
 from pumpjack.sink import FileSink, ParquetSink, as_sink, drain, read_output
 from pumpjack.source import content_id, shard_select, skip_done, stream
 from pumpjack.telemetry import advise
-from pumpjack.transport import Request, make_json_request, make_multipart_request
+from pumpjack.transport import FatalTransportError, Request, make_json_request, make_multipart_request
 
 __all__ = [
     "pump", "Stats", "Fixed", "Auto", "Obs", "Engine", "wait_for_health",
     "Request", "make_json_request", "make_multipart_request", "existing_ids",
     "AdaptiveClient", "AdaptiveLimiter", "Done", "through", "stream", "skip_done",
     "drain", "read_output", "ParquetSink", "FileSink", "shard_select", "content_id",
-]
+    "FatalTransportError"]
 __version__ = "0.1.0"
 
 USER_AGENT = f"pumpjack/{__version__}"
@@ -101,17 +101,18 @@ def pump(
     id_key: str | None = None,
     id_fn: Callable | None = None,
     signal_source: str = "auto",  # "auto" (scrape, blind fallback) | "none"
+    schema=None,  # pa.Schema: declared immutable output schema (CONTRACT §8) — else dynamic/sparse
 ) -> Stats:
     return asyncio.run(_pump(rows, to_request, parse, endpoint, output, window, shard,
                              flush_every, read_timeout, route, headers, retry_errors,
-                             id_key, id_fn, signal_source))
+                             id_key, id_fn, signal_source, schema))
 
 
 async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_every,
                 read_timeout, route, extra_headers, retry_errors, id_key, id_fn,
-                signal_source) -> Stats:
+                signal_source, schema=None) -> Stats:
     stats = Stats()
-    sink = as_sink(output, flush_every)
+    sink = as_sink(output, flush_every, schema=schema)
     hdrs = {"User-Agent": USER_AGENT + (" (agent)" if agent_mode() else ""),
             **(extra_headers or {})}
     t0 = time.monotonic()
@@ -146,6 +147,8 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
             sink.write_stats(shard, stats.to_json())
         except Exception as e:
             _log(f"stats write failed (non-fatal): {e}")
+    if hasattr(sink, "write_marker"):  # last: the marker certifies stats/telemetry landed
+        sink.write_marker(shard)
     _log(f"done: {stats.rows_processed} ok, {stats.rows_failed} failed, "
          f"{stats.tokens_per_sec} tok/s, window settled at {stats.final_limit}")
     if agent_mode():

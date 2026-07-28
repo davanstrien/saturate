@@ -13,7 +13,10 @@ Two governing invariants:
   count from the API, a latency we timed, an error string we caught) — never a guess.
   Dollar cost is a reader-side computation from measured tokens × a user-supplied price.
 - **Error rows, not lost rows.** Every admitted row produces exactly one output record —
-  success or error — never nothing. This is what makes resume sound.
+  success or error — never nothing. This is what makes resume sound. One exception, in
+  resume's favor: rows in flight when a run-fatal abort fires (circuit breaker gave up —
+  the server is gone) produce **no** record and are re-admitted on the next run; writing
+  them as errors would make resume skip them forever.
 
 ## 1. Output layout
 
@@ -24,7 +27,7 @@ out/
 │   └── ids-part-{ms}-{uuid8}.parquet      # [id, error] sidecar, 1:1 with its part
 ├── completions/
 │   └── shard-{n}.done                     # per-shard completion markers
-└── telemetry-shard{n}-{ts}.jsonl          # per-run controller trajectory (v1 schema)
+└── telemetry-shard{n}-{ts}-{uuid6}.jsonl  # per-run controller trajectory (v1 schema)
 ```
 
 `out` is a single fsspec URI (local path, `hf://datasets/...`, `hf://buckets/...`).
@@ -43,6 +46,12 @@ out/
 
 Success rows: `{id, <parse columns…>, error: null}`. Error rows: `{id, error}` (sparse — no
 user columns; readers doing strict schema unions should expect nullable user columns).
+Parts are **column-sparse in general**: a column all-null within one flush batch is dropped
+from that part (its type is not yet knowable), so a column first appears in the part where
+it first has a real value. Readers must union schemas across parts (`read_output` does);
+naive first-fragment readers may miss late-appearing columns. For a fixed schema from part
+one, declare it: `pump(schema=...)` / `ParquetSink(schema=...)` — every part is cast to the
+declared schema, missing fields are written as nulls, and unknown fields raise.
 Per-row token/latency columns, when present, are copied verbatim from the response `usage` /
 measured by the client — blank, never guessed. Standard names when written:
 `prompt_tokens`, `completion_tokens`, `latency_s`. Not required in v1.
@@ -53,7 +62,9 @@ measured by the client — blank, never guessed. Standard names when written:
 re-runs**. The v1 default is a **content hash**: `sha1(canonical-JSON of the row's id-relevant
 fields)[:16]`, via `pumpjack.source.content_id(row)` — order-independent, re-shard-safe. A
 caller-designated key column or a global-index id is equally conformant (the contract requires
-the two invariants, not the derivation).
+the two invariants, not the derivation). Scale caveat: 16 hex chars ≈ 64 bits — collision odds
+are negligible at the ~10M-row scale v1 targets (~3×10⁻⁶) but reach coin-flip around 5×10⁹
+rows; beyond that, widen the hash or supply your own ids.
 
 Fan-out: K shards write to one output; each selects its slice by strided assignment
 `keep(idx) = (idx - skip) % world == rank`. Ids derive from row content or global position —
@@ -75,8 +86,13 @@ The done-set is assembled **manifest-first, exactly**:
 3. A part or manifest file that cannot be read is skipped and its rows re-paid (cost:
    ≤ `flush_every` rows of rework — never a hard error, never blocks resume).
 
-A manifest entry without a surviving part still counts as done (the manifest is complete for
-what was flushed; parts-absent is the oracle's probe for manifest-based resume).
+A manifest entry without a surviving part still counts as done: **resume trusts manifests**.
+Consequence: if a part file is deleted or corrupted out-of-band, its rows are neither
+reprocessed (the manifest says done) nor returned by readers (`read_output` skips
+absent/unreadable parts, logging unreadable ones to stderr). To recover such rows, run
+against a fresh output directory — or delete the orphaned `_manifest/ids-*` sidecars,
+accepting up to `flush_every` rows of re-spend per part. (Parts-absent is also the oracle's
+probe for manifest-based resume.)
 
 ## 4. Error rows and healing
 
@@ -95,7 +111,13 @@ what was flushed; parts-absent is the oracle's probe for manifest-based resume).
 `completions/shard-{n}.done` is written when a shard's run function returns normally
 (`{n}` = rank, or `rank * chunks + c` for chunked runs). Markers are **advisory** — a
 coordination convenience (datatrove's convention); resume correctness never depends on them.
-A marker does not certify row-level success. v1 payload: the fixed sentinel `done`.
+A marker does not certify row-level success. v1 payload: the fixed sentinel `done`. The
+marker is written **last** — after the stats and telemetry writes have been *attempted*.
+Sidecar failures are non-fatal (logged to stderr), and short runs produce no telemetry
+ticks, so a marker guarantees ordering, not sidecar presence. Markers are also **sticky
+across reruns** of one output dir (fixed filename, datatrove's convention): during a re-run
+(e.g. `retry_errors`) the previous run's marker stays visible; coordinators that need
+current-run state should read `stats-{n}.json` contents/mtime, not marker existence.
 
 **`completions/stats-{n}.json`** (v1 addition, 2026-07-28): written beside the marker — the
 run's full Stats object plus `rank`/`world`. This is the console-facing exact summary: final
@@ -106,7 +128,8 @@ sinks that don't implement `write_stats`.
 
 ## 6. Telemetry v1 (frozen keys)
 
-One `telemetry-shard{n}-{ts}.jsonl` per run; one object per controller tick (~2s).
+One `telemetry-shard{n}-{ts}-{uuid6}.jsonl` per run; one object per controller tick (~2s).
+The uuid suffix keeps two runs of the same shard within one second from overwriting.
 
 Core (always present): `t` float · `limit` int · `inflight` int · `waiting` int|null ·
 `running` int|null · `bp` int · `ok` int · `input_bound` bool.
@@ -132,9 +155,11 @@ Stats v1 keys (frozen): `rows_total`, `rows_done_prior`, `rows_processed`, `rows
 
 ## 8. Non-guarantees
 
-No output ordering · no dedup beyond `id` · no cross-run schema migration (keep `parse`
-stable per output dir) · one request per row (rollouts/trajectories are a different
-primitive) · no dollar figures in the data.
+No output ordering · no dedup beyond `id` · no schema migration (keep `parse` types stable
+per output dir; without a declared schema, parts are column-sparse (§1) and a same-run type
+change raises at flush rather than writing inconsistent parts — a **declared schema** is
+the only fully stable option for arbitrary output) · one request per row
+(rollouts/trajectories are a different primitive) · no dollar figures in the data.
 
 ## The wrapper seam
 

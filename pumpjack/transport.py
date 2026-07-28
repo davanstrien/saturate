@@ -25,6 +25,10 @@ RETRY_ACTIVE = True  # kill-switch: flip off in tests for determinism
 RETRY_BUDGET_S = 300.0  # total retry wall-clock per row
 
 
+class FatalTransportError(RuntimeError):
+    """Run-level failure (breaker gave up): aborts the run — never a durable row error."""
+
+
 @dataclasses.dataclass
 class Request:
     """Typed request union: json XOR multipart, discriminated by `kind`."""
@@ -79,7 +83,7 @@ class Breaker:
         wait on the close event (no double-counted opens)."""
         while True:
             if self.dead:
-                raise RuntimeError(
+                raise FatalTransportError(
                     f"circuit breaker gave up after {self.max_open_s}s — server is not coming back")
             if self._open:
                 await self._closed.wait()
@@ -97,7 +101,7 @@ class Breaker:
             while True:
                 if time.monotonic() - opened > self.max_open_s:
                     self.dead = True  # waiters released below; they raise on re-check
-                    raise RuntimeError(
+                    raise FatalTransportError(
                         f"circuit breaker open for {self.max_open_s}s — server is not coming back")
                 try:
                     r = await client.post(probe_url, json={"model": "readiness-probe", "messages": [
@@ -117,31 +121,45 @@ class Breaker:
 
 async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
                         events: dict, breaker: Breaker) -> tuple[dict | None, str | None]:
-    """Returns (response_json, error). Poison rows (4xx) never retry."""
+    """Returns (response_json, error). Poison rows (4xx) never retry; multipart is
+    single-attempt (file objects are consumed by the wire — a re-send posts empty bodies).
+    Budget semantics: the FIRST attempt gets the client's full read window (long generations
+    are legitimate); retries get their timeout capped to the remaining budget. Time spent
+    waiting on an open breaker deliberately does NOT consume row budgets — a paused pump
+    that recovers must resume its rows, not fail them all."""
     url = f"{base.rstrip('/')}{req.route}"
     delay, t0 = 1.0, time.monotonic()
 
-    def budget_left() -> bool:
-        return RETRY_ACTIVE and time.monotonic() - t0 < RETRY_BUDGET_S
+    def left() -> float:
+        return RETRY_BUDGET_S - (time.monotonic() - t0)
 
     async def backoff(retry_after: float | None = None) -> None:
         nonlocal delay
-        await asyncio.sleep(retry_after if retry_after is not None else random.uniform(0, delay))
+        wait = retry_after if retry_after is not None else random.uniform(0, delay)
+        await asyncio.sleep(min(wait, max(0.0, left())))
         delay = min(delay * 2, 60.0)
 
     probe_url = f"{base.rstrip('/')}/chat/completions"
+    last_err = "retry budget exhausted"
     for attempt in range(5):
+        if attempt and (not RETRY_ACTIVE or left() <= 0):
+            return None, last_err  # hard wall-clock deadline: no attempt starts past it (r6)
+        g0 = time.monotonic()
         await breaker.gate(client, probe_url)  # an open breaker pauses retries too
+        t0 += time.monotonic() - g0  # r6: breaker-open time never consumes the row budget (docstring)
         try:
             if req.kind == "multipart":
                 r = await client.post(url, data=req.data, files=req.files)
+            elif attempt and RETRY_ACTIVE:  # retries: wall-clock capped to the exact remaining budget
+                r = await asyncio.wait_for(client.post(url, json=req.json, timeout=left()), left())
             else:
                 r = await client.post(url, json=req.json)
-        except (httpx.TimeoutException, httpx.TransportError) as e:
+        except (httpx.TimeoutException, httpx.TransportError, asyncio.TimeoutError) as e:
             events["backpressure"] += 1
             breaker.fail()
-            if attempt == 4 or not budget_left():
-                return None, f"transport: {type(e).__name__}: {e}"
+            last_err = f"transport: {type(e).__name__}: {e}"
+            if attempt == 4 or req.files is not None or not RETRY_ACTIVE:
+                return None, last_err
             await backoff()
             continue
         if r.status_code == 200:
@@ -157,8 +175,9 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
         else:
             events["backpressure"] += 1  # intermittent 5xx IS server pressure
             breaker.fail()
-        if attempt == 4 or not budget_left():
-            return None, f"http {r.status_code} after retries"
+        last_err = f"http {r.status_code} after retries"
+        if attempt == 4 or req.files is not None or not RETRY_ACTIVE:
+            return None, last_err
         await backoff(_parse_retry_after(retry_after))
     return None, "unreachable"
 

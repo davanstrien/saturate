@@ -9,3 +9,4 @@ jobs:
       - run: uv sync
       - run: uv run ruff check .
       - run: uv run pytest tests/ -q
+      - run: uv run --extra hf python -c "from huggingface_hub import HfFileSystem; HfFileSystem()"

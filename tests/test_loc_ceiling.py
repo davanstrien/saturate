@@ -1,16 +1,23 @@
-"""Decision 1: the package stays small. Ceiling enforced in CI (docs/decisions.md
-records the 800 figure and the renegotiation rule — trim at M3, don't delete
-docstrings to sneak under)."""
+"""Decision 1 (amended 2026-07-28, owner steer): the LOC figure is a
+FEATURE-CREEP NOTE, not a gate. This check never fails CI — it warns when the
+package grows past the noted figure, so genuinely new surface area (a fourth
+building block, a DAG layer, live-cluster features) gets a deliberate decision
+and a docs/decisions.md entry. Correctness fixes, validation, and comments are
+never its target: update NOTE alongside the decision entry, don't golf."""
 
+import warnings
 from pathlib import Path
 
-CEILING = 1100  # renegotiated 2026-07-28 (3rd): +stats sidecar (console gaps G2/G5; see docs/decisions.md)
+NOTE = 1222  # last noted size (2026-07-28, codex r5-r7 robustness rounds); see docs/decisions.md
 PKG = Path(__file__).parent.parent / "pumpjack"
 
 
-def test_loc_ceiling():
+def test_loc_note():
     counts = {p.name: sum(1 for line in p.read_text().splitlines() if line.strip())
               for p in sorted(PKG.glob("*.py"))}
     total = sum(counts.values())
-    detail = ", ".join(f"{k}={v}" for k, v in counts.items())
-    assert total <= CEILING, f"package is {total} non-blank LOC (ceiling {CEILING}): {detail}"
+    if total > NOTE:
+        detail = ", ".join(f"{k}={v}" for k, v in counts.items())
+        warnings.warn(f"package grew past the noted {NOTE} non-blank LOC (now {total}): {detail} "
+                      "— new surface area? record a decision in docs/decisions.md and bump NOTE",
+                      stacklevel=1)

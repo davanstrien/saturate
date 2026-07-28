@@ -9,7 +9,8 @@ flight (adaptively — you never pick a concurrency number), retries, crash-safe
 resume. Killing it at any point is fine. Re-running the same command is always safe.
 
 ```bash
-uv pip install pumpjack   # not yet on PyPI — pip install git+https://github.com/davanstrien/pumpjack
+uv pip install 'pumpjack[hf]'   # not yet on PyPI — pip install 'pumpjack[hf] @ git+https://github.com/davanstrien/pumpjack'
+# the [hf] extra pulls huggingface_hub, needed for hf:// output paths; plain pumpjack works for local output
 ```
 
 ## Quickstart: one model, one Job, one dataset
@@ -59,8 +60,11 @@ Notes on what you didn't have to do:
 task-shaped wrappers ("OCR this dataset with model X") belong a layer up — recipe scripts
 and product surfaces build them out of `pump()`; this library stays small underneath them.
 
-(`Engine` boots the server in its own process group, health-gates it properly — health
-checks lie during warm-up, so readiness requires a real completion — and kills it on exit.)
+(`Engine` boots the server in its own process group, health-gates it, and kills it on exit.
+Health checks lie during warm-up, so readiness also POSTs a trial request — but the default
+acceptance is **alive-only**: any response below 500, including 404, counts, because it
+proves the API path parses requests. To gate readiness on your actual workload, pass
+`ready_route=`/`ready_payload=` and `ready_accept=lambda r: r.status_code == 200`.)
 
 ## The composable layer (for building on top — datatrove-shaped stacks, power users)
 
@@ -76,7 +80,7 @@ rows = skip_done(rows, sink)                            # exact resume filter
 
 async with AdaptiveClient(endpoint, window=Auto()) as client:
     results = through(client, rows, to_request, parse)  # unordered async map, adaptive
-    stats = await drain(results, sink)                  # parquet + manifest + markers
+    stats = await drain(results, sink)                  # parquet + manifest (pump() adds markers)
 
 # chaining is just more piping — e.g. OCR then judge:
 #   pages -> through(ocr_client, ...) -> drain(stage1_out)

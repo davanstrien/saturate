@@ -5,9 +5,6 @@ through a model: OCR a corpus of page scans, embed 10M texts, classify, extract,
 translate, synthesize. What comes out is a dataset (resumable parquet you can publish),
 not a pile of responses. Any OpenAI-compatible endpoint in the middle.
 
-> Known as `pumpjack` during development — you'll still see that codename in
-> `docs/history/` and the run receipts in `spikes/`.
-
 You point it at an endpoint you control — a vLLM server you just started, a SGLang Job,
 TEI, an Inference Endpoint — and give it two functions: one that turns a row into a
 request, one that turns a response into output columns. It handles everything between:
@@ -39,6 +36,14 @@ with Engine("lightonai/LightOnOCR-2-1B", engine="vllm") as endpoint:  # vllm | s
         output="hf://datasets/you/results/data",  # or a local path, or hf://buckets/...
     )
 print(stats.rows_processed, stats.tokens_per_sec)
+```
+
+The runnable version is [examples/quickstart.py](examples/quickstart.py) — a
+self-contained uv script (PEP 723) that works the same on your machine and on HF Jobs:
+
+```bash
+hf jobs uv run --image vllm/vllm-openai:latest --flavor a10g-small \
+    --secrets HF_TOKEN examples/quickstart.py
 ```
 
 What lands on disk (real rows from a live run):

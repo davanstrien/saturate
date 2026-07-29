@@ -103,6 +103,15 @@ Tier 2 (~$30–50) is sprint-week material, flagged before spend.
 - [ ] why.md: replace the two second-hand rows (Ray Data, Daft) with directly-fetched sources.
 - [ ] Daniel voice pass on README + why.md (writing-review).
 - [ ] PyPI name registration; decide public-repo timing vs the embeddings showcase.
+- [ ] **Naming (2026-07-29)**: library → `saturate` (6-agent debate + Codex second opinion:
+      CONFIRM-with-cautions; pumpjack killed on live Pumpjack® data-platform trademark).
+      Before the official layer publicly depends on it: trademark counsel pass (note the
+      Newfangled/Eventide "Saturate" audio-plugin asserted mark — distant category, check
+      anyway; that diligence belongs to the product team at absorption time). Docs rule from
+      the review: frame the mechanism as congestion-aware backoff on endpoints YOU control,
+      never load-generation; attribution line: "powered by the open-source davanstrien/saturate
+      library". Layer proposal: "Inference Jobs" (NOT "Inference Pipelines" — transformers
+      pipeline() + AWS SageMaker collision).
 
 ## Console-gap findings (2026-07-28, from the UI POC — storage-only dashboard build)
 

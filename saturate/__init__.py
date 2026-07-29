@@ -34,7 +34,7 @@ __all__ = [
     "AdaptiveClient", "AdaptiveLimiter", "Done", "through", "stream", "skip_done",
     "drain", "read_output", "ParquetSink", "FileSink", "shard_select", "content_id",
     "FatalTransportError", "dataset_rows", "bucket_rows"]
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 USER_AGENT = f"saturate/{__version__}"
 AGENT_ENV_VARS = ("CLAUDECODE", "CODEX_SANDBOX", "AI_AGENT")

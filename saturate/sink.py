@@ -49,10 +49,29 @@ class ParquetSink:
         self._schema: pa.Schema | None = schema  # dynamic mode: pinned/unified across flushes
         self._seq = 0  # per-sink flush counter: sorted(part names) == write order on ms collisions
         self.rows_written = 0
+        # hf:// outputs: ensure the dataset repo / bucket exists (private) at
+        # construction — a fresh output path must not crash existing_ids()
+        # (live failure: RepositoryNotFoundError on a never-created repo). A
+        # typo'd path becomes an empty private repo instead of a hard crash;
+        # exist_ok makes re-runs no-ops. Failure here is logged, not fatal —
+        # the later glob raises with the real story if the repo truly can't exist.
+        if "hf" in getattr(self.fs, "protocol", "") and self.root.startswith(("datasets/", "buckets/")):
+            parts = self.root.split("/")
+            if len(parts) >= 3:
+                repo = f"{parts[1]}/{parts[2]}"
+                try:
+                    from huggingface_hub import HfApi
+
+                    if parts[0] == "datasets":
+                        HfApi().create_repo(repo, repo_type="dataset", private=True, exist_ok=True)
+                    else:
+                        HfApi().create_bucket(repo, private=True, exist_ok=True)
+                except Exception as e:
+                    _log(f"could not ensure output repo {repo}: {e}")
         try:
             self.fs.makedirs(self.root, exist_ok=True)
         except Exception:
-            pass  # HfFileSystem: directories are implicit; repo must already exist
+            pass  # HfFileSystem: directories are implicit beyond the repo itself
 
     def _read_id_error(self, path: str, done: set, failed: set) -> bool:
         try:

@@ -370,3 +370,29 @@ def test_hf_buckets_uri_resolves_offline():
     fs, root = fsspec.url_to_fs("hf://buckets/owner/name/runs/out")
     assert isinstance(fs, HfFileSystem)
     assert root.endswith("buckets/owner/name/runs/out")
+
+
+def test_hf_output_repo_autocreated(tmp_path, monkeypatch):
+    """0.1.1: a fresh hf:// output path must not crash existing_ids() — the sink
+    ensures the dataset repo / bucket exists (private, exist_ok) at construction
+    (live failure: RepositoryNotFoundError from the Slack OCR snippet's first run)."""
+    calls = []
+
+    class FakeApi:
+        def create_repo(self, repo, **kw):
+            calls.append(("repo", repo, kw.get("repo_type"), kw.get("private")))
+
+        def create_bucket(self, repo, **kw):
+            calls.append(("bucket", repo, kw.get("private")))
+
+    import huggingface_hub
+
+    from saturate import ParquetSink
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    ParquetSink("hf://datasets/owner/name/runs/out")
+    ParquetSink("hf://buckets/owner/name/runs/out")
+    assert ("repo", "owner/name", "dataset", True) in calls
+    assert ("bucket", "owner/name", True) in calls
+    ParquetSink(str(tmp_path / "datasets/owner/name"))  # local lookalike: untouched
+    assert len(calls) == 2

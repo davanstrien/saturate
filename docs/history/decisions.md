@@ -103,8 +103,8 @@ Tier 2 (~$30–50) is sprint-week material, flagged before spend.
 - [ ] Docstring de-storying: strip design-history references from code (keep constraints,
       move stories here / RESULTS). After the Codex fix-diff re-review closes.
 - [x] Scrub `docs/history/` + this file for internal thread quotes/names (done 2026-07-28,
-      codex-r3 branch; originals preserved in internal notes + git history — squash/rewrite
-      history before flipping public).
+      codex-r3 branch; originals preserved in internal notes + git history — DONE 2026-07-29:
+      history squashed to a single public root; full history in a private archive repo).
 - [x] why.md: second-hand rows replaced with directly-fetched sources (2026-07-29: Ray docs + eventual.ai blog, quotes verified).
 - [ ] Daniel voice pass on README + why.md (writing-review).
 - [ ] PyPI name registration; decide public-repo timing vs the embeddings showcase.

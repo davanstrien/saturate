@@ -362,8 +362,11 @@ follow. So: the semantics are contractual, the spellings are not. That is exactl
 registry matches both prefix spellings and falls back to blind mode on a 404, rather than
 assuming names are stable.
 
-> Receipt: [history/decisions.md](history/decisions.md) #6; SGLang renamed `sglang:` → `sglang_` in v0.5.4 with no shim and
-> broke its own dashboards (https://github.com/sgl-project/sglang/issues/12618, now closed).
+> Receipt: [history/decisions.md](history/decisions.md) #6; the live demonstration that
+> spellings drift is https://github.com/sgl-project/sglang/issues/12618 — SGLang users saw
+> `sglang_` where the exporter emits `sglang:` (collector-side normalization, not an
+> exporter rename; the fix touched only a Grafana dashboard). Matching both spellings
+> covers whichever form reaches the client.
 
 **Where llm-d actually is.** Two Go/Apache-2.0 repos, both actively developed:
 

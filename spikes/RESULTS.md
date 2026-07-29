@@ -279,3 +279,53 @@ pilot, private — no public PR).
   `skip-before-read: 20 already durable`, then **rows_total=0, elapsed 0.61s** —
   the source filtered by id before reading a single byte. Id-first resume for
   buckets (issue #9's mechanism), end-to-end on Jobs.
+
+## 5. Scale A/B — 1,000 pages (ramp-amortization test, 2026-07-29)
+
+Hypothesis (Daniel): the adaptive window's slow-start handicap amortizes over
+longer runs. Confirmed:
+
+| metric | 100 pages | 1,000 pages |
+|---|---|---|
+| old recipe, inference-only (input pre-materialized) | 0.80 img/s | 0.95 img/s (job 6a69985d) |
+| port, whole pump INCL. inline streaming | 0.72 img/s | **0.955 img/s** (job 6a699859) |
+
+At 10x scale the port matches fixed conc-32 on the old recipe's own metric
+while carrying its input cost inside the number, and finishes faster
+wall-to-wall (17.4 min pump vs 20.1 min processing). 999/1000 + 1 duplicate
+gt_page_id caught by id admission; 0 failures both arms. Port throughput
+3,438 p/h on a10g-small.
+
+Context vs ocrscout's tuned claims (same GPU class, A10G; their numbers from
+the published benchmarks Sebastian's EBDC budget uses): GLM-OCR 2,432 p/h,
+PaddleOCR-VL-1.5 3,789 p/h — our untuned full-page LightOnOCR-2 lands at
+3,438 p/h between them (different models: labeled context, not a claim).
+Same-model GLM-OCR run: job 6a699d86, pending.
+
+## 6. Same-model throughput vs ocrscout's tuned claims (2026-07-29)
+
+Question (Daniel): ocrscout claims heavily-tuned per-model/GPU inference — how
+far off are we? Same GPU class throughout (their A10G = Jobs a10g-small, the
+mapping their own EBDC budget table uses).
+
+| model | mode | p/h | source |
+|---|---|---|---|
+| GLM-OCR, ours | full-page, untuned, incl. inline streaming | **4,776** | job 6a69a31615e81eca66a8da75: 999/1000, 0 failed, 753s, 3,562 tok/s |
+| GLM-OCR, ocrscout | layout pipeline, tuned | 2,432 | their published benchmarks (EBDC table) |
+| PaddleOCR-VL-1.5, ocrscout | tuned | 3,789 | same |
+| LightOnOCR-2, ours | full-page | 3,438 | job 6a699859 (section 5) |
+
+Same-model, same-GPU: **1.96x their tuned GLM number**, with input streaming
+inside our measurement. Caveats: their GLM path is the layout pipeline (region
+detect + region OCR — more work/page, but it IS their tuned path for GLM);
+corpora both BHL-family scans, not the identical sample; their vLLM version
+unknown. Window again pinned at the 48 cap (final_limit=48) — likely further
+headroom; an agent reading stats would raise the cap.
+
+Getting there took two instructive failures, both diagnosed in one read:
+(a) max_tokens=8192 + --max-model-len 8192 -> 400 on every request, 999
+durable error rows carrying the exact server message (job 6a699d86);
+(b) dropping the cap entirely -> GLM declares 131k native context, KV profile
+killed the boot on 24GB (job 6a69a16c). The fix (explicit 16384) is the
+argument for recipe-level [tool.serving] starting values: the invariant needs
+both bounds — above input+max_tokens, below what the card's KV affords.

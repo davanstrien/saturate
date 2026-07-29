@@ -24,7 +24,7 @@ from pumpjack.engine import Engine, wait_for_health
 from pumpjack.signals import CEILING_FLAG
 from pumpjack.sink import FileSink, ParquetSink, as_sink, drain, read_output
 from pumpjack.source import content_id, shard_select, skip_done, stream
-from pumpjack.sources import dataset_rows
+from pumpjack.sources import bucket_rows, dataset_rows
 from pumpjack.telemetry import advise
 from pumpjack.transport import FatalTransportError, Request, make_json_request, make_multipart_request
 
@@ -33,7 +33,7 @@ __all__ = [
     "Request", "make_json_request", "make_multipart_request", "existing_ids",
     "AdaptiveClient", "AdaptiveLimiter", "Done", "through", "stream", "skip_done",
     "drain", "read_output", "ParquetSink", "FileSink", "shard_select", "content_id",
-    "FatalTransportError", "dataset_rows"]
+    "FatalTransportError", "dataset_rows", "bucket_rows"]
 __version__ = "0.1.0"
 
 USER_AGENT = f"pumpjack/{__version__}"

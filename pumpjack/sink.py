@@ -47,6 +47,7 @@ class ParquetSink:
                 raise ValueError(f"declared schema: fields must be nullable (error rows are sparse): {bad}")
         self._declared = schema
         self._schema: pa.Schema | None = schema  # dynamic mode: pinned/unified across flushes
+        self._seq = 0  # per-sink flush counter: sorted(part names) == write order on ms collisions
         self.rows_written = 0
         try:
             self.fs.makedirs(self.root, exist_ok=True)
@@ -99,7 +100,8 @@ class ParquetSink:
     def flush(self) -> None:
         if not self._buf:
             return
-        name = f"part-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}.parquet"
+        name = f"part-{int(time.time() * 1000)}-{self._seq:06d}-{uuid.uuid4().hex[:8]}.parquet"
+        self._seq += 1
         if self._declared is not None:  # declared mode: exact frame — missing fields null, extras raise
             extra = {k for r in self._buf for k in r} - set(self._declared.names)
             if extra:
@@ -109,11 +111,15 @@ class ParquetSink:
         else:
             keys = {k for r in self._buf for k in r}  # union: row 0 alone must not set the schema
             table = pa.Table.from_pylist([{k: r.get(k) for k in keys} for r in self._buf])
-            # dynamic mode writes SPARSE parts (§1/§8): an all-null user column carries no
-            # information and its type is unknowable yet — drop it rather than guess a type
-            # that a later real value (float, list) would then conflict with on disk
+            # an all-null user column with no pinned type yet is unknowable — drop it rather
+            # than guess a type a later real value (float, list) would conflict with on disk.
+            # Once a type IS pinned, the column is kept and materialized below. Residual gap
+            # (§8): a column whose first-ever appearance is all-null stays absent from that
+            # part until its first typed value arrives.
+            known = set(self._schema.names) if self._schema is not None else set()
             table = table.drop_columns([f.name for f in table.schema
-                                        if pa.types.is_null(f.type) and f.name != "error"])
+                                        if pa.types.is_null(f.type) and f.name != "error"
+                                        and f.name not in known])
             if pa.types.is_null(table.schema.field("error").type):  # error is required: pin to string
                 i = table.schema.get_field_index("error")
                 table = table.set_column(i, pa.field("error", pa.string()),
@@ -122,7 +128,14 @@ class ParquetSink:
             # strict unify, since silently widening only the NEW part breaks multi-part reads
             self._schema = (table.schema if self._schema is None else
                             pa.unify_schemas([self._schema, table.schema]))
-            table = table.cast(pa.schema([self._schema.field(n) for n in table.schema.names]))
+            # every part carries the FULL pinned schema — absent or all-null columns become
+            # typed all-null arrays (#12): pyarrow.dataset takes the FIRST fragment's schema
+            # by default, so any part missing a pinned column loses that column for the
+            # whole cross-part read whenever it sorts first
+            for f in self._schema:
+                if f.name not in table.schema.names:
+                    table = table.append_column(f, pa.nulls(len(table), type=f.type))
+            table = table.select(self._schema.names).cast(self._schema)
         with self.fs.open(f"{self.root}/{name}", "wb") as f:
             pq.write_table(table, f, compression="zstd")
         try:  # manifest second: a crash in between leaves an uncovered part -> scanned

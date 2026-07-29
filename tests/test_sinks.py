@@ -282,6 +282,32 @@ def test_all_null_column_inherits_pinned_type(tmp_path):
     assert dict(zip(t["id"].to_pylist(), t["text"].to_pylist(), strict=True)) == {"a": "hi", "b": None}
 
 
+def test_all_null_part_carries_full_pinned_schema(tmp_path, monkeypatch):
+    """#12: with a part-name ms collision, sorted() order was uuid-decided — and the
+    all-null part did not carry the pinned column at all, so first-fragment readers
+    (pyarrow.dataset's default) lost it whenever that part sorted first. Every part
+    must materialize the full pinned schema; the seq counter makes order deterministic."""
+    import pyarrow.dataset as ds
+
+    from pumpjack import ParquetSink
+    from pumpjack import sink as sink_mod
+
+    monkeypatch.setattr(sink_mod.time, "time", lambda: 1_234_567_890.0)  # force the collision
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "a", "text": "hi", "error": None})     # part 1 pins text: string
+    sink.append({"id": "b", "text": None, "error": None})     # part 2: all-null text
+    parts = sorted(str(p) for p in tmp_path.glob("part-*.parquet"))
+    assert len(parts) == 2
+    for p in parts:  # the #12 guarantee: each part individually carries text: string
+        assert pq.read_schema(p).field("text").type == pa.string()
+    for order in (parts, parts[::-1]):  # first-fragment reads survive EITHER order
+        t = ds.dataset(order, format="parquet").to_table()
+        assert dict(zip(t["id"].to_pylist(), t["text"].to_pylist(), strict=True)) == {"a": "hi", "b": None}
+    # seq counter: same-ms parts still sort in write order
+    t = ds.dataset(parts, format="parquet").to_table()
+    assert t["id"].to_pylist() == ["a", "b"]
+
+
 def test_skip_done_with_external_set():
     stats = Stats()
     rows = [("a", {}), ("b", {}), ("b", {}), ("c", {})]

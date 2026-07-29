@@ -142,8 +142,11 @@ def bucket_rows(
     # never a re-parse of the original URI.
     fs, glob_path = fsspec.core.url_to_fs(pattern)
     # ids are relative to the static prefix: everything before the first glob
-    # metacharacter (*, ?, [, {), up to the last path separator
-    m = re.search(r"[*?\[{]", glob_path)
+    # metacharacter, up to the last path separator. The magic set is *, ?, [ —
+    # exactly stdlib glob.magic_check / what AbstractFileSystem.glob supports
+    # (fsspec does NOT brace-expand, so a literal { in a dirname is not magic).
+    # Everything heavier (globbing, IO, URI chaining) is fsspec/HfFileSystem's.
+    m = re.search(r"[*?\[]", glob_path)
     static = glob_path[: m.start()] if m else glob_path
     base_path = static[: static.rfind("/") + 1]
     infos = fs.glob(glob_path, detail=True)

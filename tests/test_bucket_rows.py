@@ -92,6 +92,15 @@ def test_bracket_glob_gets_relative_ids(tmp_path):
     assert [rid for rid, _ in rows] == ["vol1/p1.png", "vol1/p2.png", "vol2/p3.png"]
 
 
+def test_literal_brace_dirname_is_not_magic(tmp_path):
+    d = tmp_path / "scan{raw}"
+    d.mkdir()
+    (d / "page.png").write_bytes(b"pg")
+    rows = list(bucket_rows(f"{d}/*.png"))
+    # fsspec doesn't brace-expand: { is a literal, base must include the dir
+    assert [rid for rid, _ in rows] == ["page.png"]
+
+
 def test_chained_uri_zip(tmp_path):
     import zipfile
 

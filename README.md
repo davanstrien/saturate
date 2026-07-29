@@ -204,6 +204,8 @@ No live clusters: scaling is shards writing to storage.
 
 ## Status
 
+> Status: proof of concept — shared for feedback, not yet a supported library.
+
 Everything in this table has a live receipt — numbers plus job/endpoint ids — in
 [spikes/RESULTS.md](spikes/RESULTS.md):
 

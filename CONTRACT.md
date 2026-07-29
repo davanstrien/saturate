@@ -1,168 +1,139 @@
-# CONTRACT.md — saturate storage protocol (v1, frozen 2026-07-27)
+# CONTRACT.md — saturate storage protocol (v1 — stable, additive changes only)
 
 saturate writes batch-inference results as an **append-only set of parquet parts under one
-output directory**, keyed by a stable `id`. Any process that can read parquet and glob a
-directory can consume, resume, or fan out over that output without importing saturate.
+output directory**, keyed by a stable `id`. This file is the promise that makes the output
+more durable than the tool: anything that can glob a directory and read parquet can consume,
+monitor, or resume a run **without importing saturate** — and the same promise is the seam a
+product layer builds on.
 
-Frozen here: the interface between a run and its durable output. Not frozen: the controller,
-transport retry ladder, engine lifecycle — implementation, free to change.
+What the contract buys, in four properties:
 
-Two governing invariants:
+1. **The output is the interface.** Plain parquet + an `[id, error]` manifest sidecar; no
+   lock-in, no live process to query.
+2. **Resume is a property of the data.** No run state exists outside the output directory;
+   an identical relaunch pays only what isn't durable, exactly-once per id.
+3. **Coordination without a coordinator.** Append-only parts with collision-free names let
+   K writers share one output; progress is readable from storage alone.
+4. **Error rows, not lost rows.** Every admitted row leaves exactly one durable record —
+   success or error, never a gap. Failures are queryable data, and healable.
 
-- **Own measurement, never own prices.** Every written value is an observed fact (a token
-  count from the API, a latency we timed, an error string we caught) — never a guess.
-  Dollar cost is a reader-side computation from measured tokens × a user-supplied price.
-- **Error rows, not lost rows.** Every admitted row produces exactly one output record —
-  success or error — never nothing. This is what makes resume sound. One exception, in
-  resume's favor: rows in flight when a run-fatal abort fires (circuit breaker gave up —
-  the server is gone) produce **no** record and are re-admitted on the next run; writing
-  them as errors would make resume skip them forever.
+Plus one discipline: **record, never guess** — every written value is an observed fact
+(tokens from the API, latency we timed); dollar cost is a reader-side computation.
+
+Stability: additive changes are allowed within v1 (new columns, sidecar files, keys);
+renames, retypes and removals are not. The controller, transport and engine lifecycle are
+implementation — free to change.
 
 ## 1. Output layout
 
 ```
 out/
-├── part-{ms}-{uuid8}.parquet              # append-only data parts, zstd
+├── part-{ms}-{seq}-{uuid8}.parquet        # append-only data parts, zstd
 ├── _manifest/
-│   └── ids-part-{ms}-{uuid8}.parquet      # [id, error] sidecar, 1:1 with its part
+│   └── ids-part-….parquet                 # [id, error] sidecar, 1:1 with its part
 ├── completions/
-│   └── shard-{n}.done                     # per-shard completion markers
-└── telemetry-shard{n}-{ts}-{uuid6}.jsonl  # per-run controller trajectory (v1 schema)
+│   ├── shard-{rank}.done                  # advisory completion marker per shard
+│   └── stats-{rank}.json                  # exact run summary (Stats + rank/world)
+└── telemetry-shard{rank}-….jsonl          # per-tick controller trajectory
 ```
 
 `out` is a single fsspec URI (local path, `hf://datasets/...`, `hf://buckets/...`).
+Part names are globally unique across shards and re-runs without coordination and carry no
+semantics beyond uniqueness (the `{seq}` counter additionally makes same-writer names sort
+in write order). Parts are never mutated or deleted. Each flush writes the part **first**,
+then its manifest sidecar — the manifest is an index; **the parts are the truth**.
 
-- Part names are globally unique across shards and re-runs without coordination; they carry
-  no semantics beyond uniqueness. Parts are never mutated or deleted.
-- Each flush writes the data part **first**, then its manifest sidecar `ids-{partname}` with
-  only the `[id, error]` columns. The manifest is an index; **the parts are the truth**.
-
-### Required columns
+### Columns
 
 | column | type | meaning |
 |---|---|---|
 | `id` | string | globally-unique, stable row key (§2) |
 | `error` | string/null | null on success; diagnostic string on failure |
 
-Success rows: `{id, <parse columns…>, error: null}`. Error rows: `{id, error}` (sparse — no
-user columns; readers doing strict schema unions should expect nullable user columns).
-Parts are **column-sparse in general**: a column all-null within one flush batch is dropped
-from that part (its type is not yet knowable), so a column first appears in the part where
-it first has a real value. Readers must union schemas across parts (`read_output` does);
-naive first-fragment readers may miss late-appearing columns. For a fixed schema from part
-one, declare it: `pump(schema=...)` / `ParquetSink(schema=...)` — every part is cast to the
-declared schema, missing fields are written as nulls, and unknown fields raise.
-Per-row token/latency columns, when present, are copied verbatim from the response `usage` /
-measured by the client — blank, never guessed. Standard names when written:
-`prompt_tokens`, `completion_tokens`, `latency_s`. Not required in v1.
+Success rows: `{id, <parse columns…>, error: null}`. Error rows: `{id, error}` with user
+columns null. Schema stability: once a column's type is first seen, **every subsequent part
+carries the full schema** (absent values as typed nulls); a column whose values are all null
+before its type is ever seen is absent from those early parts, so readers doing strict
+unions should expect nullable user columns. For a fixed schema from part one, declare it —
+`pump(schema=...)` — and every part is cast to it (unknown fields raise). Token/latency
+columns, when present, are copied verbatim from the response `usage` or measured by the
+client — blank, never guessed: `prompt_tokens`, `completion_tokens`, `latency_s`.
 
 ## 2. The id scheme
 
-`id` must be **globally unique** across all shards writing to one output and **stable across
-re-runs**. The v1 default is a **content hash**: `sha1(canonical-JSON of the row's id-relevant
-fields)[:16]`, via `saturate.source.content_id(row)` — order-independent, re-shard-safe. A
-caller-designated key column or a global-index id is equally conformant (the contract requires
-the two invariants, not the derivation). Scale caveat: 16 hex chars ≈ 64 bits — collision odds
-are negligible at the ~10M-row scale v1 targets (~3×10⁻⁶) but reach coin-flip around 5×10⁹
-rows; beyond that, widen the hash or supply your own ids.
-
-Fan-out: K shards write to one output; each selects its slice by strided assignment
-`keep(idx) = (idx - skip) % world == rank`. Ids derive from row content or global position —
-never a per-shard counter.
+`id` must be globally unique across all shards writing to one output and stable across
+re-runs. The default is a content hash of the row via `saturate.source.content_id` —
+order-independent and re-shard-safe; a caller-designated key column or a global-index id is
+equally conformant. Fan-out: each of K shards selects its slice by strided assignment
+(`(idx - skip) % world == rank`); ids derive from row content or global position, never a
+per-shard counter.
 
 ## 3. Resume semantics
 
 Resume is an **anti-join on `id`**: rows whose id already has a durable record are skipped.
-Re-running the same command is always safe. Admission is exactly-once per id *within* a run
-too: a duplicate id later in the same stream is skipped (first admission wins; counted in
-`rows_deduped`) — with content-hash ids this makes identical input rows dedupe for free.
+Re-running the same command is always safe. Admission is also exactly-once per id *within*
+a run (first wins; counted in `rows_deduped` — content-hash ids make identical input rows
+dedupe for free).
 
-The done-set is assembled **manifest-first, exactly**:
+The done-set is assembled **manifest-first, exactly**: read every manifest sidecar; scan any
+part whose sidecar is missing (a crash between part- and manifest-write costs one part of
+scanning, never duplicates); skip-and-re-pay any unreadable file (≤ one flush of rework,
+never a hard error). A manifest entry without a surviving part still counts as done —
+resume trusts manifests; recovering rows from an out-of-band-deleted part means a fresh
+output dir, or deleting its orphaned sidecar.
 
-1. Read every `_manifest/ids-*.parquet`.
-2. Any `part-*.parquet` whose manifest sidecar is missing is scanned individually
-   (`[id, error]` columns only) — so a crash between part-write and manifest-write never
-   produces duplicates, and the fallback cost is one part, not the whole output.
-3. A part or manifest file that cannot be read is skipped and its rows re-paid (cost:
-   ≤ `flush_every` rows of rework — never a hard error, never blocks resume).
-
-A manifest entry without a surviving part still counts as done: **resume trusts manifests**.
-Consequence: if a part file is deleted or corrupted out-of-band, its rows are neither
-reprocessed (the manifest says done) nor returned by readers (`read_output` skips
-absent/unreadable parts, logging unreadable ones to stderr). To recover such rows, run
-against a fresh output directory — or delete the orphaned `_manifest/ids-*` sidecars,
-accepting up to `flush_every` rows of re-spend per part. (Parts-absent is also the oracle's
-probe for manifest-based resume.)
+One exception, in resume's favor: rows in flight when a run-fatal abort fires (the circuit
+breaker gave up — the server is gone) produce **no** record and are re-admitted next run;
+writing them as errors would make resume skip them forever.
 
 ## 4. Error rows and healing
 
 - If `to_request`/`parse` raises or the endpoint fails unrecoverably, saturate writes
   `{id, error: "<diagnostic>"}` — never drops the row.
-- **Reader rule**: healing can produce two records for one id (an old error, a new success).
-  For each id, the record with `error IS NULL` wins; otherwise the row is errored.
-- `retry_errors=True` re-admits only ids whose sole record is an error. Append-only: the old
-  error record remains; the reader rule resolves it.
+- **Reader rule**: a retried error can leave two records for one id. The record with
+  `error IS NULL` wins (that's a **healed** row); otherwise the row is errored.
+- `retry_errors=True` re-admits only ids whose sole record is an error; append-only, the
+  reader rule resolves the pair.
 - **Never mark schema-invalid as success**: an HTTP-200 whose body fails the workload's
-  structural expectation is an error row (`error IS NULL` means *structurally valid for this
-  workload*, not *the call returned 200*).
+  structural expectation is an error row.
 
-## 5. Completion markers
+## 5. Completion markers and stats
 
-`completions/shard-{n}.done` is written when a shard's run function returns normally
-(`{n}` = rank, or `rank * chunks + c` for chunked runs). Markers are **advisory** — a
-coordination convenience (datatrove's convention); resume correctness never depends on them.
-A marker does not certify row-level success. v1 payload: the fixed sentinel `done`. The
-marker is written **last** — after the stats and telemetry writes have been *attempted*.
-Sidecar failures are non-fatal (logged to stderr), and short runs produce no telemetry
-ticks, so a marker guarantees ordering, not sidecar presence. Markers are also **sticky
-across reruns** of one output dir (fixed filename, datatrove's convention): during a re-run
-(e.g. `retry_errors`) the previous run's marker stays visible; coordinators that need
-current-run state should read `stats-{n}.json` contents/mtime, not marker existence.
+`completions/shard-{rank}.done` is written last, when a shard's run returns normally.
+Markers are **advisory** (datatrove's convention — a coordinator can watch the directory);
+resume never depends on them, they don't certify row-level success, and they are sticky
+across re-runs of one output dir — coordinators needing current-run state should read
+`stats-{rank}.json` (the exact final Stats plus `rank`/`world`; telemetry tick sums are
+approximate, stats are exact).
 
-**`completions/stats-{n}.json`** (v1 addition, 2026-07-28): written beside the marker — the
-run's full Stats object plus `rank`/`world`. This is the console-facing exact summary: final
-`rows_processed`/`rows_failed` (telemetry tick sums are approximate — the tail between the
-last tick and completion goes uncounted), and shard geometry so a reader can distinguish
-"all shards finished" from "a shard never started". Advisory like the marker; absent on
-sinks that don't implement `write_stats`.
+## 6. Telemetry (frozen keys)
 
-## 6. Telemetry v1 (frozen keys)
+One `telemetry-…jsonl` per run; one object per controller tick (~2s):
 
-One `telemetry-shard{n}-{ts}-{uuid6}.jsonl` per run; one object per controller tick (~2s).
-The uuid suffix keeps two runs of the same shard within one second from overwriting.
-
-Core (always present): `t` float · `limit` int · `inflight` int · `waiting` int|null ·
-`running` int|null · `bp` int · `ok` int · `input_bound` bool.
-
-v1 additions (present when the signal exists; null/absent otherwise): `tok_s` float
-(delivered tokens/sec this tick — the plateau signal) · `kv` float|null · `hits` float|null ·
-`preempts` int|null.
-
-Additions are allowed within v1; renames/retypes/removals are not.
+| key | meaning |
+|---|---|
+| `t` | seconds since run start |
+| `limit` | the window limit this tick |
+| `inflight` | requests currently in flight |
+| `waiting` / `running` | engine queue gauges (null when blind) |
+| `bp` | backpressure events this tick (saturation-shaped 429/timeout/5xx) |
+| `ok` | requests completed this tick |
+| `input_bound` | true when the source, not the endpoint, is the bottleneck |
+| `tok_s` | delivered tokens/sec this tick (the controller's plateau signal) |
+| `kv` / `hits` / `preempts` | KV-cache utilization · prefix-cache hit rate · scheduler preemptions (when exposed) |
 
 ## 7. Agent contract (stdout / stderr)
 
-- **stdout**: agent mode (env `CLAUDECODE` / `CODEX_SANDBOX` / `AI_AGENT`) emits exactly one
-  line — the run's Stats JSON. Human mode: stdout empty.
-- **stderr**: all human-facing output (progress, advisor hints, the resume hint).
-
-Stats v1 keys (frozen): `rows_total`, `rows_done_prior`, `rows_processed`, `rows_failed`,
-`prompt_tokens`, `completion_tokens`, `elapsed_s`, `final_limit`, `input_bound`,
-`breaker_opens`, `hints`, `tokens_per_sec`. Same addition/no-rename rule as telemetry.
-
-**Idempotent re-run guarantee**: re-running the exact same command is always safe and resumes
-(§3 enforces it); agent mode prints this hint to stderr.
+In agent mode (env `CLAUDECODE`, `CODEX_SANDBOX`, or `AI_AGENT` — set `AI_AGENT=1` to force
+it), **stdout carries exactly one line**: the run's Stats JSON. Everything human-facing
+(progress, advisor hints, the resume hint) goes to stderr. Stats keys (frozen, same additive
+rule): `rows_total`, `rows_done_prior`, `rows_processed`, `rows_failed`, `prompt_tokens`,
+`completion_tokens`, `elapsed_s`, `final_limit`, `input_bound`, `breaker_opens`, `hints`,
+`tokens_per_sec`.
 
 ## 8. Non-guarantees
 
 No output ordering · no dedup beyond `id` · no schema migration (keep `parse` types stable
-per output dir; without a declared schema, parts are column-sparse (§1) and a same-run type
-change raises at flush rather than writing inconsistent parts — a **declared schema** is
-the only fully stable option for arbitrary output) · one request per row
-(rollouts/trajectories are a different primitive) · no dollar figures in the data.
-
-## The wrapper seam
-
-`pump()` is the facade a thin product layer (UI, "Inference Pipelines"-style interface,
-datatrove stage) builds on: rows + two lambdas in, this storage contract out. Transports and
-signal sources are pluggable behind it; the contract above is what stays fixed.
+per output dir; a same-run type change raises at flush; a declared schema is the fully
+stable option) · one request per row (rollouts/trajectories are a different primitive) ·
+no dollar figures in the data.

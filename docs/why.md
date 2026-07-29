@@ -4,8 +4,11 @@ Every claim below carries a receipt: a job id, a source file and line, or a URL.
 no receipt it does not belong here. Where an alternative genuinely wins, that is stated as an
 honest counter rather than argued away.
 
-Receipts written `RESULTS.md §x` refer to `spikes/RESULTS.md` in this repo. External source
-line numbers were read at the commits noted. All verified 2026-07-28.
+Receipt conventions: `RESULTS.md §x` refers to `spikes/RESULTS.md` in this repo;
+`history/…` paths are in `docs/history/`; receipts marked **(internal)** cite the author's
+private measurement notes — those claims are measured but not reproducible from this repo,
+which is a weaker standard and flagged as such. External source line numbers were read at the
+commits noted (mostly 2026-07-28/29).
 
 ---
 
@@ -14,19 +17,34 @@ line numbers were read at the commits noted. All verified 2026-07-28.
 saturate is a client that sits between a row source and any OpenAI-compatible endpoint, decides
 at runtime how many requests to keep in flight, and writes crash-safe resumable parquet.
 
+The short version of every comparison below:
+
+| alternative | verdict in one line | where it wins |
+|---|---|---|
+| vLLM `AsyncLLM` in-process (§1) | same throughput, but no persistence/resume, one engine's API, can't reach remote endpoints | single owned engine, one shot, no resume needed |
+| offline `LLM.generate` (§2) | all-or-nothing output; loses on vision (1.19× for serving) | text, moderate scale, in-memory input |
+| datatrove `InferenceRunner` (§3) | no speed tax — the difference is a hand-tuned fixed semaphore vs an adaptive one; complementary via `AdaptiveLimiter` | multi-stage pipelines, rollouts, executor family |
+| Curator / cookbook script / lm-deluge (§4) | built for published API quotas; against self-hosted engines they fall back to guessed static caps | commercial APIs with real rate-limit headers |
+| Ray Data LLM / Daft (§5) | scale their own worker pools, don't observe the endpoint | heterogeneous CPU+GPU stages, multi-replica clusters |
+| NVIDIA DataDesigner (§6) | adapts, but only *down* from a user cap on 429s — a signal self-hosted engines never send | hosted APIs that actually 429 |
+| llm-d / k8s inference gateways (§7) | same gauges, different layer — platform-scale Go/k8s infrastructure | many tenants, many pods, a cluster you already run |
+| just picking a number (§8) | the right number moves (32↔257 on one GPU), OOMs when too high, idles when too low | fully measured, never-changing single workload |
+| JSONL or a database (§9) | parquet+manifest gives typed arrays, exact resume, any-reader output | a few thousand rows: JSONL is fine |
+| a pipeline/DAG framework (§10) | rows, not nodes, are the recompute unit for billed LLM calls | genuine DAGs: heterogeneous stages, fan-in, branches |
+
 The narrow, defensible version of the novelty claim:
 
 > saturate is the only standalone client whose controller *discovers* endpoint capacity from
 > delivered throughput plus server gauges. Other adaptive clients throttle *down* from a
 > user-supplied cap on rate-limit signals, which self-hosted engines never send.
 
-Do not use the unqualified "nobody adapts" line. It is false — see Q6.
+(The unqualified "nobody adapts" claim is false — see §6 for the alternative that does.)
 
 ---
 
 ## 1. Why not use vLLM's `AsyncLLM` in-process?
 
-The suggestion (raised in internal review by a vLLM maintainer): skip HTTP and `/metrics`
+The suggestion (raised in review by a vLLM maintainer): skip HTTP and `/metrics`
 entirely, drive `AsyncLLM` in-process, manage concurrency with plain asyncio.
 
 **At the throughput level, this is right, and we measured it.** Offline `LLM.generate`,
@@ -59,16 +77,16 @@ max throughput, no crash-resume requirement, no second consumer: in-process is s
 marginally faster, and you should just do it. That is why `Transport` is a protocol from day 0
 and in-process is the reserved post-v1 transport, not a rejected idea.
 
-> Receipt: `DECISIONS.md` #15 — "transport option, not redesign".
+> Receipt: [history/decisions.md](history/decisions.md) #15 — "transport option, not redesign".
 
 **Honest scoping of the adaptive controller.** The controller is a *remote/shared-endpoint*
 thesis. In-process it degenerates to a fixed feed-ahead window, and the spike shows the window
 costs nothing there (windowed ≈ naive), so it is free insurance rather than a win. Separately,
 the client layer only becomes decisive at high request rates: at ~15 req/s, client architecture
-is measurably irrelevant (Q3).
+is measurably irrelevant (§3).
 
 **Caveats on our own spike.** Single run per arm, 0.5B text-only model, short prompts, one A10G.
-Fusion-cliff effects (Q8) will not show at that model size. Do not extrapolate the flatness to
+Fusion-cliff effects (§8) will not show at that model size. Do not extrapolate the flatness to
 large models or to multimodal payloads — and note the spike deliberately did not test the case
 where naive in-process fan-out blows up RSS (1M rows or image payloads held in-process).
 
@@ -82,7 +100,7 @@ the whole answer.
 **Vision workloads: serving beats offline, and we know the mechanism.** Pumping a served endpoint
 ran 1.19× offline `LLM()` on vision OCR, same job, same GPU, same model.
 
-> Receipt: internal evidence ledger (2026-07-17) — 1.19× (v3 clean; 1.26× v2;
+> Receipt: evidence ledger **(internal)**, 2026-07-17 — 1.19× (v3 clean; 1.26× v2;
 > 1.51× v1 superseded), marked launch-grade.
 
 The mechanism is not hand-waved: a `max_tokens=1` probe A/B isolates preprocessing from
@@ -95,7 +113,7 @@ preprocessing with the GPU's work.
 
 Independently, the uv-scripts OCR sweep measured server-mode at 1.2–1.8× offline across recipes.
 
-> Receipt: internal OCR server-mode sweep notes (2026-07-16; uv-scripts PRs #93/#94).
+> Receipt: OCR server-mode sweep notes **(internal)**, 2026-07-16; the shipped recipes are uv-scripts PRs #93/#94.
 
 **All-or-nothing.** `LLM.generate` hands back results when the whole list finishes. Crash at 90%
 and you have nothing. There is no partial-output story and no resume.
@@ -105,7 +123,7 @@ offline ahead by 1.76×. That was a client slow-start artifact and was fixed the
 honest reading stands — for text at moderate scale, in-memory input, and a single owned engine,
 offline is a perfectly good answer and the pump's margin is not the reason to adopt it.
 
-> Receipt: internal evidence ledger (2026-07-17) — "Text short run: offline **wins
+> Receipt: evidence ledger **(internal)**, 2026-07-17 — "Text short run: offline **wins
 > 1.76×** (honest loss → slow-start fix)".
 
 Also honest: the 1.19× is one model, one GPU class, vision. It is not a general "serving is
@@ -122,11 +140,11 @@ found bare-pooled-httpx 163.5s, datatrove-raw 162.4s, datatrove-pooled 162.5s. A
 equally full (effective concurrency ≈ 240/256 in every arm). datatrove's client path costs
 nothing at its normal operating point.
 
-> Receipt: internal datatrove-overhead probe notes (2026-07-17) §GPU A/B — job `6a59f921d216bd6f3a1fad87`,
+> Receipt: datatrove-overhead probe notes **(internal)**, 2026-07-17 §GPU A/B — job `6a59f921d216bd6f3a1fad87`,
 > a100-large, Qwen3.5-4B, 2,500 rows, conc 256, max_tokens 512.
 
 The original 2.8× was almost certainly node contention during a busy overnight fleet run, not
-code. **Never cite a datatrove client tax.** The one reproducible client-overhead finding is
+code. There is no datatrove client tax. The one reproducible client-overhead finding is
 narrow: connect-per-request costs ~1.64× at roughly 3,000 req/s, about 65× above that workload's
 actual rate. At ≤216 req/s the two are identical.
 
@@ -144,7 +162,7 @@ actual rate. At ≤216 req/s the two are identical.
   1×80GB with a big model (sigquit ~90s after memory-pool init, before any generation). 64 is
   safe; 128 verified on a100x4; test one step up at a time. Concurrency bump 64→128 bought only
   1.4× (prefill-bound)."
-  > Receipt: internal datatrove-jobs operational notes.
+  > Receipt: datatrove-jobs operational notes **(internal)**.
   That paragraph is the product case in one quote: a number that OOMs the job if too high,
   under-delivers if too low, must be re-derived per model and per GPU, and is only discoverable
   by hand.
@@ -152,7 +170,7 @@ actual rate. At ≤216 req/s the two are identical.
   `finish_reason`, `usage`. To capture reasoning content, a field the API returns and the
   dataclass drops, we had to fork and add `InferenceResult.reasoning`.
   > Receipt: `datatrove/pipeline/inference/types.py:8-20` @ `9f044f1` (three fields, no
-  > `reasoning`); fork commit `f7df218` via `datatrove-jobs-executor.md`.
+  > `reasoning`); fork commit `f7df218` **(internal fork, not in this repo)**.
   saturate's `parse(row, resp)` sees the raw response body; nothing to fork.
 
 **Complementary, not competitive.** The innermost saturate layer is an adaptive *semaphore*, not
@@ -160,7 +178,7 @@ a client — `AdaptiveLimiter` with `slot()` / `observe()`. Dropping it into dat
 diff in `_send_request` plus a constructor swap, keeping their transport, retries, checkpointing,
 caching and metrics untouched.
 
-> Receipt: `PROPOSAL-functional-core.md` §Plumb-check (verified against a local datatrove
+> Receipt: [history/functional-core-proposal.md](history/functional-core-proposal.md) §Plumb-check (verified against a local datatrove
 > checkout); the seam itself is `saturate/core.py` (`AdaptiveLimiter`).
 
 **Honest counter.** datatrove wins whenever you need what it is: multi-stage pipelines, rollout
@@ -211,7 +229,7 @@ number when latency rises, which is precisely when you want it to fall.
 **lm-deluge / BatchLLM / NeMo Curator** all take user-set limits (NeMo Curator defaults to 5
 in-flight, and its docs tell you to reduce it by hand on 429).
 
-> Receipt: the internal prior-art deep dive (2026-07-27) §5 (source-verified sweep). BatchLLM is
+> Receipt: prior-art deep dive **(internal)**, 2026-07-27, §5 source-verified sweep. BatchLLM is
 > named as prior art extended — it ships fingerprinted checkpoints and per-row token columns.
 
 **Honest counter.** Against a commercial API with a published quota, Curator's model is the
@@ -220,7 +238,7 @@ discovering it by probing burns 429s for no information. That is why rate-limit 
 separate concept (a Pacer over the transport), explicitly deferred rather than folded into the
 controller.
 
-> Receipt: `DECISIONS.md` #14 — "Pacer: DEFER post-v1; seams only".
+> Receipt: [history/decisions.md](history/decisions.md) #14 — "Pacer: DEFER post-v1; seams only".
 
 Curator also has real things we do not: a transparent fingerprinted request cache, structured
 outputs, provider batch-API support, and a much larger user base.
@@ -250,24 +268,24 @@ adapts to endpoint state.
 **Honest counter, and it is a real one.** Ray Data wins the workload a single-loop client cannot
 saturate: heavy CPU-side stages streaming into several GPU replicas concurrently, with
 backpressure between heterogeneous stages and multi-replica management. If that is your shape,
-use Ray. The cost is the Ray universe — multi-GB images, cold-start time, debugging opacity —
+use Ray. The cost is the Ray universe — multi-GB images, cluster cold-start time —
 and you would still be adding endpoint-adaptive concurrency yourself, since Ray does not give it
 to you.
 
-> Receipt: `synthetic-data-library-design.md` §4 Ray-on-Jobs subsection.
+> Receipt: the design survey **(internal)** §4 Ray-on-Jobs subsection.
 
 Also honest: Daft's prefix-bucketing result (50.7% speedup, cache hits 29.2%→~54%; same
 blog post as above, numbers verified against it 2026-07-29) is a real
 batch-only optimization that saturate does not ship. Prefix-grouped admission is on the table,
 not in v1.
 
-> Receipt: `synthetic-data-library-design.md` §1 batch-only optimizations.
+> Receipt: the design survey **(internal)** §1 batch-only optimizations.
 
 ---
 
 ## 6. Why not NVIDIA DataDesigner? It genuinely does adapt.
 
-It does, and an earlier version of our prior-art sweep got this wrong. DataDesigner ships a
+It does. DataDesigner ships a
 runtime-adaptive AIMD admission controller, on by default. Anything that says "no datagen
 framework adapts at runtime" is retired.
 
@@ -305,7 +323,7 @@ still open, last touched 2026-07-22.
 
 A 429-driven controller pointed at vLLM never receives a decrease signal, so it sits at its
 static cap forever. That cap is either too low (you leave throughput on the floor) or too high
-(you queue the engine toward OOM — the failure we actually hit; see Q8).
+(you queue the engine toward OOM — the failure we actually hit; see §8).
 
 **Honest counter, twice over.** Against hosted APIs that *do* 429, DataDesigner's design is
 correct and simpler than ours. And their architecture independently validates ours: they split
@@ -315,7 +333,7 @@ signal reaches the admission loop. That is structurally `AdaptiveLimiter.slot()/
 adopted their outcome-classification lesson — `observe()` takes a classified outcome, not a bare
 bool.
 
-> Receipt: `PROPOSAL-functional-core.md` §NVIDIA DataDesigner; `DECISIONS.md`
+> Receipt: [history/functional-core-proposal.md](history/functional-core-proposal.md) §NVIDIA DataDesigner; [history/decisions.md](history/decisions.md)
 > §Prior-art correction 2026-07-28.
 
 ---
@@ -342,7 +360,7 @@ follow. So: the semantics are contractual, the spellings are not. That is exactl
 registry matches both prefix spellings and falls back to blind mode on a 404, rather than
 assuming names are stable.
 
-> Receipt: `DECISIONS.md` #6; SGLang renamed `sglang:` → `sglang_` in v0.5.4 with no shim and
+> Receipt: [history/decisions.md](history/decisions.md) #6; SGLang renamed `sglang:` → `sglang_` in v0.5.4 with no shim and
 > broke its own dashboards (https://github.com/sgl-project/sglang/issues/12618, now closed).
 
 **Where llm-d actually is.** Two Go/Apache-2.0 repos, both actively developed:
@@ -359,9 +377,8 @@ assuming names are stable.
   > decrease branches and the success branch, read 2026-07-28.
 
 **So the two halves are in different components.** Gauges feed a gate (admit / hold); status
-codes feed the ramp. Nobody feeds the gauges *into* the ramp. That is a sharper and more
-defensible statement than "llm-d does AIMD on scraped metrics", which conflates them — an earlier
-draft of this analysis conflated them; corrected here.
+codes feed the ramp. Nobody feeds the gauges *into* the ramp. "llm-d does AIMD on scraped
+metrics" conflates the two components.
 
 **And it is not something you can `uv run`.** Prerequisites: PostgreSQL 12+, Redis 6+ or Valkey
 8+, and S3-compatible object storage or a filesystem, deployed as separate API server, batch
@@ -375,7 +392,7 @@ for one person with a dataset, an endpoint and a Job. Routing across replicas is
 scope: through a load balancer, per-endpoint gauges are wrong, and the honest behaviour is to
 require a direct endpoint or degrade to blind mode.
 
-> Receipt: internal prior-art deep dive (2026-07-27), engine-side risk list — "Multi-replica LB:
+> Receipt: prior-art deep dive **(internal)**, 2026-07-27, engine-side risk list — "Multi-replica LB:
 > genuinely wrong through an LB".
 
 ---
@@ -438,7 +455,7 @@ work.
 uv-scripts OCR recipes use a fixed concurrency of 32; the same class of workload self-ranged to
 376 in POC testing — roughly 10× headroom that a static recipe simply never claims.
 
-> Receipt: internal sprint notes, item 11 — "the conc-32 vs window-376 gap (~10×
+> Receipt: sprint notes **(internal)**, item 11 — "the conc-32 vs window-376 gap (~10×
 > headroom)".
 
 **(e) It also finds ceilings downward, which is the part people don't expect.** Against vLLM
@@ -506,7 +523,7 @@ any sink satisfying it gets resume. `FileSink` is the second blessed implementat
 row named by id, the filesystem is the manifest, overwrites are idempotent. Non-resumable IO is
 the same protocol with an empty `existing_ids()`.
 
-> Receipt: `PROPOSAL-functional-core.md` open choice #0 (settled); `saturate/sink.py:105`
+> Receipt: [history/functional-core-proposal.md](history/functional-core-proposal.md) open choice #0 (settled); `saturate/sink.py:105`
 > (`FileSink`), `:53` and `:116` (the two `existing_ids` implementations), `:156`
 > (`read_output`).
 
@@ -540,7 +557,7 @@ expensive, non-deterministic and billed, so "recompute the node" is the wrong fa
 the useful recompute granularity is the *row*, which is exactly what an id-keyed append-only
 output gives you.
 
-> Receipt: `synthetic-data-library-design.md` §2 and §5.
+> Receipt: the design survey **(internal)** §2 and §5.
 
 **So composition is plain Python.** `pump()` is a composition of four small stages, and chaining
 two stages is calling `through()` twice, or piping through storage with `read_output()`. No
@@ -548,7 +565,7 @@ scheduler, no graph, no `.compute()`. Persistence points are the composition bou
 `drain()` buys crash-safety and resume for its stage; in-memory chaining is allowed and
 documented as trading away crash granularity.
 
-> Receipt: `PROPOSAL-functional-core.md` §Rules — "itertools, not dask.bag"; `README.md`
+> Receipt: [history/functional-core-proposal.md](history/functional-core-proposal.md) §Rules — "itertools, not dask.bag"; `README.md`
 > §The composable layer.
 
 **Honest counter.** If you have a genuine DAG — heterogeneous CPU and GPU stages, fan-in,
@@ -561,14 +578,17 @@ about saturate.
 
 ---
 
-## Claims retired or refuted — do not use these
+## Appendix: claims from earlier drafts, retired or refuted
+
+Kept public for honesty: if you have seen one of these claims made for this library
+elsewhere, here is its current status.
 
 | Claim | Status | Why |
 |---|---|---|
-| "datatrove's client costs 2.1× / 2.8×" | **REFUTED** | Controlled GPU A/B: 1.00×, all three arms. Cause was node contention. Receipt: internal datatrove-overhead probe notes (2026-07-17) §GPU A/B, job `6a59f921d216bd6f3a1fad87`. |
-| "No datagen framework adapts at runtime" / "nobody adapts" | **RETIRED** | DataDesigner ships AIMD admission, default-on. Use the narrowed claim in Q6. Receipt: `DECISIONS.md` §Prior-art correction. |
-| "Nobody owns cost tracking" | **RETIRED** | batchata and BatchLLM ship budget-as-run-parameter; LiteLLM owns gateway budgets. Defensible remainder: per-row dollar *provenance* in the output data, self-hosted cost modeling, HF-native resumable parquet. Receipt: `synthetic-data-library-design.md` §1 finding 3 (corrected). |
-| "The keep-alive HTTP client is a performance fix" | **RETIRED** | raw == pooled == bare at 1.00× on a real vLLM. Pooled only helps at ~1000+ req/s with very short outputs. Receipt: internal datatrove-overhead probe notes (2026-07-17) §What this means. |
-| "llm-d-async does AIMD on scraped /metrics" | **IMPRECISE** | The gauge-scrape gate is in `llm-d-async`; the AIMD dispatcher is in `llm-d-batch-gateway` and its signal is response status. See Q7. |
-| "The gauges are contractual" (unqualified) | **NARROW IT** | GAIE requires the metric *types and semantics*, explicitly not the names, and the proposal is marked *Partially implemented*. See Q7. |
-| "Serving beats offline" (unqualified) | **NARROW IT** | 1.19× is vision, one model, one GPU class. Text short-run showed offline winning 1.76× before the slow-start fix. See Q2. |
+| "datatrove's client costs 2.1× / 2.8×" | **REFUTED** | Controlled GPU A/B: 1.00×, all three arms. Cause was node contention. Receipt: datatrove-overhead probe notes **(internal)**, 2026-07-17 §GPU A/B, job `6a59f921d216bd6f3a1fad87`. |
+| "No datagen framework adapts at runtime" / "nobody adapts" | **RETIRED** | DataDesigner ships AIMD admission, default-on. Use the narrowed claim in Q6. Receipt: [history/decisions.md](history/decisions.md) §Prior-art correction. |
+| "Nobody owns cost tracking" | **RETIRED** | batchata and BatchLLM ship budget-as-run-parameter; LiteLLM owns gateway budgets. Defensible remainder: per-row dollar *provenance* in the output data, self-hosted cost modeling, HF-native resumable parquet. Receipt: the design survey **(internal)** §1 finding 3 (corrected). |
+| "The keep-alive HTTP client is a performance fix" | **RETIRED** | raw == pooled == bare at 1.00× on a real vLLM. Pooled only helps at ~1000+ req/s with very short outputs. Receipt: datatrove-overhead probe notes **(internal)**, 2026-07-17 §What this means. |
+| "llm-d-async does AIMD on scraped /metrics" | **IMPRECISE** | The gauge-scrape gate is in `llm-d-async`; the AIMD dispatcher is in `llm-d-batch-gateway` and its signal is response status. See §7. |
+| "The gauges are contractual" (unqualified) | **NARROW IT** | GAIE requires the metric *types and semantics*, explicitly not the names, and the proposal is marked *Partially implemented*. See §7. |
+| "Serving beats offline" (unqualified) | **NARROW IT** | 1.19× is vision, one model, one GPU class. Text short-run showed offline winning 1.76× before the slow-start fix. See §2. |

@@ -2,6 +2,9 @@
 
 Batch inference for datasets: rows in, any OpenAI-compatible endpoint, resumable parquet out.
 
+> Known as `pumpjack` during development — you'll still see that codename in
+> `docs/history/` and the run receipts in `spikes/`.
+
 You point it at an endpoint you control — a vLLM server you just started, a SGLang Job,
 TEI, an Inference Endpoint — and give it two functions: one that turns a row into a
 request, one that turns a response into output columns. It handles everything between:
@@ -34,6 +37,43 @@ with Engine("lightonai/LightOnOCR-2-1B", engine="vllm") as endpoint:  # vllm | s
     )
 print(stats.rows_processed, stats.tokens_per_sec)
 ```
+
+What lands on disk (real rows from a live run):
+
+```
+out/
+├── part-1785318644693-000000-5b670c82.parquet   # append-only parts
+├── _manifest/ids-part-…parquet                  # [id, error] sidecar per part
+├── completions/shard-0.done                     # marker when a shard finishes
+└── telemetry-shard0-….jsonl                     # per-tick controller records
+```
+
+```python
+# a success row and an error row from the same output (your parse() columns + id/error):
+{
+    "id": "c5c71ae175e872ab",
+    "error": None,
+    "instruction": "Why mobile is bad for human",
+    "response": "As an AI language model, I do not have personal opinions or …",
+    "prompt_tokens": 35,
+    "completion_tokens": 150,
+    "category": "brainstorming",
+}
+{
+    "id": "2d5c520f7b45877e",
+    "error": "http 409: …",
+    "instruction": None,
+    "response": None,
+    "prompt_tokens": None,
+    "completion_tokens": None,
+    "category": None,
+}
+```
+
+A failed row is a durable *error row*, never a gap — re-running the same command skips
+the done ids exactly, and `retry_errors=True` retries the errored ones. When a retry
+succeeds, the output holds both records for that id and readers let the success win
+(we call that **healing**).
 
 Already have an endpoint (a colleague's server, an exposed Job, a hosted API)? Skip
 `Engine` and pass its URL as `endpoint=` — everything else is identical.
@@ -68,13 +108,13 @@ Notes on what you didn't have to do:
 - **`kill -9` it, re-run the same command.** Output is append-only parquet with a manifest
   sidecar; resume is an exact anti-join on id — it re-pays at most one flush buffer, never
   duplicates a row. This holds across separate Jobs writing at different times.
-- **Choosing the output path**: parts stream incrementally to `hf://datasets/…` and
-  `hf://buckets/…` alike, but the risk profile differs with parallel writers — dataset
-  repos are git-backed (every flush is a commit; several shards flushing concurrently
-  means commit contention and rate-limit exposure), buckets are object storage with no
-  commit path. Rule of thumb: **buckets for fan-out (world>1), dataset repos fine for
-  single-writer runs** and as the final publish target (both shapes have live receipts:
-  the 4-writer fan-out and the bucket-sink round-trip in `spikes/RESULTS.md`).
+- **Choosing the output path.** Parts stream incrementally to `hf://datasets/…` and
+  `hf://buckets/…` alike, but dataset repos are git-backed — every flush is a commit,
+  so several shards flushing concurrently means commit contention — while buckets are
+  object storage with no commit path. Rule of thumb: buckets while a multi-shard run
+  is hot, dataset repos for single-writer runs and as the final publish target.
+  (Sharding vocabulary: a fan-out run is `world` shards, each identified by its
+  `rank` — see "Scaling" below.)
 
 ## Task wrappers live above this library
 
@@ -82,11 +122,13 @@ Notes on what you didn't have to do:
 task-shaped wrappers ("OCR this dataset with model X") belong a layer up — recipe scripts
 and product surfaces build them out of `pump()`; this library stays small underneath them.
 
-(`Engine` boots the server in its own process group, health-gates it, and kills it on exit.
+## About `Engine` readiness
+
+`Engine` boots the server in its own process group, health-gates it, and kills it on exit.
 Health checks lie during warm-up, so readiness also POSTs a trial request — but the default
 acceptance is **alive-only**: any response below 500, including 404, counts, because it
 proves the API path parses requests. To gate readiness on your actual workload, pass
-`ready_route=`/`ready_payload=` and `ready_accept=lambda r: r.status_code == 200`.)
+`ready_route=`/`ready_payload=` and `ready_accept=lambda r: r.status_code == 200`.
 
 ## The composable layer (for building on top — datatrove-shaped stacks, power users)
 
@@ -95,6 +137,8 @@ real product: **a stream of completed results**. Parquet is just the default pla
 stream lands.
 
 ```python
+from datasets import load_dataset
+
 from saturate import AdaptiveClient, Auto, stream, skip_done, through, drain
 
 rows = stream(load_dataset("...", streaming=True))  # (id, row) pairs, lazy
@@ -133,6 +177,8 @@ Two sinks ship with that contract:
   next run — there's no error record. That's the trade.)
 
 ```python
+from saturate import FileSink
+
 stats = pump(
     pages, to_request, parse, endpoint, output=FileSink("ocr-out/", ext=".md", key="markdown")
 )
@@ -149,6 +195,8 @@ Embedding just the adaptive part in your own stack (your IO, your loop, your tra
 this is the datatrove-shaped seam):
 
 ```python
+from saturate import AdaptiveLimiter, Auto
+
 limiter = AdaptiveLimiter(window=Auto())  # a drop-in for your fixed semaphore
 async with limiter.slot():
     result = await your_send(payload)  # your client, unchanged
@@ -214,7 +262,7 @@ Everything in this table has a live receipt — numbers plus job/endpoint ids �
 | engines | vLLM, SGLang, llama.cpp boot templates + gauge dialects; TEI (blind, no gauges) |
 | serving arrangements | in-process `Engine` · exposed-Job proxy · laptop→Job · Inference Endpoints **including scale-to-zero cold start** (retry ladder + breaker ride the managed-wake 503s; 100/100 after one healing re-run) |
 | routes | `/chat/completions` · `/completions` · `/embeddings` (micro-batch rows) · `/audio/transcriptions` (multipart) |
-| adaptivity | window self-ranged 8→376 with zero config; 1.209× an expert-tuned fixed-64 bare-httpx client at 10k rows |
+| adaptivity | window self-ranged 8→376 with zero config; 1.209× the delivered tok/s of a hand-tuned fixed-64 bare-httpx client, same 10k rows (it discovered 272 was better than 64) |
 | resume | cross-job kill/resume ×4, one an unplanned platform SIGTERM at 4,450/5,000; 0 duplicates at 22k pages across 4 concurrent writers |
 | fan-out | 4 Jobs → one output dir, 4,000/4,000/0 dupes, per-shard equilibria, no coordinator |
 | sinks | `hf://datasets`, `hf://buckets` (both directions), local, `FileSink` |

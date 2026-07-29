@@ -38,12 +38,13 @@ use `ready_accept=` to gate on the workload.
 Timeline (poll at 10s): T+0 first requests hit the sleeping endpoint → **the request itself
 triggers the wake** (T+13s state=initializing) → breaker OPEN after 9 consecutive
 failures, 1s probes → replica ready ≈T+93s → **probe catches it, breaker closes, admission
-resumes** → done at T+111s: **93 ok + 7 durable error rows** (those rows' per-attempt retry
-ladders expired during the wake), **0 lost**. Healing re-run (`retry_errors=True`):
+resumes** → done at T+111s: **93 ok + 7 durable error rows** (rows admitted mid-wake got the
+proxy's `http 409 "workload is not stopped"` — a client error, not retried, so they landed
+as durable error rows immediately), **0 lost**. Healing re-run (`retry_errors=True`):
 `rows_done_prior: 93, rows_processed: 7, rows_failed: 0` in 4.9s — **100/100.** The ladder
-+ breaker ride managed-wake 503s with zero special-casing; scale-to-zero endpoints are
-usable as-is (budget the wake into `RETRY_BUDGET_S` if 7% transient error rows matter
-on the first pass).
++ breaker ride the managed wake with zero special-casing; scale-to-zero endpoints are
+usable as-is (rows admitted mid-wake surface as durable 409 error rows on the first pass —
+the error-rows-not-lost-rows contract working as designed — and heal on the re-run).
 
 Caveats: single run per arm; 0.5B model, 150-token outputs; the LB observation is n=1 on
 2 replicas.

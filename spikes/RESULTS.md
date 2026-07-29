@@ -50,6 +50,20 @@ gauge mode, not blind:
 tick records carry no `dialect` field — the dialect is asserted in `tests/test_signals.py`
 against a verbatim excerpt of the probe body above.)
 
+# v0.1.1 — fresh-output auto-create, proven by the shared snippet verbatim (2026-07-29)
+
+The OCR example shared internally was run byte-identical as a Job, installing saturate
+from PyPI via its PEP 723 header. First attempt on 0.1.0 crashed exactly where a first
+user would: `existing_ids()` → RepositoryNotFoundError on the never-created output repo
+(job 6a6a03ed). Fix: ParquetSink now ensures hf:// dataset repos / buckets exist
+(private, exist_ok) at construction — released as 0.1.1. Re-run, unchanged snippet:
+**20/20 pages, 0 failed, 1,507.9 tok/s in 37.2s, window settled 32** (LightOnOCR-2-1B,
+a10g-small, job 6a6a06bc), output auto-created at davanstrien/saturate-ocr-demo. Also
+the first end-to-end receipts of the public install path: `dependencies = ["saturate[hf]"]`
+resolving from PyPI inside `hf jobs uv run` (earlier same-day: quickstart.py, job
+6a6a00c0, which demonstrated cross-machine exact resume by skipping all 100 rows written
+by a different machine's run).
+
 # Inference Endpoints — the fourth serving arrangement (2026-07-29): warm · autoscale · cold start
 
 Dedicated IE endpoint `saturate-ie-spike` (Qwen2.5-0.5B-Instruct on `vllm/vllm-openai:latest`

@@ -14,7 +14,7 @@ crash-safe output, and resume. Killing it at any point is fine. Re-running the s
 command is always safe.
 
 ```bash
-uv pip install 'saturate[hf] @ git+https://github.com/davanstrien/saturate'   # PyPI release coming
+uv pip install 'saturate[hf]'   # or: pip install 'saturate[hf]'
 # the [hf] extra pulls huggingface_hub + datasets: hf:// output paths and Hub dataset
 # input (dataset_rows); plain saturate works with your own iterables + local output
 ```

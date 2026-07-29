@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "saturate[hf] @ git+https://github.com/davanstrien/saturate",
+#     "saturate[hf]",
 # ]
 # ///
 """Quickstart: data -> model -> nicer data, one GPU Job.

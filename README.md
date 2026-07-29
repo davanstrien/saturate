@@ -98,8 +98,9 @@ Notes on what you didn't have to do:
 - **No concurrency number.** The in-flight window tunes itself: it backs off when the
   server shows pressure (errors, timeouts, a growing queue) and creeps up while delivered
   throughput keeps improving — the same idea TCP uses for network congestion. When the
-  engine's `/metrics` gauges are reachable (vLLM, SGLang, llama.cpp, TEI) they sharpen the
-  decisions; against opaque endpoints it works from latency and errors alone. It grows only
+  engine's `/metrics` gauges are reachable (vLLM, SGLang, llama.cpp, TRT-LLM) they sharpen
+  the decisions; against opaque endpoints (TEI, a proxy) it works from errors, timeouts
+  and delivered throughput alone. It grows only
   after the first completion arrives, and it freezes (and tells you) when your *source* is
   the bottleneck rather than the server.
   Want control anyway? `window=Fixed(64)` pins it; `window=Auto(initial=32, max_limit=128)`
@@ -204,10 +205,10 @@ this is the datatrove-shaped seam):
 ```python
 from saturate import AdaptiveLimiter, Auto
 
-limiter = AdaptiveLimiter(window=Auto())  # a drop-in for your fixed semaphore
-async with limiter.slot():
-    result = await your_send(payload)  # your client, unchanged
-limiter.observe(ok=True, tokens=n)
+async with AdaptiveLimiter(window=Auto()) as limiter:  # a drop-in for your fixed semaphore
+    async with limiter.slot():
+        result = await your_send(payload)  # your client, unchanged
+    limiter.observe(ok=True, tokens=n)
 ```
 
 ## Scaling: fan out to storage
@@ -219,7 +220,7 @@ rows = shard_select(stream(source), rank=RANK, world=4)  # strided, disjoint by 
 stats = pump(rows, to_request, parse, endpoint, output, shard=(RANK, 4))
 ```
 
-Each shard adapts to its own node independently and writes `completions/shard-{n}.done`
+Each shard adapts to its own node independently and writes `completions/shard-{rank}.done`
 when finished (datatrove's marker convention — a coordinator can watch the directory).
 
 ## Embeddings
@@ -277,8 +278,8 @@ Everything in this table has a live receipt — numbers plus job/endpoint ids �
 Not yet tested / known bounds: hosted-API **rate-limit pacing** (deliberately deferred —
 discovering a published quota by backoff is the wrong tool; a Pacer seam is reserved),
 **binary response routes** (TTS worked via the documented bring-your-own-transport seam,
-not the built-in one), the controller's **calibration grid** (band constants pending more
-workload traces), and resume id-sets beyond ~10M rows in memory.
+not the built-in one), the controller's **calibration grid** (the queue-band constants — see
+docs/design.md — pending more workload traces), and resume id-sets beyond ~10M rows in memory.
 
 ## More
 

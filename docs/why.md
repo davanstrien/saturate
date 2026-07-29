@@ -588,7 +588,7 @@ elsewhere, here is its current status.
 | Claim | Status | Why |
 |---|---|---|
 | "datatrove's client costs 2.1× / 2.8×" | **REFUTED** | Controlled GPU A/B: 1.00×, all three arms. Cause was node contention. Receipt: datatrove-overhead probe notes **(internal)**, 2026-07-17 §GPU A/B, job `6a59f921d216bd6f3a1fad87`. |
-| "No datagen framework adapts at runtime" / "nobody adapts" | **RETIRED** | DataDesigner ships AIMD admission, default-on. Use the narrowed claim in Q6. Receipt: [history/decisions.md](history/decisions.md) §Prior-art correction. |
+| "No datagen framework adapts at runtime" / "nobody adapts" | **RETIRED** | DataDesigner ships AIMD admission, default-on. Use the narrowed claim in §6. Receipt: [history/decisions.md](history/decisions.md) §Prior-art correction. |
 | "Nobody owns cost tracking" | **RETIRED** | batchata and BatchLLM ship budget-as-run-parameter; LiteLLM owns gateway budgets. Defensible remainder: per-row dollar *provenance* in the output data, self-hosted cost modeling, HF-native resumable parquet. Receipt: the design survey **(internal)** §1 finding 3 (corrected). |
 | "The keep-alive HTTP client is a performance fix" | **RETIRED** | raw == pooled == bare at 1.00× on a real vLLM. Pooled only helps at ~1000+ req/s with very short outputs. Receipt: datatrove-overhead probe notes **(internal)**, 2026-07-17 §What this means. |
 | "llm-d-async does AIMD on scraped /metrics" | **IMPRECISE** | The gauge-scrape gate is in `llm-d-async`; the AIMD dispatcher is in `llm-d-batch-gateway` and its signal is response status. See §7. |

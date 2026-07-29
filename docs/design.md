@@ -1,8 +1,8 @@
 # Design
 
-saturate exists for one loop: **data → model → nicer data** — run every row of a dataset
-(or every file in a bucket) through a model and get a dataset back. This page gives the high-level shape
-first, then how it is currently implemented. (Comparisons: [why.md](why.md) · on-disk
+saturate exists for one loop: **data → model → nicer data** — run every row of a
+dataset (or every file in a bucket) through a model and get a dataset back. This page
+gives the high-level shape first, then how it is currently implemented. (Comparisons: [why.md](why.md) · on-disk
 format: [../CONTRACT.md](../CONTRACT.md) · benchmark numbers:
 [../spikes/RESULTS.md](../spikes/RESULTS.md).)
 
@@ -60,9 +60,9 @@ errored id is called healing; readers let the success win.
 |---|---|
 | `controller.py` | pure `decide(obs, limit) -> new_limit`: `Fixed(n)` or `Auto` (below) |
 | `window.py` | asyncio admission gate whose limit the controller adjusts at runtime |
-| `signals.py` | `SignalSource`: engine `/metrics` scrape (vLLM/SGLang/llama.cpp/TEI dialects) or none |
+| `signals.py` | `SignalSource`: engine `/metrics` scrape (vLLM/SGLang/llama.cpp/TRT-LLM dialects) or none |
 | `transport.py` | typed `Request` (json ⊕ multipart), retry ladder, circuit breaker |
-| `core.py` | `AdaptiveLimiter` (slot/observe) → `AdaptiveClient` (+HTTP) → `through()` (stream of `Done` results — id, row, output, error, timing) |
+| `core.py` | `AdaptiveLimiter` (slot/observe) → `AdaptiveClient` (+HTTP) → `through()` (stream of `Done` results — id, row, output, error, token usage) |
 | `source.py` | `stream` (lazy normalize, content-hash ids), `skip_done` (anti-join + dedup), `shard_select` |
 | `sources.py` | HF-native inputs (`[hf]` extra, lazy): `dataset_rows` (streaming Hub datasets), `bucket_rows` (raw objects by fsspec glob, bounded prefetch) |
 | `sink.py` | Sink protocol: `ParquetSink` (full contract), `FileSink`; `drain`, `read_output` |
@@ -78,9 +78,9 @@ Terms used below:
   snapshot and returns the new window limit.
 - **gauges** — engine-reported queue metrics scraped from `/metrics`: `waiting`
   (queued requests), `kv` (KV-cache utilization, 0–1), `hits` (prefix-cache hit
-  rate). No gauges = **blind mode** (latency/error/throughput signals only).
+  rate). No gauges = **blind mode** (successes, errors/timeouts and delivered throughput only).
 - **band** — the target range for the engine's `waiting` queue:
-  `[target_waiting/4, target_waiting*2]` (default target 8 → band [2, 16]). Small
+  `[max(1, target_waiting//4), target_waiting*2]` (default target 8 → band [2, 16]). Small
   and positive: the engine always has work, never a runaway backlog.
 - **delivered throughput** — tokens/sec actually completed this tick; the primary
   signal. Gauges speed decisions up; throughput decides them.
@@ -116,6 +116,10 @@ flowchart TD
 | same, but throughput flat | hold, then probe +step on an exponential-backoff cooldown (4→32 ticks); keep it if throughput improves within 3 ticks, else revert | generations lag the tick, so one flat reading must not end growth forever |
 | queue above band | −step | standing backlog: back off before the engine does |
 | blind mode (no gauges) | +1 on sustained success unless throughput is flat | the fallback that carried the TEI and Inference Endpoints runs |
+
+Two details the diagram compresses: after any cut, a 2-tick cooldown holds before the
+branches below the cuts run; and "throughput improving" includes "no throughput reading
+yet this tick" — only a measured plateau blocks growth.
 
 `Fixed(n)` bypasses all of it. Defaults: `Auto(target_waiting=8, initial=16,
 max_limit=512, step=8)`; cap `max_limit` (~128) for vision workloads — in-flight

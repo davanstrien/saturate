@@ -55,16 +55,22 @@ columns null. Schema stability: once a column's type is first seen, **every subs
 carries the full schema** (absent values as typed nulls); a column whose values are all null
 before its type is ever seen is absent from those early parts, so readers doing strict
 unions should expect nullable user columns. For a fixed schema from part one, declare it —
-`pump(schema=...)` — and every part is cast to it (unknown fields raise). Token/latency
-columns, when present, are copied verbatim from the response `usage` or measured by the
-client — blank, never guessed: `prompt_tokens`, `completion_tokens`, `latency_s`.
+`pump(schema=...)` — every part is cast to it, and a row carrying fields outside the
+declared schema becomes an error row (§4; a direct sink append raises instead). The
+library itself writes no token/latency columns — they appear when your `parse` emits them. Standard
+names when written: `prompt_tokens`, `completion_tokens`, `latency_s` — copied from the
+response `usage` or your own measurement, blank never guessed.
 
 ## 2. The id scheme
 
 `id` must be globally unique across all shards writing to one output and stable across
 re-runs. The default is a content hash of the row via `saturate.source.content_id` —
 order-independent and re-shard-safe; a caller-designated key column or a global-index id is
-equally conformant. Fan-out: each of K shards selects its slice by strided assignment
+equally conformant. Width caveat: the default hash is 16 hex chars (~64 bits) — collision
+odds are negligible at the ~10M-row scale v1 targets but reach coin-flip around 5×10⁹
+rows; beyond that, widen the hash or supply your own ids.
+
+Fan-out: each of K shards selects its slice by strided assignment
 (`(idx - skip) % world == rank`); ids derive from row content or global position, never a
 per-shard counter.
 
@@ -77,7 +83,7 @@ dedupe for free).
 
 The done-set is assembled **manifest-first, exactly**: read every manifest sidecar; scan any
 part whose sidecar is missing (a crash between part- and manifest-write costs one part of
-scanning, never duplicates); skip-and-re-pay any unreadable file (≤ one flush of rework,
+scanning, never duplicates); skip-and-re-pay any unreadable file (≤ one flush — `flush_every` rows — of rework,
 never a hard error). A manifest entry without a surviving part still counts as done —
 resume trusts manifests; recovering rows from an out-of-band-deleted part means a fresh
 output dir, or deleting its orphaned sidecar.
@@ -99,12 +105,14 @@ writing them as errors would make resume skip them forever.
 
 ## 5. Completion markers and stats
 
-`completions/shard-{rank}.done` is written last, when a shard's run returns normally.
-Markers are **advisory** (datatrove's convention — a coordinator can watch the directory);
-resume never depends on them, they don't certify row-level success, and they are sticky
-across re-runs of one output dir — coordinators needing current-run state should read
-`stats-{rank}.json` (the exact final Stats plus `rank`/`world`; telemetry tick sums are
-approximate, stats are exact).
+`completions/shard-{rank}.done` (payload: the fixed sentinel `done`) is written last, when
+a shard's run returns normally. Markers are **advisory** (datatrove's convention — a
+coordinator can watch the directory); resume never depends on them, they don't certify
+row-level success, and they are sticky across re-runs of one output dir. Coordinators
+needing current-run state should read `stats-{rank}.json` (the exact final Stats (§7) plus
+`rank`/`world`; telemetry tick sums are approximate, stats are exact) — noting that stats
+and telemetry writes are best-effort sidecars: failures are non-fatal, and sinks without
+`write_stats` produce no stats file. The marker guarantees ordering, not sidecar presence.
 
 ## 6. Telemetry (frozen keys)
 
@@ -117,17 +125,18 @@ One `telemetry-…jsonl` per run; one object per controller tick (~2s):
 | `inflight` | requests currently in flight |
 | `waiting` / `running` | engine queue gauges (null when blind) |
 | `bp` | backpressure events this tick (saturation-shaped 429/timeout/5xx) |
-| `ok` | requests completed this tick |
+| `ok` | requests that succeeded this tick (failures surface in `bp`) |
 | `input_bound` | true when the source, not the endpoint, is the bottleneck |
 | `tok_s` | delivered tokens/sec this tick (the controller's plateau signal) |
 | `kv` / `hits` / `preempts` | KV-cache utilization · prefix-cache hit rate · scheduler preemptions (when exposed) |
 
 ## 7. Agent contract (stdout / stderr)
 
-In agent mode (env `CLAUDECODE`, `CODEX_SANDBOX`, or `AI_AGENT` — set `AI_AGENT=1` to force
-it), **stdout carries exactly one line**: the run's Stats JSON. Everything human-facing
+In agent mode (env `CLAUDECODE`, `CODEX_SANDBOX`, or `AI_AGENT` — set `AI_AGENT=1` to force it;
+detection is truthiness of any of the three, so there is no off-switch once one is set),
+**stdout carries exactly one line**: the run's Stats JSON. Everything human-facing
 (progress, advisor hints, the resume hint) goes to stderr. Stats keys (frozen, same additive
-rule): `rows_total`, `rows_done_prior`, `rows_processed`, `rows_failed`, `prompt_tokens`,
+rule): `rows_total`, `rows_done_prior`, `rows_processed`, `rows_failed`, `rows_deduped`, `prompt_tokens`,
 `completion_tokens`, `elapsed_s`, `final_limit`, `input_bound`, `breaker_opens`, `hints`,
 `tokens_per_sec`.
 

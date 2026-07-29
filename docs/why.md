@@ -383,7 +383,7 @@ require a direct endpoint or degrade to blind mode.
 ## 8. Why a controller at all — why not just pick a number?
 
 Because the right number is not knowable in advance, changes with task shape, and is dangerous
-in both directions. Four receipts.
+in both directions. Five receipts.
 
 **(a) The optimum moves with task shape, on the same GPU and model.** Four arms — short and long
 input crossed with short and long output — run on one A10G job. The window settled at 128, 257,

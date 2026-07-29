@@ -232,18 +232,20 @@ outputs, provider batch-API support, and a much larger user base.
 Both are serious distributed batch-inference systems with real streaming machinery. Neither
 adapts to endpoint state.
 
-- **Ray Data LLM** autoscales its actor pool on Ray-internal backpressure — its own queue depths,
-  not the engine's. Concurrency toward an HTTP endpoint is a static `qps`. Scaling on internal
-  backpressure means scaling *into* a saturated endpoint, because a saturated endpoint's queue
-  absorbs requests silently rather than pushing back.
-- **Daft** takes a static `max_concurrency`, and their own engineering blog lists "monitor
-  unfinished requests per replica" as *future work* — i.e. they have identified the same signal
-  and have not shipped it.
-
-> Receipt for both: the internal prior-art deep dive (2026-07-27) §5 table (source-verified
-> sweep, 2026-07-27). **Caveat: these two rows are second-hand to this document — I did not
-> re-verify the Ray/Daft source or re-locate the Daft blog post URL. Get a direct link before
-> either appears in public writing.**
+- **Ray Data LLM**: `HttpRequestProcessorConfig` takes `concurrency` ("the number of
+  concurrent requests to send… a fixed pool of `n` workers", or an autoscaling `(m, n)`
+  worker pool) and an optional static `qps`. The autoscaling is of Ray's *actor pool*, on
+  Ray's own scheduling signals — nothing observes the endpoint's delivered throughput or
+  queue. Scaling workers on internal backpressure means scaling *into* a saturated
+  endpoint, because a saturated endpoint's queue absorbs requests silently rather than
+  pushing back.
+  ([docs.ray.io — ray.data.llm.HttpRequestProcessorConfig](https://docs.ray.io/en/latest/data/api/doc/ray.data.llm.HttpRequestProcessorConfig.html), read 2026-07-29)
+- **Daft**: their engineering blog's future-work section names the missing signal
+  themselves — the router balances "using the number of prompts sent to each serving
+  engine replica", and "the router should monitor the actual number of unfinished
+  requests on each replica to better load balance". They have identified in-flight
+  awareness as the gap and, as of that post, not shipped it.
+  ([eventual.ai — Cutting LLM Batch Inference Time in Half: Dynamic Prefix Bucketing at Scale](https://www.eventual.ai/blog/cutting-llm-batch-inference-time-in-half-dynamic-prefix-bucketing-at-scale), 2025-11-04, read 2026-07-29)
 
 **Honest counter, and it is a real one.** Ray Data wins the workload a single-loop client cannot
 saturate: heavy CPU-side stages streaming into several GPU replicas concurrently, with
@@ -254,7 +256,8 @@ to you.
 
 > Receipt: `synthetic-data-library-design.md` §4 Ray-on-Jobs subsection.
 
-Also honest: Daft's prefix-bucketing result (50.7% speedup, cache hits 29%→54%) is a real
+Also honest: Daft's prefix-bucketing result (50.7% speedup, cache hits 29.2%→~54%; same
+blog post as above, numbers verified against it 2026-07-29) is a real
 batch-only optimization that saturate does not ship. Prefix-grouped admission is on the table,
 not in v1.
 

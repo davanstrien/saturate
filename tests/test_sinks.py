@@ -358,3 +358,15 @@ def test_retry_after_http_date():
     assert _parse_retry_after(None) is None
     assert _parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT") == 0.0  # past date clamps
     assert _parse_retry_after("not-a-date") is None
+
+
+def test_hf_buckets_uri_resolves_offline():
+    """#7: bucket output paths must work at the packaged [hf] floor — an
+    hf://buckets/... URI resolves to HfFileSystem with the bucket path intact,
+    no network and no token involved."""
+    import fsspec
+    from huggingface_hub import HfFileSystem
+
+    fs, root = fsspec.url_to_fs("hf://buckets/owner/name/runs/out")
+    assert isinstance(fs, HfFileSystem)
+    assert root.endswith("buckets/owner/name/runs/out")

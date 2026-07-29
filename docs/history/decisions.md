@@ -105,7 +105,7 @@ Tier 2 (~$30–50) is sprint-week material, flagged before spend.
 - [x] Scrub `docs/history/` + this file for internal thread quotes/names (done 2026-07-28,
       codex-r3 branch; originals preserved in internal notes + git history — squash/rewrite
       history before flipping public).
-- [ ] why.md: replace the two second-hand rows (Ray Data, Daft) with directly-fetched sources.
+- [x] why.md: second-hand rows replaced with directly-fetched sources (2026-07-29: Ray docs + eventual.ai blog, quotes verified).
 - [ ] Daniel voice pass on README + why.md (writing-review).
 - [ ] PyPI name registration; decide public-repo timing vs the embeddings showcase.
 - [ ] **Naming (2026-07-29)**: library → `saturate` (6-agent debate + Codex second opinion:

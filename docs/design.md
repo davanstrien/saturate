@@ -1,7 +1,7 @@
 # Design — current state (2026-07-28)
 
 One page for reviewers and layer-builders. History and rationale live in
-[decisions.md](decisions.md) (the log) and [history/](history/) (proposals);
+[decisions.md](history/decisions.md) (the log) and [history/](history/) (proposals);
 receipts in [../spikes/RESULTS.md](../spikes/RESULTS.md); the "why not X" FAQ in
 [why.md](why.md). This file describes what IS.
 
@@ -18,7 +18,7 @@ The UI never sees saturate; it speaks TaskSpecs to a compiler layer that emits
 pump() drivers. A run's progress is readable from storage alone (part counts,
 markers, telemetry jsonl) — the CONTRACT doubles as the UI protocol.
 
-## Modules (~1030 non-blank LOC, CI-enforced ceiling 1050)
+## Modules (~1410 non-blank LOC; new surface requires a recorded decision, no numeric ceiling)
 
 | module | role |
 |---|---|
@@ -28,6 +28,7 @@ markers, telemetry jsonl) — the CONTRACT doubles as the UI protocol.
 | `transport.py` | typed Request (json ⊕ multipart), retry ladder, circuit breaker |
 | `core.py` | `AdaptiveLimiter` (slot/observe) → `AdaptiveClient` (+HTTP) → `through()` (Done stream) |
 | `source.py` | `stream` (lazy normalize, content-hash ids), `skip_done` (anti-join + dedup), `shard_select` |
+| `sources.py` | HF-native inputs (`[hf]` extra, lazy): `dataset_rows` (streaming-default Hub datasets), `bucket_rows` (raw objects by fsspec glob, id-first resume, bounded prefetch) |
 | `sink.py` | Sink protocol: `ParquetSink` (full contract), `FileSink`; `drain`, `read_output` |
 | `engine.py` | optional server lifecycle: boot templates, readiness gate, killpg |
 | `telemetry.py` | tick records (frozen v1) + run-end advisor |
@@ -80,4 +81,4 @@ bucket-hot + publish for high-frequency flushes.
 
 Docstrings currently carry design-history references ("the 10k-parity lesson");
 they will be trimmed to constraints-only before any public release — the
-stories live in [decisions.md](decisions.md) and RESULTS, not in the code.
+stories live in [decisions.md](history/decisions.md) and RESULTS, not in the code.

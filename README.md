@@ -2,14 +2,16 @@
 
 Batch inference for datasets: rows in, any OpenAI-compatible endpoint, resumable parquet out.
 
-You point it at an endpoint — a vLLM server you just started, a SGLang Job, TEI, a hosted
-API — and give it two functions: one that turns a row into a request, one that turns a
-response into output columns. It handles everything between: how many requests to keep in
-flight (adaptively — you never pick a concurrency number), retries, crash-safe output, and
-resume. Killing it at any point is fine. Re-running the same command is always safe.
+You point it at an endpoint you control — a vLLM server you just started, a SGLang Job,
+TEI, an Inference Endpoint — and give it two functions: one that turns a row into a
+request, one that turns a response into output columns. It handles everything between:
+how many requests to keep in flight (congestion-aware, like TCP — it finds the endpoint's
+sustainable throughput and holds it there; you never pick a concurrency number), retries,
+crash-safe output, and resume. Killing it at any point is fine. Re-running the same
+command is always safe.
 
 ```bash
-uv pip install 'saturate[hf]'   # not yet on PyPI — pip install 'saturate[hf] @ git+https://github.com/davanstrien/saturate'
+uv pip install 'saturate[hf] @ git+https://github.com/davanstrien/saturate'   # PyPI release coming
 # the [hf] extra pulls huggingface_hub + datasets: hf:// output paths and Hub dataset
 # input (dataset_rows); plain saturate works with your own iterables + local output
 ```
@@ -22,13 +24,13 @@ The most common shape — boot the model and pump a dataset through it, all in o
 ```python
 from saturate import pump, Engine
 
-with Engine("lightonai/LightOnOCR-2-1B", engine="vllm") as endpoint:   # vllm | sglang | llamacpp
+with Engine("lightonai/LightOnOCR-2-1B", engine="vllm") as endpoint:  # vllm | sglang | llamacpp
     stats = pump(
-        rows,                              # any iterable of dicts — streams, never materializes
-        to_request=lambda row: {...},      # row -> OpenAI-style request body
-        parse=lambda row, resp: {...},     # response -> your output columns
+        rows,  # any iterable of dicts — streams, never materializes
+        to_request=lambda row: {...},  # row -> OpenAI-style request body
+        parse=lambda row, resp: {...},  # response -> your output columns
         endpoint=endpoint,
-        output="hf://datasets/you/results/data",   # or a local path, or hf://buckets/...
+        output="hf://datasets/you/results/data",  # or a local path, or hf://buckets/...
     )
 print(stats.rows_processed, stats.tokens_per_sec)
 ```
@@ -43,8 +45,9 @@ this one-sequential-pass access pattern, see hf.co/blog/streaming-datasets):
 ```python
 from saturate import dataset_rows
 
-rows = dataset_rows("HuggingFaceFW/fineweb-edu", split="train", columns=["text"],
-                    limit=100_000)          # (id, row) stream; ids="index"|"content"|column
+rows = dataset_rows(
+    "HuggingFaceFW/fineweb-edu", split="train", columns=["text"], limit=100_000
+)  # (id, row) stream; ids="index"|"content"|column
 ```
 
 Notes on what you didn't have to do:
@@ -94,12 +97,12 @@ stream lands.
 ```python
 from saturate import AdaptiveClient, Auto, stream, skip_done, through, drain
 
-rows = stream(load_dataset("...", streaming=True))     # (id, row) pairs, lazy
-rows = skip_done(rows, sink)                            # exact resume filter
+rows = stream(load_dataset("...", streaming=True))  # (id, row) pairs, lazy
+rows = skip_done(rows, sink)  # exact resume filter
 
 async with AdaptiveClient(endpoint, window=Auto()) as client:
     results = through(client, rows, to_request, parse)  # unordered async map, adaptive
-    stats = await drain(results, sink)                  # parquet + manifest (pump() adds markers)
+    stats = await drain(results, sink)  # parquet + manifest (pump() adds markers)
 
 # chaining is just more piping — e.g. OCR then judge:
 #   pages -> through(ocr_client, ...) -> drain(stage1_out)
@@ -130,8 +133,9 @@ Two sinks ship with that contract:
   next run — there's no error record. That's the trade.)
 
 ```python
-stats = pump(pages, to_request, parse, endpoint,
-             output=FileSink("ocr-out/", ext=".md", key="markdown"))
+stats = pump(
+    pages, to_request, parse, endpoint, output=FileSink("ocr-out/", ext=".md", key="markdown")
+)
 ```
 
 Or skip sinks entirely and consume the stream yourself — no resume, full freedom:
@@ -145,9 +149,9 @@ Embedding just the adaptive part in your own stack (your IO, your loop, your tra
 this is the datatrove-shaped seam):
 
 ```python
-limiter = AdaptiveLimiter(window=Auto())          # a drop-in for your fixed semaphore
+limiter = AdaptiveLimiter(window=Auto())  # a drop-in for your fixed semaphore
 async with limiter.slot():
-    result = await your_send(payload)             # your client, unchanged
+    result = await your_send(payload)  # your client, unchanged
 limiter.observe(ok=True, tokens=n)
 ```
 
@@ -156,7 +160,7 @@ limiter.observe(ok=True, tokens=n)
 K Jobs, one output directory, no coordinator:
 
 ```python
-rows = shard_select(stream(source), rank=RANK, world=4)   # strided, disjoint by construction
+rows = shard_select(stream(source), rank=RANK, world=4)  # strided, disjoint by construction
 stats = pump(rows, to_request, parse, endpoint, output, shard=(RANK, 4))
 ```
 
@@ -168,9 +172,14 @@ when finished (datatrove's marker convention — a coordinator can watch the dir
 Same client, different route — a "row" can be a pre-grouped batch:
 
 ```python
-stats = pump(batches, to_request=lambda b: {"model": "m", "input": b["texts"]},
-             parse=parse_embeddings, endpoint=endpoint, output=output,
-             route="/embeddings")
+stats = pump(
+    batches,
+    to_request=lambda b: {"model": "m", "input": b["texts"]},
+    parse=parse_embeddings,
+    endpoint=endpoint,
+    output=output,
+    route="/embeddings",
+)
 ```
 
 ## Running under an agent
@@ -193,6 +202,27 @@ One request per row (rollouts/agent loops are a different tool). No DAG authorin
 provider price tables — it records measured tokens and latency and leaves dollars to you.
 No live clusters: scaling is shards writing to storage.
 
+## Status
+
+Everything in this table has a live receipt — numbers plus job/endpoint ids — in
+[spikes/RESULTS.md](spikes/RESULTS.md):
+
+| surface | live receipt |
+|---|---|
+| engines | vLLM, SGLang, llama.cpp boot templates + gauge dialects; TEI (blind, no gauges) |
+| serving arrangements | in-process `Engine` · exposed-Job proxy · laptop→Job · Inference Endpoints **including scale-to-zero cold start** (retry ladder + breaker ride the managed-wake 503s; 100/100 after one healing re-run) |
+| routes | `/chat/completions` · `/completions` · `/embeddings` (micro-batch rows) · `/audio/transcriptions` (multipart) |
+| adaptivity | window self-ranged 8→376 with zero config; 1.209× an expert-tuned fixed-64 bare-httpx client at 10k rows |
+| resume | cross-job kill/resume ×4, one an unplanned platform SIGTERM at 4,450/5,000; 0 duplicates at 22k pages across 4 concurrent writers |
+| fan-out | 4 Jobs → one output dir, 4,000/4,000/0 dupes, per-shard equilibria, no coordinator |
+| sinks | `hf://datasets`, `hf://buckets` (both directions), local, `FileSink` |
+
+Not yet tested / known bounds: hosted-API **rate-limit pacing** (deliberately deferred —
+discovering a published quota by backoff is the wrong tool; a Pacer seam is reserved),
+**binary response routes** (TTS worked via the documented bring-your-own-transport seam,
+not the built-in one), the controller's **calibration grid** (band constants pending more
+workload traces), and resume id-sets beyond ~10M rows in memory.
+
 ## More
 
-[docs/design.md](docs/design.md) is the architecture; [docs/why.md](docs/why.md) answers "why not just use X" with receipts; [CONTRACT.md](CONTRACT.md) is the storage protocol; [spikes/RESULTS.md](spikes/RESULTS.md) holds every benchmark number with job ids; [docs/decisions.md](docs/decisions.md) is the decision log.
+[docs/design.md](docs/design.md) is the architecture; [docs/why.md](docs/why.md) answers "why not just use X" with receipts; [CONTRACT.md](CONTRACT.md) is the storage protocol; [spikes/RESULTS.md](spikes/RESULTS.md) holds every benchmark number with job ids; [docs/history/decisions.md](docs/history/decisions.md) is the decision log.

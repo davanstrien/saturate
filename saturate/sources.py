@@ -125,7 +125,7 @@ def bucket_rows(
 
     No decode, no transforms (PDF-to-pages etc. stay a caller concern —
     decode explodes one object into N rows, which silently changes id
-    semantics; see docs/decisions.md).
+    semantics; see docs/history/decisions.md).
     """
     import re
 

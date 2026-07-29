@@ -1,3 +1,53 @@
+# spikes/ — live-run receipts ledger (newest first; "pumpjack" = the pre-rename codename)
+
+Drivers: `endpoints_qwen.py` (Inference Endpoints arms, current) · `verify.py` (CONTRACT
+checker for any output dir, active utility) · `tei_local.py`/`tei_jobs.py` (TEI third
+stack) · `embed_1job.py`/`embed_4job.py` (embeddings, single vs fan-out) · `tier1_*.py`
+(first-night validation: OCR, sglang, synth, fan-out, big-OCR, embeddings — historical)
+· `tier2_bucket_parity.py`/`tier2b_parity10k.py` (bare-httpx parity + bucket sink)
+· `asyncllm_spike.py` (in-process AsyncLLM arms, decision 15 — historical).
+
+# Inference Endpoints — the fourth serving arrangement (2026-07-29): warm · autoscale · cold start
+
+Dedicated IE endpoint `saturate-ie-spike` (Qwen2.5-0.5B-Instruct on `vllm/vllm-openai:latest`
+custom image, L4 x1, aws us-east-1, `min_replica=0`, scale-to-zero 15 min; IE proxies no
+engine metrics → all arms BLIND). Driver: `endpoints_qwen.py`. Endpoint DELETED after
+(verified absent from `hf endpoints list`); total spend ≈ $1.5.
+
+## Warm — 1k dolly rows from the laptop: PASS
+**1000/1000, 0 failed, 3,466 tok/s in 49.8s, window 8→256** discovered blind. The breaker
+rode an early warm-up 5xx burst from the managed proxy (opened, probed, closed — every
+retried row healed). **`wait_for_health` finding (documented, not patched)**: the trial
+request returned 404 and readiness passed — vLLM 404s a trial payload whose model name it
+doesn't serve, and the alive-only default (<500 = alive, by design) accepts that. Same
+shape as bare `vllm serve`; on IE "ready" therefore means alive, not workload-routable —
+use `ready_accept=` to gate on the workload.
+
+## Autoscale — does the window re-discover capacity as replicas arrive? (max 2, pendingRequests>64)
+- 6k rows, 1 replica: **5,950 ok (50 real dolly dupes deduped), 0 failed, 9,556 tok/s,
+  window 104, 106s.** Scale-up TRIGGERED ~35s in (target→2) but replica boot is
+  minutes-scale — the burst finished on one replica. Managed autoscaling reacts on
+  replica-boot timescales; the window adapts on tick timescales.
+- Same 6k with 2 replicas READY: **11,002 tok/s (+15%), window 134, 92.2s, 0 failed**
+  (2 breaker opens riding replica warm-up 5xxs). Blind AIMD found extra capacity through
+  the LB but nowhere near 2×: behind one URL the per-replica equilibria blur. One client
+  per shard (the Tier-1 fan-out receipt: 4 independent controllers, 80/80/72/32) remains
+  the scaling shape; an LB is a capacity smear, not a second engine.
+
+## Cold start — pump straight at a scaledToZero endpoint, NO wait_for_health: PASS
+Timeline (poll at 10s): T+0 first requests hit the sleeping endpoint → **the request itself
+triggers the wake** (T+13s state=initializing) → breaker OPEN after 9 consecutive
+failures, 1s probes → replica ready ≈T+93s → **probe catches it, breaker closes, admission
+resumes** → done at T+111s: **93 ok + 7 durable error rows** (those rows' per-attempt retry
+ladders expired during the wake), **0 lost**. Healing re-run (`retry_errors=True`):
+`rows_done_prior: 93, rows_processed: 7, rows_failed: 0` in 4.9s — **100/100.** The ladder
++ breaker ride managed-wake 503s with zero special-casing; scale-to-zero endpoints are
+usable as-is (budget the wake into `RETRY_BUDGET_S` if 7% transient error rows matter
+on the first pass).
+
+Caveats: single run per arm; 0.5B model, 150-token outputs; the LB observation is n=1 on
+2 replicas.
+
 # HEAD regression + first field firing of the reworked breaker (2026-07-28 PM)
 
 Fresh 1k-row generation on the fully-fixed wheel (both Codex rounds; job 6a68ad82):

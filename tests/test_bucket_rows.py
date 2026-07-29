@@ -3,6 +3,8 @@
 All on local tmp dirs (fsspec local filesystem) — no network.
 """
 
+import pytest
+
 from pumpjack import bucket_rows
 
 
@@ -69,3 +71,34 @@ def test_callable_ids(tmp_path):
 def test_empty_glob_yields_nothing(tmp_path):
     (tmp_path / "empty").mkdir()
     assert list(bucket_rows(f"{tmp_path}/empty/*.png")) == []
+
+
+def test_limit_zero_and_negative_select_nothing(tmp_path):
+    root = make_tree(tmp_path)
+    assert list(bucket_rows(f"{root}/**/*.png", limit=0)) == []
+    assert list(bucket_rows(f"{root}/**/*.png", limit=-3)) == []
+
+
+def test_unsupported_ids_string_raises(tmp_path):
+    root = make_tree(tmp_path)
+    with pytest.raises(ValueError, match="path.*or a callable"):
+        list(bucket_rows(f"{root}/**/*.png", ids="content"))
+
+
+def test_bracket_glob_gets_relative_ids(tmp_path):
+    root = make_tree(tmp_path)
+    rows = list(bucket_rows(f"{root}/[vw]*/*.png", read=False))
+    # `[` must count as glob magic: ids relative to scans/, not absolute paths
+    assert [rid for rid, _ in rows] == ["vol1/p1.png", "vol1/p2.png", "vol2/p3.png"]
+
+
+def test_chained_uri_zip(tmp_path):
+    import zipfile
+
+    zp = tmp_path / "arch.zip"
+    with zipfile.ZipFile(zp, "w") as z:
+        z.writestr("a.txt", "alpha")
+        z.writestr("sub/b.txt", "beta")
+    rows = list(bucket_rows(f"zip://**/*.txt::{zp}"))
+    assert sorted(rid for rid, _ in rows) == ["a.txt", "sub/b.txt"]
+    assert dict(rows)["a.txt"]["bytes"] == b"alpha"

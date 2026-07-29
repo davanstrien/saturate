@@ -127,16 +127,26 @@ def bucket_rows(
     decode explodes one object into N rows, which silently changes id
     semantics; see docs/decisions.md).
     """
+    import re
+
     import fsspec
 
-    fs, _ = fsspec.core.url_to_fs(pattern)
-    # ids are relative to the static prefix (chars before the first wildcard)
-    static = pattern.split("*")[0].split("?")[0]
-    base = static[: static.rfind("/") + 1]
-    _, base_path = fsspec.core.url_to_fs(base + "x")  # resolve scheme prefix
-    base_path = base_path[:-1]
-    raw = pattern.split("://")[-1] if "://" in pattern else pattern
-    infos = fs.glob(raw, detail=True)
+    if not callable(ids) and ids != "path":
+        raise ValueError(
+            f'bucket_rows ids must be "path" or a callable, got {ids!r} — '
+            "silently falling back to path ids would violate the caller's resume scheme"
+        )
+
+    # url_to_fs resolves the scheme (and chained URIs like zip://...::archive.zip)
+    # and returns the filesystem-native path — glob and id derivation both use IT,
+    # never a re-parse of the original URI.
+    fs, glob_path = fsspec.core.url_to_fs(pattern)
+    # ids are relative to the static prefix: everything before the first glob
+    # metacharacter (*, ?, [, {), up to the last path separator
+    m = re.search(r"[*?\[{]", glob_path)
+    static = glob_path[: m.start()] if m else glob_path
+    base_path = static[: static.rfind("/") + 1]
+    infos = fs.glob(glob_path, detail=True)
     paths = sorted(p for p, i in infos.items() if i.get("type") != "directory")
 
     def rid_of(path: str) -> str:
@@ -144,15 +154,16 @@ def bucket_rows(
         return str(ids(path)) if callable(ids) else rel
 
     selected = []
-    for p in paths:
-        rid = rid_of(p)
-        if not rid:
-            raise ValueError(f"id strategy produced no id for {p!r}")
-        if skip and rid in skip:
-            continue
-        selected.append((rid, p))
-        if limit is not None and len(selected) >= limit:
-            break
+    if limit is None or limit > 0:  # limit<=0 selects (and fetches) nothing
+        for p in paths:
+            rid = rid_of(p)
+            if not rid:
+                raise ValueError(f"id strategy produced no id for {p!r}")
+            if skip and rid in skip:
+                continue
+            selected.append((rid, p))
+            if limit is not None and len(selected) >= limit:
+                break
 
     if not read:
         for rid, p in selected:

@@ -7,7 +7,7 @@ not substrate: `pumpjack-poc` is frozen; this repo is judged by `pumpjack-oracle
 
 | # | Decision | Resolution |
 |---|---|---|
-| 1 | Layout | 9 modules; LOC ceiling CI-checked (see `tests/test_loc_ceiling.py`) |
+| 1 | Layout | 9 modules (+`sources`). Scope-creep rule (final form, 2026-07-28): surface grows only by deliberate, recorded decision — a decisions.md entry naming the new surface and why. No line counting (the numeric ceiling/note is retired; its history below) |
 | 2 | Request | Typed union json⊕multipart, `.kind` discriminator; `_files` hack dead |
 | 3 | parse | `parse(row, resp)` row passthrough; single-arg `parse(resp)` also accepted (introspected) — keeps oracle + POC recipes working |
 | 4 | Engine | Boot templates (vllm/sglang/sgl-omni/llamacpp) + ceiling-flag table; readiness = health×N + trial response (**alive-only by default**: <500 incl. 404; workload-strict via `ready_accept=`); killpg group lifecycle; GGUF = download weights |
@@ -54,6 +54,11 @@ validates the AdaptiveLimiter layering.
 
 ## Deviations from staged defaults
 
+- **Ceiling retired (2026-07-28, owner steer, truly final form)**: the number is gone
+  (`tests/test_loc_ceiling.py` removed). The mission it stood for stays as the scope-creep
+  rule in decision 1: new surface area requires a deliberate decision recorded here —
+  correctness fixes, validation, and comments are never scope and never negotiate for
+  space. History of the numeric form kept below for the record.
 - LOC ceiling set to **800** (was ~700): the clean split carries module boundaries, the typed
   Request union, manifest sidecars, SignalSource seam, and the observable breaker the POC
   lacked. Enforced in CI; renegotiate downward after M3 trims, not by deleting docstrings.
@@ -112,6 +117,33 @@ Tier 2 (~$30–50) is sprint-week material, flagged before spend.
       never load-generation; attribution line: "powered by the open-source davanstrien/saturate
       library". Layer proposal: "Inference Jobs" (NOT "Inference Pipelines" — transformers
       pipeline() + AWS SageMaker collision).
+
+## Sources module (2026-07-28, owner-approved — the input half of "dataset in")
+
+Owner steer: pumpjack is **transport-agnostic but IO-native to HF** — the output side
+already was (hf:// sink, buckets); `sources.dataset_rows` completes the input side.
+Evidence it belongs here and not a layer up: every consumer was rewriting the same loop
+(spike drivers, console codegen, uv-scripts recipes), and the input-side failure modes are
+this library's concerns (streaming-default after the EBDC disk death; the
+resume-rematerialization wart's fix — id-first streaming — is only reachable inside the
+source). Streaming default backed by hf.co/blog/streaming-datasets (persistent file cache,
+bundled resolution, prefetching — local-SSD speed for the one-sequential-pass pattern);
+`streaming=False` is a flag for small datasets. Accepts a repo id or an already-loaded
+(Iterable)Dataset. **Ids are a trust contract, not an enforced policy** (owner steer):
+the strategy — index (default: cheap, image-safe, stable per dataset+revision+order),
+content (strict JSON-only hash, dedups), a key column, or any callable — is the caller's
+assertion of uniqueness + resume-stability; the pump trusts what it is handed (CONTRACT
+§2 posture). Index as default is a deliberate divergence from `normalize()`'s
+content-hash default: it works on image/audio columns and costs nothing. Lives under the
+[hf] extra (now `huggingface_hub>=1.20` + `datasets>=5.0`, pinned deliberately recent —
+hf:// URIs landed in hub 1.19; datasets 5.0 carries the streaming overhaul), lazy-imported
+so the core pays nothing.
+
+Boundary held: sources yield rows, **never construct content** — prompt building, batching
+opinions, multi-stage pipelines stay above (datatrove is that layer). Deliberate new
+surface, recorded per the decision-1 scope rule (the numeric ceiling was retired the same
+day). Deferred to issues: `bucket_rows` (raw objects + parquet manifest, the production
+image shape from the 2026-07-16 input-side notes) and id-first streaming for cheap resume.
 
 ## Console-gap findings (2026-07-28, from the UI POC — storage-only dashboard build)
 

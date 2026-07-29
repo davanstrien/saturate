@@ -1,9 +1,13 @@
 """TEI backend test — laptop pump vs an exposed TEI Job. BLIND MODE, live.
 
-TEI serves the OpenAI-compatible /v1/embeddings route; its Prometheus metrics
-live on a port the jobs proxy doesn't carry, so this is the first real-world
-run of mode C: remote endpoint, no gauges, AIMD floor only. Also the first
-run through the exposed-Job proxy with auth headers.
+TEI serves the OpenAI-compatible /v1/embeddings route. This run was mode C —
+remote endpoint, no gauges, AIMD floor only — and the first run through the
+exposed-Job proxy with auth headers.
+
+CORRECTION (2026-07-29, RESULTS.md §TEI gauge dialect): the "metrics live on a
+port the proxy doesn't carry" reasoning below was wrong. TEI serves /metrics on
+its MAIN port; the run was blind because there was no TEI dialect yet. There is
+one now (`te_queue_size` -> waiting), so a rerun would have queue-depth gauges.
 
 Run locally:  uv run --with datasets python spikes/tei_local.py <exposed-url>
 """

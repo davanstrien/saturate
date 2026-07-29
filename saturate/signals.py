@@ -6,8 +6,16 @@ engine internals directly. The controller never knows which one fed it.
 
 The scrape table is keyed on the GAIE model-server-protocol semantics
 (queued / running / kv-util) rather than exact strings, and matches BOTH
-prefix spellings per engine: SGLang renamed `sglang:` -> `sglang_` once with
-no shim (sgl-project/sglang#12618) and vLLM has the same flip on its roadmap.
+prefix spellings per engine (`sglang:` and `sglang_`). The exporters
+themselves emit colons today; the dual spelling costs one character and
+absorbs a collector that normalises them away (Prometheus relabelling,
+OpenTelemetry) or a future rename. Neither engine has actually flipped:
+sgl-project/sglang#12618 was a collector-side dashboard fix, and vLLM's
+proposed flip was rejected (vllm-project/vllm#33824).
+
+Not every engine exposes the full set. TEI publishes queue depth only
+(`te_queue_size`) — no running/in-flight gauge, no KV — so `parse_gauges`
+returns a partial dict and the controller runs on the one real signal.
 """
 
 from __future__ import annotations
@@ -27,12 +35,14 @@ _PAT = re.compile(
     r"|cache_hit_rate(?P<sh>))"
     r"|llamacpp[:_]requests_(?P<l>deferred|processing)"
     r"|trtllm_num_requests_(?P<t>waiting|running)"
+    r"|te[:_]queue_size(?P<eq>)"
     r")(?:\{[^}]*\})?\s+(?P<val>[0-9.eE+-]+)",
     re.M,
 )
 
 _DIALECT = {"v": "vllm", "vkv": "vllm", "vh": "vllm", "vp": "vllm",
-            "s": "sglang", "skv": "sglang", "sh": "sglang", "l": "llamacpp", "t": "trtllm"}
+            "s": "sglang", "skv": "sglang", "sh": "sglang", "l": "llamacpp", "t": "trtllm",
+            "eq": "tei"}
 
 # boot-frozen server-side ceilings: the client can only diagnose them and hand
 # back the exact relaunch flag (advisor, not tuner)
@@ -41,6 +51,7 @@ CEILING_FLAG = {
     "sglang": "--max-running-requests {n}",
     "llamacpp": "-np {n} (per-slot context halves unless -c is raised too)",
     "trtllm": "--max_batch_size {n}",
+    "tei": "--max-concurrent-requests {n} (rejects with 429 above the cap — TEI does not queue)",
 }
 
 
@@ -51,7 +62,7 @@ def parse_gauges(text: str) -> dict | None:
     seen = False
     for m in _PAT.finditer(text):
         val = float(m.group("val"))
-        for g in ("v", "s", "l", "t", "vkv", "vh", "vp", "skv", "sh"):
+        for g in ("v", "s", "l", "t", "vkv", "vh", "vp", "skv", "sh", "eq"):
             if m.group(g) is not None:
                 seen = True
                 out["dialect"] = _DIALECT[g]
@@ -59,6 +70,8 @@ def parse_gauges(text: str) -> dict | None:
                     kind = m.group(g)
                     key = "waiting" if kind in ("waiting", "queue", "deferred") else "running"
                     out[key] = (out[key] or 0) + int(val)
+                elif g == "eq":
+                    out["waiting"] = (out["waiting"] or 0) + int(val)
                 elif g in ("vkv", "skv"):
                     out["kv"] = val
                 elif g in ("vh", "sh"):

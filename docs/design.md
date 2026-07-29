@@ -60,7 +60,7 @@ errored id is called healing; readers let the success win.
 |---|---|
 | `controller.py` | pure `decide(obs, limit) -> new_limit`: `Fixed(n)` or `Auto` (below) |
 | `window.py` | asyncio admission gate whose limit the controller adjusts at runtime |
-| `signals.py` | `SignalSource`: engine `/metrics` scrape (vLLM/SGLang/llama.cpp/TRT-LLM dialects) or none |
+| `signals.py` | `SignalSource`: engine `/metrics` scrape (vLLM/SGLang/llama.cpp/TRT-LLM dialects, TEI queue-depth only) or none |
 | `transport.py` | typed `Request` (json ⊕ multipart), retry ladder, circuit breaker |
 | `core.py` | `AdaptiveLimiter` (slot/observe) → `AdaptiveClient` (+HTTP) → `through()` (stream of `Done` results — id, row, output, error, token usage) |
 | `source.py` | `stream` (lazy normalize, content-hash ids), `skip_done` (anti-join + dedup), `shard_select` |
@@ -134,7 +134,9 @@ images live in host RAM.
 - **SignalSource** — `/metrics` scrape or none; the controller only ever sees a plain
   `Obs` dict. The dialect table matches both metric-name spellings per engine because
   the k8s Gateway API Inference Extension (GAIE) protocol fixes gauge *semantics* but
-  not their names (see [why.md §7](why.md)).
+  not their names (see [why.md §7](why.md)). Dialects may be partial: TEI publishes
+  queue depth (`te_queue_size`) and nothing else — no running gauge, no KV — so the
+  controller runs the queue-band branches and skips the KV ones.
 - **Sink** — one invariant: *an id returned by `existing_ids()` implies its record is
   durable; an id absent implies re-processing is safe.* `ParquetSink` carries the full
   CONTRACT; `FileSink` (one file per row, filesystem as manifest) is the second

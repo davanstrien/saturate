@@ -1,8 +1,12 @@
 """TEI Job-to-Job — CPU client Job pumps an exposed TEI GPU Job over the proxy.
 
 The production fan-out arrangement for embeddings: serving and pumping are
-separate Jobs; the client is blind (TEI metrics port not proxied) and cheap
-(cpu flavor). Same OpenAI /v1/embeddings route, zero library changes.
+separate Jobs; the client was blind and cheap (cpu flavor). Same OpenAI
+/v1/embeddings route, zero library changes.
+
+CORRECTION (2026-07-29): "TEI metrics port not proxied" was wrong — TEI serves
+/metrics on its main port, so the proxy does carry it. The run was blind for
+want of a dialect; see RESULTS.md §TEI gauge dialect.
 
 On the client Job:  python3 tei_jobs.py <exposed-url>
 """

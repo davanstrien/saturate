@@ -103,8 +103,9 @@ Notes on what you didn't have to do:
 - **No concurrency number.** The in-flight window tunes itself: it backs off when the
   server shows pressure (errors, timeouts, a growing queue) and creeps up while delivered
   throughput keeps improving — the same idea TCP uses for network congestion. When the
-  engine's `/metrics` gauges are reachable (vLLM, SGLang, llama.cpp, TRT-LLM) they sharpen
-  the decisions; against opaque endpoints (TEI, a proxy) it works from errors, timeouts
+  engine's `/metrics` gauges are reachable (vLLM, SGLang, llama.cpp, TRT-LLM, and TEI's
+  queue depth) they sharpen the decisions; against opaque endpoints (a hosted API, a
+  proxy that drops `/metrics`) it works from errors, timeouts
   and delivered throughput alone. It grows only
   after the first completion arrives, and it freezes (and tells you) when your *source* is
   the bottleneck rather than the server.
@@ -272,7 +273,7 @@ Everything in this table has a live receipt — numbers plus job/endpoint ids �
 
 | surface | live receipt |
 |---|---|
-| engines | vLLM, SGLang, llama.cpp boot templates + gauge dialects; TEI (blind, no gauges) |
+| engines | vLLM, SGLang, llama.cpp boot templates + gauge dialects; TEI queue-depth gauge only (`te_queue_size` — no KV, no running gauge) |
 | serving arrangements | in-process `Engine` · exposed-Job proxy · laptop→Job · Inference Endpoints **including scale-to-zero cold start** (retry ladder + breaker ride the managed-wake 503s; 100/100 after one healing re-run) |
 | routes | `/chat/completions` · `/completions` · `/embeddings` (micro-batch rows) · `/audio/transcriptions` (multipart) |
 | adaptivity | window self-ranged 8→376 with zero config; 1.209× the delivered tok/s of a hand-tuned fixed-64 bare-httpx client, same 10k rows (it discovered 272 was better than 64) |

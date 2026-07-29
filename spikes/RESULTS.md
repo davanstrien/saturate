@@ -7,6 +7,49 @@ stack) · `embed_1job.py`/`embed_4job.py` (embeddings, single vs fan-out) · `ti
 · `tier2_bucket_parity.py`/`tier2b_parity10k.py` (bare-httpx parity + bucket sink)
 · `asyncllm_spike.py` (in-process AsyncLLM arms, decision 15 — historical).
 
+# TEI gauge dialect — the queue-only engine (2026-07-29)
+
+Two `cpu-upgrade` Jobs on `ghcr.io/huggingface/text-embeddings-inference:cpu-latest`
+(bge-small-en-v1.5, ONNX CPU backend — it forces `max_batch_requests=8`).
+
+## 1. Signal-surface probe: `/metrics` is on the MAIN port — job `6a69f7ad4497041dbfc387a4`
+`GET :8080/metrics` → **200**, 394 lines. `/proc/net/tcp` shows **one** listening socket
+(0x1F90 = 8080); 3000/8000/9000/9090/80 all refuse. The older spike note claiming TEI
+metrics live on a port the Jobs proxy doesn't carry is **wrong for this image** — an
+exposed TEI Job proxies its metrics along with its API.
+
+Rendered names use the underscore spelling the metrics-crate convention predicted:
+```
+# TYPE te_queue_size gauge
+te_queue_size 0
+te_request_success{method="single"} 1   te_request_count{method="single"} 1
+te_embed_count 1                        te_embed_success 1
+te_batch_next_size_bucket{le="1"} 2     te_request_input_length_bucket{le="4"} 1
+```
+`te_queue_size` is the **only** gauge — everything else is a counter or a histogram.
+No running/in-flight gauge, no KV (there is no KV cache to report). So TEI is the first
+**partial** dialect: `waiting` only, `running`/`kv`/`hits` stay `None`.
+
+Backpressure model differs too: `--max-concurrent-requests` (default 512) **rejects with
+429** rather than queueing, which is what `CEILING_FLAG["tei"]` now says.
+
+## 2. Live gauge mode end-to-end: PASS — job `6a69f87c4497041dbfc387ae`
+Branch wheel (`signals/tei-dialect`) pulled from `davanstrien/pumpjack-spike`, installed
+in-Job. *(Image gotcha: the TEI image ships **no python** — only `curl`. Bootstrap `uv`
+from `astral.sh/uv/install.sh` and let it fetch a CPython.)* 50 batch-rows × 8 inline
+texts against `localhost:8080/v1` `/embeddings`, `Auto(target_waiting=4, initial=2,
+max_limit=8)`:
+
+**50/50 ok, 0 failed, 2,036 tok/s in 2.75s**, and the telemetry tick is the receipt —
+gauge mode, not blind:
+```json
+{"t": 2.0, "limit": 2, "inflight": 2, "waiting": 6, "running": null,
+ "bp": 0, "ok": 40, "tok_s": 2216.4, "kv": null, "hits": null, "preempts": null}
+```
+`waiting: 6` with `running`/`kv`/`hits` null is exactly the queue-only shape. (Telemetry
+tick records carry no `dialect` field — the dialect is asserted in `tests/test_signals.py`
+against a verbatim excerpt of the probe body above.)
+
 # Inference Endpoints — the fourth serving arrangement (2026-07-29): warm · autoscale · cold start
 
 Dedicated IE endpoint `saturate-ie-spike` (Qwen2.5-0.5B-Instruct on `vllm/vllm-openai:latest`

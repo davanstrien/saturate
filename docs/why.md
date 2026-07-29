@@ -14,8 +14,10 @@ commits noted (mostly 2026-07-28/29).
 
 ## 0. The one-sentence position
 
-saturate is a client that sits between a row source and any OpenAI-compatible endpoint, decides
-at runtime how many requests to keep in flight, and writes crash-safe resumable parquet.
+saturate exists for one loop: **dataset → model → nicer dataset**. It is the client in the
+middle — it sits between a row source and any OpenAI-compatible endpoint, decides at runtime
+how many requests to keep in flight, and writes the result as crash-safe resumable parquet
+that is itself a dataset. Everything below is about doing that one shape well.
 
 The short version of every comparison below:
 

@@ -1,6 +1,9 @@
 # saturate
 
-Batch inference for datasets: rows in, any OpenAI-compatible endpoint, resumable parquet out.
+**Dataset → model → nicer dataset.** Run every row of a dataset through a model — OCR a
+corpus of page scans, embed 10M texts, classify, extract, translate, synthesize — and get
+a dataset back: resumable parquet you can publish, not a pile of responses. Any
+OpenAI-compatible endpoint in the middle.
 
 > Known as `pumpjack` during development — you'll still see that codename in
 > `docs/history/` and the run receipts in `spikes/`.

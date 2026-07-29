@@ -1,9 +1,9 @@
 # saturate
 
-**Dataset → model → nicer dataset.** Run every row of a dataset through a model — OCR a
-corpus of page scans, embed 10M texts, classify, extract, translate, synthesize — and get
-a dataset back: resumable parquet you can publish, not a pile of responses. Any
-OpenAI-compatible endpoint in the middle.
+**Data → model → nicer data.** Run every row of a dataset — or every file in a bucket —
+through a model: OCR a corpus of page scans, embed 10M texts, classify, extract,
+translate, synthesize. What comes out is a dataset (resumable parquet you can publish),
+not a pile of responses. Any OpenAI-compatible endpoint in the middle.
 
 > Known as `pumpjack` during development — you'll still see that codename in
 > `docs/history/` and the run receipts in `spikes/`.
@@ -125,9 +125,13 @@ Notes on what you didn't have to do:
 task-shaped wrappers ("OCR this dataset with model X") belong a layer up — recipe scripts
 and product surfaces build them out of `pump()`; this library stays small underneath them.
 
-## About `Engine` readiness
+## About `Engine` (an optional helper)
 
-`Engine` boots the server in its own process group, health-gates it, and kills it on exit.
+You never need `Engine`. Any server that speaks the OpenAI HTTP API — vLLM, SGLang,
+llama.cpp, TGI, TEI, something a colleague runs — can be launched however you like and
+passed as `endpoint=` its URL. `Engine` is a convenience for the common case where the
+model server and the pump share one process/Job: it boots the server in its own process
+group, health-gates it, and kills it on exit.
 Health checks lie during warm-up, so readiness also POSTs a trial request — but the default
 acceptance is **alive-only**: any response below 500, including 404, counts, because it
 proves the API path parses requests. To gate readiness on your actual workload, pass

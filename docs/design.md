@@ -1,16 +1,38 @@
-# Design — what saturate is and how it works
+# Design
 
-One page for reviewers and integrators. This file describes what IS; the "why not X"
-comparisons live in [why.md](why.md), the on-disk format in
-[../CONTRACT.md](../CONTRACT.md), every benchmark number in
-[../spikes/RESULTS.md](../spikes/RESULTS.md), and the decision log (project history)
-in [history/decisions.md](history/decisions.md).
+saturate exists for one loop: **data → model → nicer data** — run every row of a dataset
+(or every file in a bucket) through a model and get a dataset back. This page gives the high-level shape
+first, then how it is currently implemented. (Comparisons: [why.md](why.md) · on-disk
+format: [../CONTRACT.md](../CONTRACT.md) · benchmark numbers:
+[../spikes/RESULTS.md](../spikes/RESULTS.md).)
 
-saturate moves rows from any iterable through an OpenAI-compatible HTTP endpoint and
-into crash-safe, resumable parquet — deciding at runtime how many requests to keep in
-flight. A product or UI layer can sit on top by generating `pump()` drivers and
-reading progress straight from the output directory (the storage contract doubles as
-the progress protocol); nothing in this library knows about any UI.
+## The shape
+
+Three pieces:
+
+- **a row source** — any iterable of `(id, row)`; helpers exist for Hub datasets and
+  buckets, but nothing requires them
+- **an adaptive client** — keeps the endpoint busy without overloading it, by adjusting
+  the number of in-flight requests at runtime
+- **a storage contract** — the output is append-only parquet plus a manifest, so it is
+  itself a dataset, and resume works by reading it back
+
+```mermaid
+flowchart LR
+    D[(dataset / bucket /\nany iterable)] --> S[source:\nids + skip done]
+    S --> W[adaptive\nwindow]
+    W --> E[any OpenAI-compatible\nendpoint]
+    E --> P[parse]
+    P --> K[(parquet parts\n+ manifest)]
+    K -. done ids, next run .-> S
+```
+
+The endpoint is anything that speaks the OpenAI HTTP API — vLLM, SGLang, llama.cpp,
+TEI, an Inference Endpoint, a colleague's server. The library can boot a server for you
+(`Engine`, a convenience) but never requires it: launch whatever you want, pass its URL.
+
+Progress and resume live entirely in the output directory. A coordinator or UI can
+watch a run by reading storage; it never needs to talk to the running process.
 
 ## The life of one row
 
@@ -27,10 +49,12 @@ source (any iterable / dataset_rows / bucket_rows)
 ```
 
 Failures become durable *error rows* (never gaps); a re-run skips done ids exactly and
-can retry errored ones (`retry_errors=True`). "Healing" = a later success record for
-an id that previously errored; readers let the success win.
+can retry errored ones (`retry_errors=True`). A later success record for a previously
+errored id is called healing; readers let the success win.
 
-## Modules
+## How it is currently implemented
+
+### Modules
 
 | module | role |
 |---|---|
@@ -43,58 +67,78 @@ an id that previously errored; readers let the success win.
 | `sources.py` | HF-native inputs (`[hf]` extra, lazy): `dataset_rows` (streaming Hub datasets), `bucket_rows` (raw objects by fsspec glob, bounded prefetch) |
 | `sink.py` | Sink protocol: `ParquetSink` (full contract), `FileSink`; `drain`, `read_output` |
 | `engine.py` | optional server lifecycle: boot templates, readiness gate, process-group kill |
-| `telemetry.py` | per-tick records (frozen schema, CONTRACT §6) + run-end advisor |
+| `telemetry.py` | per-tick records (CONTRACT §6) + run-end advisor |
 | `__init__.py` | `pump()` = the composition of the above; `Stats`; agent-mode stdout contract |
 
-## The controller (`Auto`)
+### The controller (`Auto`)
 
-Vocabulary, defined once:
+Terms used below:
+
 - **tick** — the controller runs on a ~2-second cadence; each tick it sees an `Obs`
   snapshot and returns the new window limit.
 - **gauges** — engine-reported queue metrics scraped from `/metrics`: `waiting`
   (queued requests), `kv` (KV-cache utilization, 0–1), `hits` (prefix-cache hit
-  rate). Absent gauges = **blind mode** (latency/error/throughput signals only).
+  rate). No gauges = **blind mode** (latency/error/throughput signals only).
 - **band** — the target range for the engine's `waiting` queue:
   `[target_waiting/4, target_waiting*2]` (default target 8 → band [2, 16]). Small
-  and positive = the engine always has work but never a runaway backlog.
+  and positive: the engine always has work, never a runaway backlog.
 - **delivered throughput** — tokens/sec actually completed this tick; the primary
-  signal. Gauges accelerate decisions; throughput decides them.
+  signal. Gauges speed decisions up; throughput decides them.
 
-What it does, signal → action (in priority order; first match wins):
+Per tick, first match wins:
 
-| signal this tick | action | why |
+```mermaid
+flowchart TD
+    T[tick] --> BP{backpressure?\n429 / timeout / 5xx}
+    BP -- yes --> CUT[halve]
+    BP -- no --> KV{KV high AND\nhit rate low?}
+    KV -- yes --> CUT
+    KV -- no --> IB{source slower\nthan engine?}
+    IB -- yes --> HOLD[hold]
+    IB -- no --> ACK{any completion\never seen?}
+    ACK -- no --> HOLD
+    ACK -- yes --> LO{queue below band,\nwindow ≥80% used?}
+    LO -- yes --> G{throughput still\nimproving?}
+    G -- yes --> GROW[slow-start: double\nafter: +step]
+    G -- no --> PROBE[hold; probe +step on a\nbackoff schedule, revert\nif no gain in 3 ticks]
+    LO -- no --> HI{queue above band?}
+    HI -- yes --> DOWN[−step]
+    HI -- no --> HOLD
+```
+
+| signal this tick | action | reason |
 |---|---|---|
-| backpressure (saturation-shaped 429 / timeout / 5xx) | halve the limit, 2-tick cooldown; void any in-flight probe | classic multiplicative decrease |
-| KV high (≥0.9) AND prefix-hit rate low (<0.5) or absent | halve | high KV with healthy hits is benign reuse; high KV with low hits is real memory pressure |
-| source slower than engine (`input_bound`) | freeze | a starved engine is ambiguous — never widen because the *source* lags |
-| no request has EVER completed | freeze | ACK-clock rule: with long generations, gauges show phantom headroom while multimodal preprocessing queues off-gauge; growing here is how jobs OOM |
-| queue below band AND ≥80% of window in flight, throughput still improving | slow-start: double (until a queue has durably formed, 2-tick debounce); after that: +step | grow while the engine demonstrably converts extra requests into tokens |
-| same, but throughput plateaued | hold, then **probe**: +step on an exponential-backoff cooldown (4→32 ticks); confirm if throughput improves within 3 ticks, else revert | real generations lag the tick, so one flat reading must not end growth forever |
+| backpressure (saturation-shaped 429 / timeout / 5xx) | halve the limit, short cooldown; cancel any in-flight probe | multiplicative decrease |
+| KV high (≥0.9) AND prefix-hit rate low (<0.5) or absent | halve | high KV with healthy hits is cache reuse; with low hits it is memory pressure |
+| source slower than engine (`input_bound`) | hold | a starved engine is ambiguous — never widen because the *source* lags |
+| no request has ever completed | hold | with long generations, gauges show phantom headroom while preprocessing queues off-gauge; growing here is how jobs OOM |
+| queue below band, ≥80% of window in flight, throughput improving | slow-start: double (until a queue has durably formed); after that: +step | grow while extra requests demonstrably become tokens |
+| same, but throughput flat | hold, then probe +step on an exponential-backoff cooldown (4→32 ticks); keep it if throughput improves within 3 ticks, else revert | generations lag the tick, so one flat reading must not end growth forever |
 | queue above band | −step | standing backlog: back off before the engine does |
-| blind mode (no gauges at all) | creep +1 on sustained success unless throughput plateaued | the AIMD floor that carried TEI and Inference Endpoints runs |
+| blind mode (no gauges) | +1 on sustained success unless throughput is flat | the fallback that carried the TEI and Inference Endpoints runs |
 
 `Fixed(n)` bypasses all of it. Defaults: `Auto(target_waiting=8, initial=16,
 max_limit=512, step=8)`; cap `max_limit` (~128) for vision workloads — in-flight
 images live in host RAM.
 
-## Seams
+### Seams
 
 - **Transport** — a protocol; HTTP is the shipped implementation. An in-process
-  vLLM/SGLang transport is the planned second one (for the high-rate, short-output
-  regime). Proven bring-your-own: a binary-audio TTS transport was written against the
+  vLLM/SGLang transport is the planned second one (high-rate, short-output regime).
+  Proven bring-your-own: a binary-audio TTS transport was written against the
   documented surface without modifying the package (RESULTS.md, TTS probe).
 - **SignalSource** — `/metrics` scrape or none; the controller only ever sees a plain
   `Obs` dict. The dialect table matches both metric-name spellings per engine because
-  the k8s Gateway API Inference Extension (GAIE) protocol freezes gauge *semantics*
-  but explicitly not their names (see [why.md §7](why.md)).
+  the k8s Gateway API Inference Extension (GAIE) protocol fixes gauge *semantics* but
+  not their names (see [why.md §7](why.md)).
 - **Sink** — one invariant: *an id returned by `existing_ids()` implies its record is
   durable; an id absent implies re-processing is safe.* `ParquetSink` carries the full
-  CONTRACT; `FileSink` (one file per row, filesystem as manifest) shows the protocol
-  is real; bring your own.
-- **AdaptiveLimiter** — `slot()/observe(outcome)`: the drop-in replacement for a fixed
-  semaphore in datatrove-shaped hosts that keep their own transport and IO.
+  CONTRACT; `FileSink` (one file per row, filesystem as manifest) is the second
+  implementation; bring your own.
+- **AdaptiveLimiter** — `slot()/observe(outcome)`: a drop-in replacement for a fixed
+  semaphore in hosts that keep their own transport and IO (datatrove-shaped stacks).
 
-## Invariants (tested)
+### Invariants (tested)
 
 Error rows, not lost rows · exactly-once admission per id (across runs via
 manifest-first exact resume; within runs via dedup) · reserved columns `id`, `error`
@@ -103,7 +147,7 @@ responses are never marked success · the breaker can pause but never strand (wa
 always released; a server that stays down ends the run with an error) · stdout in
 agent mode is exactly one JSON line.
 
-## Known bounds (documented, not hidden)
+### Known bounds (documented, not hidden)
 
 Resume/dedup id-sets are in-memory (~10M rows comfortable; shard-scoped done-sets are
 the planned fix beyond). Binary response routes (TTS audio) are not supported by the

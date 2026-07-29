@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import argparse
 
-from pumpjack import Auto, Engine, pump
-from pumpjack.source import shard_select
+from saturate import Auto, Engine, pump
+from saturate.source import shard_select
 
 MODEL = "Qwen/Qwen3-Embedding-0.6B"
 REPO = "davanstrien/pumpjack-embed-4job"

@@ -1,8 +1,8 @@
-# CONTRACT.md — pumpjack storage protocol (v1, frozen 2026-07-27)
+# CONTRACT.md — saturate storage protocol (v1, frozen 2026-07-27)
 
-pumpjack writes batch-inference results as an **append-only set of parquet parts under one
+saturate writes batch-inference results as an **append-only set of parquet parts under one
 output directory**, keyed by a stable `id`. Any process that can read parquet and glob a
-directory can consume, resume, or fan out over that output without importing pumpjack.
+directory can consume, resume, or fan out over that output without importing saturate.
 
 Frozen here: the interface between a run and its durable output. Not frozen: the controller,
 transport retry ladder, engine lifecycle — implementation, free to change.
@@ -60,7 +60,7 @@ measured by the client — blank, never guessed. Standard names when written:
 
 `id` must be **globally unique** across all shards writing to one output and **stable across
 re-runs**. The v1 default is a **content hash**: `sha1(canonical-JSON of the row's id-relevant
-fields)[:16]`, via `pumpjack.source.content_id(row)` — order-independent, re-shard-safe. A
+fields)[:16]`, via `saturate.source.content_id(row)` — order-independent, re-shard-safe. A
 caller-designated key column or a global-index id is equally conformant (the contract requires
 the two invariants, not the derivation). Scale caveat: 16 hex chars ≈ 64 bits — collision odds
 are negligible at the ~10M-row scale v1 targets (~3×10⁻⁶) but reach coin-flip around 5×10⁹
@@ -96,7 +96,7 @@ probe for manifest-based resume.)
 
 ## 4. Error rows and healing
 
-- If `to_request`/`parse` raises or the endpoint fails unrecoverably, pumpjack writes
+- If `to_request`/`parse` raises or the endpoint fails unrecoverably, saturate writes
   `{id, error: "<diagnostic>"}` — never drops the row.
 - **Reader rule**: healing can produce two records for one id (an old error, a new success).
   For each id, the record with `error IS NULL` wins; otherwise the row is errored.

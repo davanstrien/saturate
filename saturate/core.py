@@ -21,11 +21,11 @@ from collections.abc import AsyncIterator, Callable, Iterable
 
 import httpx2 as httpx
 
-from pumpjack.controller import Auto, Fixed, Obs
-from pumpjack.signals import HttpScrape, Null
-from pumpjack.telemetry import tick_record
-from pumpjack.transport import Breaker, FatalTransportError, Request, call_endpoint, coerce_request
-from pumpjack.window import Window
+from saturate.controller import Auto, Fixed, Obs
+from saturate.signals import HttpScrape, Null
+from saturate.telemetry import tick_record
+from saturate.transport import Breaker, FatalTransportError, Request, call_endpoint, coerce_request
+from saturate.window import Window
 
 TICK_S = 2.0
 

@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import argparse
 
-from pumpjack import Auto, Engine, pump
-from pumpjack.source import shard_select
+from saturate import Auto, Engine, pump
+from saturate.source import shard_select
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 OUTPUT = "hf://datasets/davanstrien/pumpjack-tier1-fanout/data"

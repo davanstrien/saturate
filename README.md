@@ -1,4 +1,4 @@
-# pumpjack
+# saturate
 
 Batch inference for datasets: rows in, any OpenAI-compatible endpoint, resumable parquet out.
 
@@ -9,9 +9,9 @@ flight (adaptively — you never pick a concurrency number), retries, crash-safe
 resume. Killing it at any point is fine. Re-running the same command is always safe.
 
 ```bash
-uv pip install 'pumpjack[hf]'   # not yet on PyPI — pip install 'pumpjack[hf] @ git+https://github.com/davanstrien/pumpjack'
+uv pip install 'saturate[hf]'   # not yet on PyPI — pip install 'saturate[hf] @ git+https://github.com/davanstrien/saturate'
 # the [hf] extra pulls huggingface_hub + datasets: hf:// output paths and Hub dataset
-# input (dataset_rows); plain pumpjack works with your own iterables + local output
+# input (dataset_rows); plain saturate works with your own iterables + local output
 ```
 
 ## Quickstart: one model, one Job, one dataset
@@ -20,7 +20,7 @@ The most common shape — boot the model and pump a dataset through it, all in o
 (e.g. a single GPU Job on HF Jobs):
 
 ```python
-from pumpjack import pump, Engine
+from saturate import pump, Engine
 
 with Engine("lightonai/LightOnOCR-2-1B", engine="vllm") as endpoint:   # vllm | sglang | llamacpp
     stats = pump(
@@ -41,7 +41,7 @@ Where do `rows` come from? Any iterable works; for Hub datasets there's a built-
 this one-sequential-pass access pattern, see hf.co/blog/streaming-datasets):
 
 ```python
-from pumpjack import dataset_rows
+from saturate import dataset_rows
 
 rows = dataset_rows("HuggingFaceFW/fineweb-edu", split="train", columns=["text"],
                     limit=100_000)          # (id, row) stream; ids="index"|"content"|column
@@ -92,7 +92,7 @@ real product: **a stream of completed results**. Parquet is just the default pla
 stream lands.
 
 ```python
-from pumpjack import AdaptiveClient, Auto, stream, skip_done, through, drain
+from saturate import AdaptiveClient, Auto, stream, skip_done, through, drain
 
 rows = stream(load_dataset("...", streaming=True))     # (id, row) pairs, lazy
 rows = skip_done(rows, sink)                            # exact resume filter
@@ -104,7 +104,7 @@ async with AdaptiveClient(endpoint, window=Auto()) as client:
 # chaining is just more piping — e.g. OCR then judge:
 #   pages -> through(ocr_client, ...) -> drain(stage1_out)
 #   read_output(stage1_out) -> through(judge_client, ...) -> drain(stage2_out)
-# read_output() reads a pumpjack output dir back as an (id, row) source, applying the
+# read_output() reads a saturate output dir back as an (id, row) source, applying the
 # healing reader rule (the error-IS-NULL record wins) — so stage 2 sees clean rows.
 ```
 
@@ -185,7 +185,7 @@ same command is always safe.
 Everything on disk is specified in [CONTRACT.md](CONTRACT.md): append-only parts, the
 manifest sidecar, error rows (a failed row is a durable record, never a gap), the healing
 reader rule, telemetry. Any process that can read parquet and glob a directory can consume
-or resume pumpjack output without importing pumpjack.
+or resume saturate output without importing saturate.
 
 ## What it deliberately isn't
 

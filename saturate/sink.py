@@ -218,7 +218,7 @@ async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
     """Terminal stage: persist a Done stream; returns Stats with counts filled in.
     Completion markers are pump()'s job (written last, after stats/telemetry) —
     drain alone writes no marker."""
-    from pumpjack import Stats  # local import: avoid cycle
+    from saturate import Stats  # local import: avoid cycle
 
     stats = stats if stats is not None else Stats()
     # r7: validation is the SINK'S contract — only a sink that supplies probe() gets it.
@@ -252,7 +252,7 @@ async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
 
 
 def read_output(out_uri: str) -> Iterator[tuple[str, dict]]:
-    """Read a pumpjack output dir back as an (id, row) source, applying the
+    """Read a saturate output dir back as an (id, row) source, applying the
     CONTRACT §4.2 reader rule: the error-IS-NULL record wins; error-only ids
     are skipped. Materializes the id->record map (fine to ~1M rows; document)."""
     import fsspec

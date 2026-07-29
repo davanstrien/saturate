@@ -4,7 +4,7 @@ healing rule, skip_done with an external done-set."""
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from pumpjack import FileSink, Stats, read_output, skip_done
+from saturate import FileSink, Stats, read_output, skip_done
 
 
 def test_filesink_resume_roundtrip(tmp_path):
@@ -50,7 +50,7 @@ def test_mixed_success_error_parts_union(tmp_path):
     external consumers (the shapes-run finding: null-typed error column)."""
     import pyarrow.dataset as ds
 
-    from pumpjack import ParquetSink
+    from saturate import ParquetSink
 
     sink = ParquetSink(str(tmp_path), flush_every=1)
     sink.append({"id": "ok1", "response": "fine", "error": None})   # part 1: all-null error
@@ -64,7 +64,7 @@ def test_mixed_success_error_parts_union(tmp_path):
 def test_error_row_first_keeps_success_columns(tmp_path):
     """Codex r3 #2: from_pylist takes the schema from row 0 — an error row at
     the head of a batch must not silently drop later success columns."""
-    from pumpjack import ParquetSink
+    from saturate import ParquetSink
 
     sink = ParquetSink(str(tmp_path), flush_every=2)
     sink.append({"id": "bad", "error": "http 400: nope"})
@@ -78,7 +78,7 @@ def test_null_first_then_typed_column_evolves(tmp_path):
     """Codex r4/r5 blocker #1: all-null columns are dropped from their part
     (sparse, §1) so a later real type — string OR float — can never conflict
     with a premature guess already on disk. read_output unifies across parts."""
-    from pumpjack import ParquetSink
+    from saturate import ParquetSink
 
     sink = ParquetSink(str(tmp_path), flush_every=1)
     sink.append({"id": "a", "text": None, "score": None, "error": None})  # part 1: sparse {id,error}
@@ -96,7 +96,7 @@ def test_declared_schema_is_stable_in_any_order(tmp_path):
     import pyarrow.dataset as ds
     import pytest
 
-    from pumpjack import ParquetSink
+    from saturate import ParquetSink
 
     schema = pa.schema([("id", pa.string()), ("error", pa.string()),
                         ("text", pa.string()), ("score", pa.float64())])
@@ -121,9 +121,9 @@ def test_declared_type_mismatch_becomes_error_row(tmp_path):
     schema; overflow ints and extra fields are error rows too."""
     import asyncio
 
-    from pumpjack import ParquetSink
-    from pumpjack.core import Done
-    from pumpjack.sink import drain
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
 
     schema = pa.schema([("id", pa.string()), ("error", pa.string()), ("score", pa.float64())])
 
@@ -143,7 +143,7 @@ def test_declared_schema_requires_contract_types(tmp_path):
     """Codex r6 blocker #1: declared id/error must satisfy the contract."""
     import pytest
 
-    from pumpjack import ParquetSink
+    from saturate import ParquetSink
 
     with pytest.raises(ValueError, match="must be string"):
         ParquetSink(str(tmp_path), schema=pa.schema([("id", pa.int64()), ("error", pa.string())]))
@@ -154,7 +154,7 @@ def test_declared_schema_rejects_nonnullable_user_fields(tmp_path):
     non-nullable field would crash the Parquet write with no durable record."""
     import pytest
 
-    from pumpjack import ParquetSink
+    from saturate import ParquetSink
 
     with pytest.raises(ValueError, match="nullable"):
         ParquetSink(str(tmp_path), schema=pa.schema([
@@ -167,9 +167,9 @@ def test_declared_schema_error_row_is_durable(tmp_path):
     a durable sparse error row."""
     import asyncio
 
-    from pumpjack import ParquetSink
-    from pumpjack.core import Done
-    from pumpjack.sink import drain
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
 
     schema = pa.schema([("id", pa.string()), ("error", pa.string()), ("score", pa.float64())])
     sink = ParquetSink(str(tmp_path), flush_every=1, schema=schema)
@@ -190,8 +190,8 @@ def test_generic_sink_not_subject_to_arrow_rules(tmp_path):
     for (validation belongs to sinks that supply probe())."""
     import asyncio
 
-    from pumpjack.core import Done
-    from pumpjack.sink import drain
+    from saturate.core import Done
+    from saturate.sink import drain
 
     class Rendered:
         def __str__(self):
@@ -209,7 +209,7 @@ def test_dynamic_type_change_raises_at_flush(tmp_path):
     Strict unify makes the documented behavior true."""
     import pytest
 
-    from pumpjack import ParquetSink
+    from saturate import ParquetSink
 
     sink = ParquetSink(str(tmp_path), flush_every=1)
     sink.append({"id": "a", "score": 1, "error": None})
@@ -222,7 +222,7 @@ def test_schema_rejected_for_custom_sink_objects():
     ignored when the output is a custom sink object."""
     import pytest
 
-    from pumpjack.sink import as_sink
+    from saturate.sink import as_sink
 
     class Custom:
         def existing_ids(self, retry_errors=False):
@@ -243,9 +243,9 @@ def test_nonserializable_parse_value_becomes_error_row(tmp_path):
     at flush with no durable record — must become a healable error row."""
     import asyncio
 
-    from pumpjack import ParquetSink
-    from pumpjack.core import Done
-    from pumpjack.sink import drain
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
 
     async def results():
         yield Done("bad", {}, {"value": object()}, None, {})
@@ -271,7 +271,7 @@ def test_all_null_column_inherits_pinned_type(tmp_path):
     pinned at first flush, so cross-part dataset reads stay schema-stable."""
     import pyarrow.dataset as ds
 
-    from pumpjack import ParquetSink
+    from saturate import ParquetSink
 
     sink = ParquetSink(str(tmp_path), flush_every=1)
     sink.append({"id": "a", "text": "hi", "error": None})     # part 1 pins text: string
@@ -289,8 +289,8 @@ def test_all_null_part_carries_full_pinned_schema(tmp_path, monkeypatch):
     must materialize the full pinned schema; the seq counter makes order deterministic."""
     import pyarrow.dataset as ds
 
-    from pumpjack import ParquetSink
-    from pumpjack import sink as sink_mod
+    from saturate import ParquetSink
+    from saturate import sink as sink_mod
 
     monkeypatch.setattr(sink_mod.time, "time", lambda: 1_234_567_890.0)  # force the collision
     sink = ParquetSink(str(tmp_path), flush_every=1)
@@ -320,9 +320,9 @@ def test_reserved_columns_win_over_parse(tmp_path):
     """Codex finding #2: parse returning its own 'id' must not break resume."""
     import asyncio
 
-    from pumpjack import ParquetSink
-    from pumpjack.core import Done
-    from pumpjack.sink import drain
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
 
     async def results():
         yield Done("row-1", {}, {"id": "chatcmpl-xyz", "text": "hi"}, None, {})
@@ -341,7 +341,7 @@ def test_content_id_rejects_objects():
     """Codex finding #3: unstable reprs must be refused, not silently hashed."""
     import pytest
 
-    from pumpjack.source import content_id
+    from saturate.source import content_id
 
     class FakeImage:
         pass
@@ -352,7 +352,7 @@ def test_content_id_rejects_objects():
 
 def test_retry_after_http_date():
     """Codex finding #6: RFC 9110 HTTP-date form."""
-    from pumpjack.transport import _parse_retry_after
+    from saturate.transport import _parse_retry_after
 
     assert _parse_retry_after("3.5") == 3.5
     assert _parse_retry_after(None) is None

@@ -1,5 +1,5 @@
 """Engine: optional in-job server lifecycle (boot templates, readiness gate,
-process-group kill). Only used when pumpjack launches the server; pointing at
+process-group kill). Only used when saturate launches the server; pointing at
 an already-running endpoint bypasses this module entirely.
 
 GGUF rule: download weights to local disk first — mmap-over-FUSE-mount stalls.

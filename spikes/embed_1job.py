@@ -11,7 +11,7 @@ On the Job (vllm/vllm-openai image, pumpjack wheel installed):
 
 from __future__ import annotations
 
-from pumpjack import Auto, Engine, pump
+from saturate import Auto, Engine, pump
 
 MODEL = "Qwen/Qwen3-Embedding-0.6B"
 REPO = "davanstrien/pumpjack-embed-1job"

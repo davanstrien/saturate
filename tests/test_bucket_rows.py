@@ -5,7 +5,7 @@ All on local tmp dirs (fsspec local filesystem) — no network.
 
 import pytest
 
-from pumpjack import bucket_rows
+from saturate import bucket_rows
 
 
 def make_tree(tmp_path):

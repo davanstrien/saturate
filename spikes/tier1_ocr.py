@@ -14,7 +14,7 @@ import argparse
 import base64
 import io
 
-from pumpjack import Auto, Engine, pump
+from saturate import Auto, Engine, pump
 
 MODEL = "lightonai/LightOnOCR-2-1B"
 INPUT = "davanstrien/moh-bench-sample"

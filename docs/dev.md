@@ -6,11 +6,11 @@ uv run ruff check .
 uv run pytest tests/ -q        # unit + regression tests, fast
 ```
 
-The acceptance oracle lives in a sibling repo (`pumpjack-oracle`) and treats
+The acceptance oracle lives in a sibling repo (`saturate-oracle`) and treats
 this package as one of several possible implementations behind an adapter:
 
 ```bash
-cd ../pumpjack-oracle
+cd ../saturate-oracle
 ORACLE_ADAPTER=clean uv run pytest -q    # 9 tests, ~50s, spawns fake engines
 ```
 

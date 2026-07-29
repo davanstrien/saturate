@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from pumpjack import Engine
+from saturate import Engine
 
 
 def test_failed_boot_kills_process_group():
@@ -22,8 +22,8 @@ def test_accept_validator_gates_readiness(monkeypatch):
     """Codex r6 blocker #5: route=/payload= alone still accepted a 404 — the
     accept= predicate makes readiness require the workload's expected answer,
     while the default keeps the documented alive-only semantics."""
-    import pumpjack.engine as engmod
-    from pumpjack import wait_for_health
+    import saturate.engine as engmod
+    from saturate import wait_for_health
 
     class R:
         def __init__(self, code):

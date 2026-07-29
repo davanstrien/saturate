@@ -62,7 +62,7 @@ def skip_done(rows: Iterable[tuple[str, dict]], done, retry_errors: bool = False
     output-dir string (resolved via the CONTRACT ParquetSink). Counts land on
     `stats` when given (rows_total / rows_done_prior / rows_deduped)."""
     if isinstance(done, str):
-        from pumpjack.sink import ParquetSink
+        from saturate.sink import ParquetSink
 
         done = ParquetSink(done).existing_ids(retry_errors=retry_errors)
     elif hasattr(done, "existing_ids"):

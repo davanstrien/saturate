@@ -6,9 +6,9 @@ import asyncio
 
 import pytest
 
-import pumpjack.core as core
-from pumpjack import AdaptiveLimiter, Fixed, ParquetSink
-from pumpjack.sink import as_sink
+import saturate.core as core
+from saturate import AdaptiveLimiter, Fixed, ParquetSink
+from saturate.sink import as_sink
 
 
 def test_crashed_tick_loop_surfaces(monkeypatch):
@@ -29,7 +29,7 @@ def test_crashed_tick_loop_surfaces(monkeypatch):
 def test_client_closed_when_tick_loop_crashed(monkeypatch):
     """Codex r4 blocker #6: surfacing a crashed tick loop at limiter exit must
     not leak the HTTP client."""
-    from pumpjack import AdaptiveClient
+    from saturate import AdaptiveClient
 
     monkeypatch.setattr(core, "TICK_S", 0.01)
 
@@ -53,7 +53,7 @@ def test_client_closed_when_tick_loop_crashed(monkeypatch):
 def test_admission_fails_fast_after_tick_death(monkeypatch):
     """Codex r5 blocker #4a: a long run must not continue with a dead
     controller — the next admission raises run-fatally (never a row error)."""
-    from pumpjack import FatalTransportError
+    from saturate import FatalTransportError
 
     monkeypatch.setattr(core, "TICK_S", 0.01)
 
@@ -75,7 +75,7 @@ def test_blocked_admission_fails_after_tick_death(monkeypatch):
     """Codex r6 blocker #3: a waiter already queued behind a full window passed
     the pre-acquire check, then proceeded after the controller died. The check
     re-runs post-acquire (and releases the slot before raising)."""
-    from pumpjack import FatalTransportError
+    from saturate import FatalTransportError
 
     monkeypatch.setattr(core, "TICK_S", 0.01)
 

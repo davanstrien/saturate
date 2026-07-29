@@ -6,10 +6,10 @@ import asyncio
 
 import pytest
 
-from pumpjack import FatalTransportError, ParquetSink
-from pumpjack.core import through
-from pumpjack.sink import drain
-from pumpjack.transport import Breaker
+from saturate import FatalTransportError, ParquetSink
+from saturate.core import through
+from saturate.sink import drain
+from saturate.transport import Breaker
 
 
 class _StubLimiter:

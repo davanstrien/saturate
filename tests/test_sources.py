@@ -6,7 +6,7 @@ All in-memory (Dataset.from_dict / to_iterable_dataset) — no network.
 import pytest
 from datasets import Dataset
 
-from pumpjack import content_id, dataset_rows
+from saturate import content_id, dataset_rows
 
 
 def ds():

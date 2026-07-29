@@ -1,7 +1,7 @@
 """Probe-and-revert: the controller must escape a FALSE plateau (throughput
 reading lags the tick on real engines) yet stay bounded at a REAL knee."""
 
-from pumpjack.controller import Auto
+from saturate.controller import Auto
 
 
 def drive(ctrl, limit, ticks, tok_of_limit, lag=1):

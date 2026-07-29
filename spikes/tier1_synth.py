@@ -12,7 +12,7 @@ On the Job (vllm/vllm-openai image, system python3, pumpjack wheel installed):
 
 from __future__ import annotations
 
-from pumpjack import Auto, Engine, pump
+from saturate import Auto, Engine, pump
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 OUTPUT = "hf://datasets/davanstrien/pumpjack-tier1-synth/data"

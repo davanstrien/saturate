@@ -5,8 +5,8 @@ never retry (their file objects are consumed — a re-send posts empty bodies)."
 import asyncio
 import time
 
-import pumpjack.transport as transport
-from pumpjack.transport import Breaker, call_endpoint, make_json_request, make_multipart_request
+import saturate.transport as transport
+from saturate.transport import Breaker, call_endpoint, make_json_request, make_multipart_request
 
 
 class _Resp:

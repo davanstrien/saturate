@@ -13,7 +13,7 @@ import time
 
 import httpx
 
-from pumpjack import Auto, Engine, pump
+from saturate import Auto, Engine, pump
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 N = 10_000

@@ -11,12 +11,12 @@ line numbers were read at the commits noted. All verified 2026-07-28.
 
 ## 0. The one-sentence position
 
-pumpjack is a client that sits between a row source and any OpenAI-compatible endpoint, decides
+saturate is a client that sits between a row source and any OpenAI-compatible endpoint, decides
 at runtime how many requests to keep in flight, and writes crash-safe resumable parquet.
 
 The narrow, defensible version of the novelty claim:
 
-> pumpjack is the only standalone client whose controller *discovers* endpoint capacity from
+> saturate is the only standalone client whose controller *discovers* endpoint capacity from
 > delivered throughput plus server gauges. Other adaptive clients throttle *down* from a
 > user-supplied cap on rate-limit signals, which self-hosted engines never send.
 
@@ -153,19 +153,19 @@ actual rate. At ≤216 req/s the two are identical.
   dataclass drops, we had to fork and add `InferenceResult.reasoning`.
   > Receipt: `datatrove/pipeline/inference/types.py:8-20` @ `9f044f1` (three fields, no
   > `reasoning`); fork commit `f7df218` via `datatrove-jobs-executor.md`.
-  pumpjack's `parse(row, resp)` sees the raw response body; nothing to fork.
+  saturate's `parse(row, resp)` sees the raw response body; nothing to fork.
 
-**Complementary, not competitive.** The innermost pumpjack layer is an adaptive *semaphore*, not
+**Complementary, not competitive.** The innermost saturate layer is an adaptive *semaphore*, not
 a client — `AdaptiveLimiter` with `slot()` / `observe()`. Dropping it into datatrove is a ~5-line
 diff in `_send_request` plus a constructor swap, keeping their transport, retries, checkpointing,
 caching and metrics untouched.
 
 > Receipt: `PROPOSAL-functional-core.md` §Plumb-check (verified against a local datatrove
-> checkout); the seam itself is `pumpjack/core.py` (`AdaptiveLimiter`).
+> checkout); the seam itself is `saturate/core.py` (`AdaptiveLimiter`).
 
 **Honest counter.** datatrove wins whenever you need what it is: multi-stage pipelines, rollout
 functions (a *program* per row, not one request), server crash-isolation and health-restart
-inside a rank, its executor family, and its checkpointing. pumpjack is deliberately one request
+inside a rank, its executor family, and its checkpointing. saturate is deliberately one request
 per row and one stage; the moment your row needs a loop, datatrove or your own script is correct.
 
 > Receipt: `CONTRACT.md` §8 non-guarantees — "one request per row (rollouts/trajectories are a
@@ -215,7 +215,7 @@ in-flight, and its docs tell you to reduce it by hand on 429).
 > named as prior art extended — it ships fingerprinted checkpoints and per-row token columns.
 
 **Honest counter.** Against a commercial API with a published quota, Curator's model is the
-*correct* one and pumpjack's is worse: when the ceiling is a contract rather than a capacity,
+*correct* one and saturate's is worse: when the ceiling is a contract rather than a capacity,
 discovering it by probing burns 429s for no information. That is why rate-limit pacing is a
 separate concept (a Pacer over the transport), explicitly deferred rather than folded into the
 controller.
@@ -255,7 +255,7 @@ to you.
 > Receipt: `synthetic-data-library-design.md` §4 Ray-on-Jobs subsection.
 
 Also honest: Daft's prefix-bucketing result (50.7% speedup, cache hits 29%→54%) is a real
-batch-only optimization that pumpjack does not ship. Prefix-grouped admission is on the table,
+batch-only optimization that saturate does not ship. Prefix-grouped admission is on the table,
 not in v1.
 
 > Receipt: `synthetic-data-library-design.md` §1 batch-only optimizations.
@@ -367,7 +367,7 @@ processor and dispatcher components.
 > Receipt: `llm-d/llm-d-batch-gateway` README §Prerequisites, lines 166-168.
 
 **Honest counter.** At platform scale — many tenants, many pods, a K8s cluster you already run —
-llm-d and the inference gateways are the right answer and pumpjack is not competing. pumpjack is
+llm-d and the inference gateways are the right answer and saturate is not competing. saturate is
 for one person with a dataset, an endpoint and a Job. Routing across replicas is genuinely out of
 scope: through a load balancer, per-endpoint gauges are wrong, and the honest behaviour is to
 require a direct endpoint or degrade to blind mode.
@@ -411,7 +411,7 @@ to hardware, tensor-parallel degree and engine version. Nobody can precompute yo
 Watching delivered throughput at runtime is the only general answer.
 
 **Bench rule banked from the same comment**: `--dataset-name random` regenerates identical
-prompts, so prefix-cache hit rate climbed 20% → 98% across trials. Any pumpjack A/B uses unique
+prompts, so prefix-cache hit rate climbed 20% → 98% across trials. Any saturate A/B uses unique
 prompts or disables prefix caching on both arms.
 
 **(c) Too high kills the job.** A 5,000-page vision soak was OOMKilled (exit 137, host RAM) about
@@ -424,7 +424,7 @@ and hundreds of in-flight 1540px images killed the container.
 
 The fix is the TCP rule — never widen a window nothing has ever been acknowledged through:
 
-> Receipt: `pumpjack/controller.py:72` (`self._seen_ok = False  # ACK-clock: no growth before the
+> Receipt: `saturate/controller.py:72` (`self._seen_ok = False  # ACK-clock: no growth before the
 > first completion ever`); enforcement at `:96-98`.
 
 This is also the honest admission that an adaptive controller has its own failure mode. It cost
@@ -484,7 +484,7 @@ never duplicates, and never the whole output.
 > Receipt: `CONTRACT.md` §3.
 
 **Why not a database.** The output has to be readable by anything that can glob a directory and
-read parquet, without importing pumpjack, from a laptop, a Job, or DuckDB. A database is a
+read parquet, without importing saturate, from a laptop, a Job, or DuckDB. A database is a
 service to run, a schema to migrate, and a credential to pass into every Job.
 
 **Sharp edge, stated rather than hidden.** Error rows are sparse — `{id, error}` with no user
@@ -503,7 +503,7 @@ any sink satisfying it gets resume. `FileSink` is the second blessed implementat
 row named by id, the filesystem is the manifest, overwrites are idempotent. Non-resumable IO is
 the same protocol with an empty `existing_ids()`.
 
-> Receipt: `PROPOSAL-functional-core.md` open choice #0 (settled); `pumpjack/sink.py:105`
+> Receipt: `PROPOSAL-functional-core.md` open choice #0 (settled); `saturate/sink.py:105`
 > (`FileSink`), `:53` and `:116` (the two `existing_ids` implementations), `:156`
 > (`read_output`).
 
@@ -549,10 +549,10 @@ documented as trading away crash granularity.
 > §The composable layer.
 
 **Honest counter.** If you have a genuine DAG — heterogeneous CPU and GPU stages, fan-in,
-conditional branches, cross-stage retries — you want an orchestrator, and pumpjack is not one.
+conditional branches, cross-stage retries — you want an orchestrator, and saturate is not one.
 It is designed to sit *inside* one, which is why the output convention (`completions/shard-{n}.done`)
 is deliberately datatrove's, so a coordinator can watch the directory without knowing anything
-about pumpjack.
+about saturate.
 
 > Receipt: `CONTRACT.md` §5.
 

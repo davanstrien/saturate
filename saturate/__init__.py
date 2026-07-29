@@ -1,4 +1,4 @@
-"""pumpjack — adaptive batch-inference pump.
+"""saturate — adaptive batch-inference pump.
 
 Rows in -> any OpenAI-compatible endpoint -> resumable output.
 
@@ -18,15 +18,15 @@ import sys
 import time
 from collections.abc import Callable, Iterable
 
-from pumpjack.controller import Auto, Fixed, Obs
-from pumpjack.core import AdaptiveClient, AdaptiveLimiter, Done, through
-from pumpjack.engine import Engine, wait_for_health
-from pumpjack.signals import CEILING_FLAG
-from pumpjack.sink import FileSink, ParquetSink, as_sink, drain, read_output
-from pumpjack.source import content_id, shard_select, skip_done, stream
-from pumpjack.sources import bucket_rows, dataset_rows
-from pumpjack.telemetry import advise
-from pumpjack.transport import FatalTransportError, Request, make_json_request, make_multipart_request
+from saturate.controller import Auto, Fixed, Obs
+from saturate.core import AdaptiveClient, AdaptiveLimiter, Done, through
+from saturate.engine import Engine, wait_for_health
+from saturate.signals import CEILING_FLAG
+from saturate.sink import FileSink, ParquetSink, as_sink, drain, read_output
+from saturate.source import content_id, shard_select, skip_done, stream
+from saturate.sources import bucket_rows, dataset_rows
+from saturate.telemetry import advise
+from saturate.transport import FatalTransportError, Request, make_json_request, make_multipart_request
 
 __all__ = [
     "pump", "Stats", "Fixed", "Auto", "Obs", "Engine", "wait_for_health",
@@ -36,7 +36,7 @@ __all__ = [
     "FatalTransportError", "dataset_rows", "bucket_rows"]
 __version__ = "0.1.0"
 
-USER_AGENT = f"pumpjack/{__version__}"
+USER_AGENT = f"saturate/{__version__}"
 AGENT_ENV_VARS = ("CLAUDECODE", "CODEX_SANDBOX", "AI_AGENT")
 
 

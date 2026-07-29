@@ -10,11 +10,11 @@ receipts in [../spikes/RESULTS.md](../spikes/RESULTS.md); the "why not X" FAQ in
 ```
 console / product UI          forms + run views          (not this repo)
 inference-pipelines layer     TaskSpec -> driver compiler (not this repo; seam below)
-pumpjack                      THIS: engine + combinators + storage contract
+saturate                      THIS: engine + combinators + storage contract
 Workloads / Jobs              image + command
 ```
 
-The UI never sees pumpjack; it speaks TaskSpecs to a compiler layer that emits
+The UI never sees saturate; it speaks TaskSpecs to a compiler layer that emits
 pump() drivers. A run's progress is readable from storage alone (part counts,
 markers, telemetry jsonl) — the CONTRACT doubles as the UI protocol.
 

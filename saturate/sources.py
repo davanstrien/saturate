@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 
-from pumpjack.source import content_id
+from saturate.source import content_id
 
 
 def dataset_rows(
@@ -64,7 +64,7 @@ def dataset_rows(
             from datasets import load_dataset
         except ImportError as e:  # pragma: no cover
             raise ImportError(
-                "dataset_rows() needs the `datasets` package — install pumpjack[hf]"
+                "dataset_rows() needs the `datasets` package — install saturate[hf]"
             ) from e
         dataset = load_dataset(
             dataset, name=config, split=split, streaming=streaming,

@@ -13,7 +13,7 @@ import sys
 
 from huggingface_hub import get_token
 
-from pumpjack import Auto, pump, wait_for_health
+from saturate import Auto, pump, wait_for_health
 
 BATCH = 32
 N_BATCHES = 200

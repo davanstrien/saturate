@@ -76,6 +76,19 @@ def dataset_rows(
             "with an already-loaded dataset they cannot take effect (and a "
             "silently ignored revision would void the index-id stability caveat)"
         )
+    if columns is not None and not callable(ids):
+        # column pushdown: select BEFORE iterating so unused features are
+        # neither downloaded nor decoded — found live embedding the text
+        # column of an image-bearing dataset (392k page scans would have been
+        # decoded just to be discarded; ImportError: Pillow was the symptom).
+        # A column-name id joins the selection; callable ids see the full
+        # example, so no pushdown there.
+        keep = set(columns) | ({ids} if ids not in ("index", "content") else set())
+        if keep and hasattr(dataset, "select_columns"):
+            try:
+                dataset = dataset.select_columns(sorted(keep))
+            except Exception:
+                pass  # unknown names surface naturally at first iteration
     for i, ex in enumerate(dataset):
         if limit is not None and i >= limit:
             return

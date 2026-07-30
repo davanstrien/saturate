@@ -1,6 +1,6 @@
 [project]
 name = "saturate"
-version = "0.1.1"
+version = "0.1.2"
 description = "Adaptive batch-inference client: dataset in, any OpenAI-compatible endpoint, resumable parquet out"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,7 +17,9 @@ dependencies = [
 # Pinned deliberately recent (owner steer): hf:// URIs (incl. buckets) landed in
 # huggingface_hub 1.19; datasets 5.0 carries the streaming overhaul the
 # streaming-by-default input leans on (hf.co/blog/streaming-datasets).
-hf = ["huggingface_hub>=1.20", "datasets>=5.0"]
+# pillow: generous-by-default — datasets image columns decode on iteration,
+# and a missing Pillow kills streaming even for rows that never use the image
+hf = ["huggingface_hub>=1.20", "datasets>=5.0", "pillow>=10"]
 
 [dependency-groups]
 dev = [

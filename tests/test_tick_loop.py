@@ -1,11 +1,12 @@
 """The tick loop feeds the controller honest observations and records why the
 window moved: zero delivered tokens is a reading, not a missing signal; every
-tick carries the controller's reason and the observed request latency."""
+tick carries the controller's reason and the observed request latency.
+
+Ticks are driven directly (`limiter._tick()`), never by the clock."""
 
 import asyncio
 
-import saturate.core as core
-from saturate import AdaptiveLimiter, Fixed, Stats
+from saturate import AdaptiveLimiter, Auto, Fixed, Stats
 from saturate.controller import Obs
 from saturate.telemetry import cut_reasons
 
@@ -29,71 +30,79 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def test_zero_tokens_with_requests_in_flight_is_a_reading(monkeypatch):
-    monkeypatch.setattr(core, "TICK_S", 0.01)
+def test_zero_tokens_with_requests_in_flight_is_a_reading():
     ctrl = Recorder()
 
     async def go():
-        async with AdaptiveLimiter(window=ctrl) as lim:
-            await asyncio.sleep(0.03)  # idle: nothing in flight, nothing observable
-            async with lim.slot():
-                lim.observe(ok=True, tokens=100)  # tokens have been seen once...
-                await asyncio.sleep(0.05)  # ...then a request sits in flight delivering nothing
-            await asyncio.sleep(0.03)
+        lim = AdaptiveLimiter(window=ctrl)
+        await lim._tick()  # idle: nothing in flight, nothing observable
+        async with lim.slot():
+            lim.observe(ok=True, tokens=100)
+            await lim._tick()  # tokens delivered this tick
+            await lim._tick()  # a request sits in flight delivering nothing
+        await lim._tick()
         return lim
 
     lim = run(go())
-    idle = [o for o in ctrl.seen if o.inflight == 0 and o.successes == 0]
-    stalled = [o for o in ctrl.seen if o.inflight > 0 and o.successes == 0]
-    assert idle and all(o.tok_s is None for o in idle)
-    assert stalled and all(o.tok_s == 0.0 for o in stalled), [o.tok_s for o in stalled]
-    assert any(t["reason"] == "cut:stall" for t in lim.ticks) and all("reason" in t for t in lim.ticks)
+    idle, delivered, stalled = ctrl.seen[0], ctrl.seen[1], ctrl.seen[2]
+    assert idle.tok_s is None and idle.inflight == 0
+    assert delivered.tok_s > 0 and delivered.successes == 1
+    assert stalled.tok_s == 0.0 and stalled.inflight == 1 and stalled.successes == 0
+    assert [t["reason"] for t in lim.ticks] == ["hold", "hold", "cut:stall", "hold"]
 
 
-def test_endpoint_without_token_usage_has_no_throughput_signal(monkeypatch):
+def test_endpoint_without_token_usage_has_no_throughput_signal():
     """Completions that never report tokens leave tok_s None: the controller
     falls back to queue gauges rather than reading a permanent plateau."""
-    monkeypatch.setattr(core, "TICK_S", 0.01)
     ctrl = Recorder()
 
     async def go():
-        async with AdaptiveLimiter(window=ctrl) as lim:
-            async with lim.slot():
-                lim.observe(ok=True, tokens=0)
-                await asyncio.sleep(0.04)
+        lim = AdaptiveLimiter(window=ctrl)
+        async with lim.slot():
+            lim.observe(ok=True, tokens=0)
+            await lim._tick()
+            await lim._tick()
 
     run(go())
-    assert all(o.tok_s is None for o in ctrl.seen)
+    assert [o.tok_s for o in ctrl.seen] == [None, None]
 
 
-def test_tick_records_request_latency(monkeypatch):
-    monkeypatch.setattr(core, "TICK_S", 0.01)
+def test_tick_carries_request_latency_and_the_oldest_inflight_age():
     ctrl = Recorder()
 
     async def go():
-        async with AdaptiveLimiter(window=ctrl) as lim:
-            assert ctrl.seen == [] or ctrl.seen[-1].latency_s is None
-            for _ in range(3):
-                async with lim.slot():
-                    await asyncio.sleep(0.02)
-            await asyncio.sleep(0.03)
+        lim = AdaptiveLimiter(window=Auto(initial=4))
+        lim.controller = ctrl
+        await lim._tick()
+        assert ctrl.seen[-1].latency_s is None and ctrl.seen[-1].oldest_s is None
+        async with lim.slot():
+            pass
+        async with lim.slot():
+            await lim._tick()
         return lim
 
     lim = run(go())
-    assert ctrl.seen[-1].latency_s is not None and 0.015 <= ctrl.seen[-1].latency_s < 0.2
-    assert lim.ticks[-1]["latency_s"] == round(ctrl.seen[-1].latency_s, 3)
+    obs = ctrl.seen[-1]
+    assert obs.latency_s is not None and obs.latency_s >= 0.0 and obs.oldest_s >= 0.0
+    assert obs.tick_s is not None and obs.tick_s > 0
+    assert lim.ticks[-1]["latency_s"] == round(obs.latency_s, 3)
+    assert lim.oldest_s is None  # released
 
 
-def test_fixed_controller_ticks_carry_hold(monkeypatch):
-    monkeypatch.setattr(core, "TICK_S", 0.01)
+def test_latency_window_covers_the_largest_window():
+    assert AdaptiveLimiter(window=Fixed(4))._latencies.maxlen == 64
+    assert AdaptiveLimiter(window=Auto(max_limit=1024))._latencies.maxlen == 1024
 
+
+def test_fixed_controller_ticks_carry_hold():
     async def go():
-        async with AdaptiveLimiter(window=Fixed(2)) as lim:
-            await asyncio.sleep(0.03)
+        lim = AdaptiveLimiter(window=Fixed(2))
+        await lim._tick()
+        await lim._tick()
         return lim
 
     lim = run(go())
-    assert lim.ticks and {t["reason"] for t in lim.ticks} == {"hold"}
+    assert {t["reason"] for t in lim.ticks} == {"hold"}
 
 
 def test_cut_reasons_counted_into_stats():

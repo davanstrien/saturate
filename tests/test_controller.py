@@ -72,10 +72,34 @@ def test_stall_patience_scales_with_request_latency():
     ctrl = Auto(target_waiting=8, initial=4, step=STEP)
     limit = warm(ctrl, 4)
     slow = healthy(limit, successes=0, tok_s=0.0, latency_s=20.0)
-    traj, reasons = drive(ctrl, limit, [slow] * 10)  # 10 ticks = 20 s = one latency
-    assert traj == [limit] * 10 and "cut:stall" not in reasons, (traj, reasons)
-    traj, reasons = drive(ctrl, limit, [slow] * 15)  # past 2x latency: now it is a stall
+    traj, reasons = drive(ctrl, limit, [slow] * 20)  # 20 ticks = 40 s = two latencies
+    assert traj == [limit] * 20 and "cut:stall" not in reasons, (traj, reasons)
+    traj, reasons = drive(ctrl, limit, [slow] * 15)  # past 3x latency: now it is a stall
     assert "cut:stall" in reasons, (traj, reasons)
+
+
+def test_one_stall_cut_per_episode():
+    """A wedged engine is halved once; the next stall cut needs a completion
+    first. Otherwise the stall rule re-fires the tick each cooldown ends."""
+    ctrl = Auto(target_waiting=8, initial=16, step=STEP)
+    limit = warm(ctrl, 16)
+    stalled = healthy(limit, successes=0, tok_s=0.0, latency_s=2.0)
+    traj, reasons = drive(ctrl, limit, [stalled] * 12)
+    assert reasons.count("cut:stall") == 1 and traj[-1] == 8, (traj, reasons)
+    recovered = healthy(8, successes=8, tok_s=800.0, latency_s=2.0)  # completions resume...
+    traj, reasons = drive(ctrl, 8, [recovered] + [dict(stalled, inflight=8)] * 4)  # ...then wedge again
+    assert reasons.count("cut:stall") == 1 and traj[-1] == 4, (traj, reasons)
+
+
+def test_backpressure_cut_does_not_cascade_into_a_stall_cut():
+    """After a 429 the retry ladder holds the slots in backoff: a full window
+    with no completions, which is not a second reason to halve."""
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    limit = warm(ctrl, 64)
+    burst = healthy(limit, backpressure=1, successes=0, tok_s=0.0, latency_s=1.0)
+    backoff = healthy(limit, successes=0, tok_s=0.0, latency_s=1.0)
+    traj, reasons = drive(ctrl, limit, [burst] + [backoff] * 8)
+    assert traj == [32] * 9 and "cut:stall" not in reasons, (traj, reasons)
 
 
 # --- backpressure -----------------------------------------------------------
@@ -101,6 +125,31 @@ def test_backpressure_cooldown_follows_latency():
     assert slow == [32] * 6, slow
 
 
+def test_cooldown_holds_while_the_old_window_drains():
+    """The oldest request in flight predating the cut means the old window has
+    not drained yet: keep holding, but never past the stall patience."""
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    limit = warm(ctrl, 64)
+    burst = healthy(limit, backpressure=1, successes=5, tok_s=5000.0, latency_s=1.0)
+    after = [healthy(32, successes=5, tok_s=1000.0, latency_s=1.0, oldest_s=age)
+             for age in (3.0, 5.0, 7.0, 1.0, 1.0)]  # ages at 2 s ticks: predates the cut until the 4th
+    traj, reasons = drive(ctrl, limit, [burst] + after)
+    assert reasons == ["cut:bp"] + ["hold:cooldown"] * 3 + ["hold:ack"] * 2, (traj, reasons)
+    stuck = [healthy(32, successes=5, tok_s=1000.0, latency_s=1.0, oldest_s=1000.0)] * 6
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    traj, reasons = drive(ctrl, warm(ctrl, 64), [burst] + stuck)
+    assert reasons.count("hold:cooldown") == 3, reasons  # capped at the stall patience (3 ticks)
+
+
+def test_tick_length_comes_from_the_observation():
+    """Latency-derived tick counts use the measured tick, not the constructor default."""
+    burst = healthy(64, backpressure=1, successes=5, tok_s=5000.0, latency_s=3.0)
+    default, _ = drive(Auto(initial=64), 64, [burst] * 8)
+    fast_ticks, _ = drive(Auto(initial=64), 64, [dict(burst, tick_s=0.5)] * 8)
+    assert default == [32, 32, 32, 16, 16, 16, 8, 8], default  # ceil(3 / 2) = 2 ticks
+    assert fast_ticks == [32] * 7 + [16], fast_ticks  # ceil(3 / 0.5) = 6 ticks
+
+
 def test_cut_rescales_throughput_baseline():
     """After a halving, throughput at the smaller window is compared against a
     proportionally smaller baseline, so recovery is not read as a plateau."""
@@ -121,6 +170,17 @@ def test_cut_at_floor_keeps_baseline():
     assert limit == 2
     traj, reasons = drive(ctrl, 2, [healthy(2)] * 8)  # flat 200 tok/s
     assert "grow" not in reasons, (traj, reasons)
+
+
+def test_reduction_at_the_floor_is_reported_as_a_hold():
+    """Stats count actual reductions: a cut or step-down that cannot go below
+    min_limit is a hold, not a cut."""
+    ctrl = Auto(target_waiting=8, initial=2, min_limit=2, step=STEP)
+    limit = warm(ctrl, 2)
+    traj, reasons = drive(ctrl, limit, [healthy(2, backpressure=1)] + [healthy(2, waiting=100)] * 4)
+    assert traj == [2] * 5, traj
+    assert reasons[0] == "hold:floor" and reasons[-1] == "hold:floor", reasons
+    assert "cut:bp" not in reasons and "cut:queue" not in reasons, reasons
 
 
 def test_cut_decay_is_proportional_near_floor():
@@ -144,6 +204,18 @@ def test_growth_waits_for_a_window_of_completions():
     traj, reasons = drive(ctrl, 16, [slow] * 4)
     assert traj == [16, 16, 16, 32], (traj, reasons)  # 16 acks arrive on the 4th tick
     assert reasons[:3] == ["hold:ack"] * 3 and reasons[3] == "grow", reasons
+
+
+def test_input_bound_ticks_are_not_evidence():
+    """A window starved by the source completes little and delivers few tokens.
+    Those ticks say nothing about the engine; the first evaluation after the
+    source resumes must not read them as a plateau."""
+    ctrl = Auto(target_waiting=8, initial=16, step=STEP)
+    limit = warm(ctrl, 16)  # baseline 1600 tok/s
+    starved = healthy(16, inflight=4, successes=2, tok_s=50.0, input_bound=True)
+    resumed = healthy(16, tok_s=2000.0)  # the engine got faster meanwhile
+    traj, reasons = drive(ctrl, limit, [starved] * 6 + [resumed])
+    assert reasons == ["hold:input_bound"] * 6 + ["grow"] and traj[-1] == 32, (traj, reasons)
 
 
 def test_cheap_text_ramps_every_tick():

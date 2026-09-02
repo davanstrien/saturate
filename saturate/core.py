@@ -56,16 +56,17 @@ class _Slot:
         self._check()  # before queueing on the window...
         t = time.monotonic()
         await self._l.window.acquire()
-        self._t_admitted = time.monotonic()
-        self._l._wait["acquire"] += self._t_admitted - t
+        admitted = time.monotonic()
+        self._l._wait["acquire"] += admitted - t
         try:
             self._check()  # ...and after (r6): the controller may have died while we were queued
         except BaseException:
             await self._l.window.release()
             raise
+        self._l._admitted[self] = admitted
 
     async def __aexit__(self, *exc):
-        self._l._latencies.append(time.monotonic() - self._t_admitted)
+        self._l._latencies.append(time.monotonic() - self._l._admitted.pop(self))
         await self._l.window.release()
 
 
@@ -87,10 +88,12 @@ class AdaptiveLimiter:
         self.ticks: list[dict] = []
         self.tokens_total = 0
         self._wait = {"source": 0.0, "acquire": 0.0}
-        self._latencies: deque[float] = deque(maxlen=64)  # admission-to-release, recent requests
+        self._admitted: dict[_Slot, float] = {}  # admission time of every request in flight
+        self._latencies: deque[float] = deque(maxlen=max(64, getattr(self.controller, "max", 64)))
         self.input_bound_ever = False
         self._task: asyncio.Task | None = None
-        self._t0 = time.monotonic()
+        self._t0 = self._t_last = time.monotonic()
+        self._last_tokens = 0
 
     def slot(self) -> _Slot:
         return _Slot(self)
@@ -111,8 +114,13 @@ class AdaptiveLimiter:
         """p50 admission-to-completion time of recent requests (None before the first)."""
         return statistics.median(self._latencies) if self._latencies else None
 
+    @property
+    def oldest_s(self) -> float | None:
+        """Age of the oldest request in flight (None when nothing is in flight)."""
+        return time.monotonic() - min(self._admitted.values()) if self._admitted else None
+
     async def __aenter__(self):
-        self._t0 = time.monotonic()
+        self._t0 = self._t_last = time.monotonic()
         self._task = asyncio.create_task(self._loop())
         return self
 
@@ -130,38 +138,41 @@ class AdaptiveLimiter:
                       file=sys.stderr, flush=True)  # r5: never mask the body's exception
 
     async def _loop(self):
-        last_tokens, t_last = 0, time.monotonic()
         while True:
             await asyncio.sleep(TICK_S)
-            gauges = await self.signals.read()
-            now = time.monotonic()  # actual elapsed, not TICK_S: scrape latency skews the rate
-            tok_s = (self.tokens_total - last_tokens) / (now - t_last)
-            last_tokens, t_last = self.tokens_total, now
-            total_wait = self._wait["source"] + self._wait["acquire"]
-            input_bound = (total_wait > 0 and self._wait["source"] / total_wait > 0.5
-                           and self.window.inflight < int(self.window.limit * 0.5))
-            self.input_bound_ever = self.input_bound_ever or input_bound
-            g = gauges or {}
-            # zero tokens with requests in flight is a reading (a stalled or slow engine);
-            # None means unobservable: nothing in flight, or an endpoint that never reports usage
-            observable = self.window.inflight > 0 and self.tokens_total > 0
-            latency_s = self.latency_s
-            obs = Obs(waiting=g.get("waiting"), running=g.get("running"),
-                      inflight=self.window.inflight, backpressure=self.events["backpressure"],
-                      successes=self.events["successes"], input_bound=input_bound,
-                      kv=g.get("kv"), hits=g.get("hits"), tok_s=tok_s or (0.0 if observable else None),
-                      preempts=g.get("preempts"), latency_s=latency_s)
-            new_limit = self.controller.decide(obs, self.window.limit)
-            rec = tick_record(time.monotonic() - self._t0, self.window.limit,
-                              self.window.inflight, gauges, self.events["backpressure"],
-                              self.events["successes"], input_bound, tok_s,
-                              reason=getattr(self.controller, "last_reason", "hold"), latency_s=latency_s)
-            self.ticks.append(rec)
-            if self.on_tick:
-                self.on_tick(rec)
-            self.events["backpressure"] = self.events["successes"] = 0
-            self._wait["source"] = self._wait["acquire"] = 0.0
-            await self.window.set_limit(new_limit)
+            await self._tick()
+
+    async def _tick(self):
+        gauges = await self.signals.read()
+        now = time.monotonic()  # actual elapsed, not TICK_S: scrape latency skews the rate
+        dt = now - self._t_last
+        tok_s = (self.tokens_total - self._last_tokens) / dt if dt > 0 else 0.0
+        self._last_tokens, self._t_last = self.tokens_total, now
+        total_wait = self._wait["source"] + self._wait["acquire"]
+        input_bound = (total_wait > 0 and self._wait["source"] / total_wait > 0.5
+                       and self.window.inflight < int(self.window.limit * 0.5))
+        self.input_bound_ever = self.input_bound_ever or input_bound
+        g = gauges or {}
+        # zero tokens with requests in flight is a reading (a stalled or slow engine);
+        # None means unobservable: nothing in flight, or an endpoint that never reports usage
+        observable = self.window.inflight > 0 and self.tokens_total > 0
+        latency_s = self.latency_s
+        obs = Obs(waiting=g.get("waiting"), running=g.get("running"),
+                  inflight=self.window.inflight, backpressure=self.events["backpressure"],
+                  successes=self.events["successes"], input_bound=input_bound,
+                  kv=g.get("kv"), hits=g.get("hits"), tok_s=tok_s if tok_s or observable else None,
+                  preempts=g.get("preempts"), latency_s=latency_s, oldest_s=self.oldest_s,
+                  tick_s=dt if dt > 0 else None)
+        new_limit = self.controller.decide(obs, self.window.limit)
+        rec = tick_record(now - self._t0, self.window.limit, self.window.inflight, gauges,
+                          self.events["backpressure"], self.events["successes"], input_bound, tok_s,
+                          reason=getattr(self.controller, "last_reason", "hold"), latency_s=latency_s)
+        self.ticks.append(rec)
+        if self.on_tick:
+            self.on_tick(rec)
+        self.events["backpressure"] = self.events["successes"] = 0
+        self._wait["source"] = self._wait["acquire"] = 0.0
+        await self.window.set_limit(new_limit)
 
 
 class AdaptiveClient:

@@ -25,6 +25,8 @@ class Obs:
     tok_s: float | None = None  # delivered tokens/sec this tick; 0.0 = nothing delivered, None = unobservable
     preempts: int | None = None  # cumulative preemption count
     latency_s: float | None = None  # p50 admission-to-completion time of recent requests (None = unknown)
+    oldest_s: float | None = None  # age of the oldest request in flight (None = nothing in flight)
+    tick_s: float | None = None  # seconds since the previous observation (None = the controller's default)
 
 
 _FIELDS = {f.name for f in dataclasses.fields(Obs)}
@@ -55,18 +57,23 @@ class Auto:
     limit and names itself in `last_reason`:
 
     1. cut:bp — backpressure (429/timeout) this tick, outside a cooldown: halve.
-    2. hold:cooldown — after any halving, hold while the requests admitted under
-       the old window drain: max(2, ceil(latency_s / tick_s)) ticks, 3 when the
-       latency is unknown. Those requests keep failing after the cut; counting
-       them again would halve once per tick instead of once per episode.
+    2. hold:cooldown — after a halving, hold while the requests admitted under
+       the old window drain: at least max(2, ceil(latency_s / tick_s)) ticks
+       (3 when the latency is unknown), extended while the oldest request in
+       flight predates the cut, never longer than the stall patience. Those
+       requests keep failing after the cut; counting them again would halve
+       once per tick instead of once per episode.
     3. cut:kv — KV high with a low (or absent) prefix-hit rate: halve. High KV
        with a healthy hit rate is the cache doing its job.
     4. cut:stall — window full (inflight >= limit) and nothing completing for
-       `stall_ticks` consecutive ticks, or 2x latency_s when known, whichever is
-       longer: halve. A wedged engine reads as an empty queue because nothing
-       new is admitted; a slow engine on a small window looks the same for one
-       request's worth of ticks, so patience follows the request latency.
+       `stall_ticks` consecutive ticks, or 3x latency_s when known, whichever
+       is longer: halve. A wedged engine reads as an empty queue because
+       nothing new is admitted; a slow engine on a small window looks the same
+       for a few requests' worth of ticks, so patience follows the request
+       latency. One stall cut per episode: the next needs a completion first,
+       and nothing before the first completion ever counts as a stall.
     5. hold:input_bound — the source, not the engine, is starving admission.
+       Starved ticks are not evidence about the engine either way.
     6. cut:queue — engine queue above target (waiting > hi): step down.
     7. revert — a probe (10) did not confirm within its settle window.
     8. hold — window under 80% used (idle engine, source-paced), or queue in band.
@@ -76,15 +83,17 @@ class Auto:
        window, so a slow engine's zero-token ticks average instead of vetoing.
     10. grow — headroom and throughput over the evidence window beat the best
         seen: double in slow-start, +step after. Slow-start ends at the first
-        standing queue, plateau, stall or cut.
+        standing queue, plateau, or reduction.
     11. probe / hold:plateau — throughput flat: hold, and on a backoff schedule
         (4, 8, 16, 32 evaluations) try +step anyway, because a real engine's
         throughput lags the tick. Revert (7) unless it confirms.
 
-    Cuts and the queue step-down scale the throughput baseline with the
-    reduction, so throughput proportional to a smaller window is a plateau and
-    throughput above it is growth. Blind mode (no gauges) creeps +1 at each
-    evidence window instead of doubling, and cannot hold a probe.
+    Every reduction scales the throughput baseline with it, so throughput
+    proportional to a smaller window is a plateau and throughput above it is
+    growth. A reduction that cannot go below `min_limit` reports `hold:floor`.
+    Blind mode (no gauges) creeps +1 at each evidence window instead of
+    doubling, and cannot hold a probe. Tick-based quantities use the observed
+    `tick_s` when the observation carries one, else the constructor's.
     """
 
     def __init__(self, target_waiting: int = 8, initial: int = 16, min_limit: int = 2,
@@ -97,23 +106,23 @@ class Auto:
             raise ValueError("Auto requires stall_ticks >= 1 and tick_s > 0")
         self.lo, self.hi = max(1, target_waiting // 4), target_waiting * 2
         self.min, self.max, self.step = min_limit, max_limit, step
-        self.initial = max(min_limit, min(initial, max_limit))  # clamp into [min, max]
+        self.initial = self._clamp(initial)
         self.kv_hi, self.hits_lo, self.improve = kv_hi, hits_lo, improve
         self.stall_ticks, self.tick_s = stall_ticks, tick_s
         self.last_reason = "hold"
         self._slow_start = True
         self._cooldown = 0  # ticks left holding after a halving
+        self._since_cut_s = 0.0  # drain clock: seconds since the last halving
         self._stalled = 0  # consecutive full-window, zero-completion ticks
+        self._stall_armed = False  # a completion has arrived since the last halving (or ever)
         self._queue_ticks = 0  # consecutive ticks with a standing queue
-        self._acked_ever = False  # stall patience is meaningless before anything has completed
-        self._acks, self._tok_sum, self._tok_n = 0, 0.0, 0  # evidence since the last evaluation
-        self._tok_first = 0.0  # the window's first sample still carries the previous limit's throughput
+        self._acks, self._toks = 0, []  # evidence since the last evaluation: completions, tok_s samples
         self._best_tok = 0.0  # best evidence-window throughput, scaled down with every reduction
         self._probe_wait, self._probe_cooldown = 0, 4
         self._probe_from: int | None = None
         self._probe_age = 0
         self._rules = (self._backpressure, self._cooling, self._kv_pressure, self._stall,
-                       self._input_bound, self._queue, self._widen)
+                       self._input_bound, self._queue, self._widen)  # _widen always fires
 
     def decide(self, obs: Obs | dict, limit: int) -> int:
         obs = as_obs(obs)
@@ -121,21 +130,22 @@ class Auto:
         for rule in self._rules:
             hit = rule(obs, limit)
             if hit is not None:
-                new, self.last_reason = hit
-                if new != limit:
-                    self._reset_evidence()  # a new limit starts a new evidence window
-                return new
-        self.last_reason = "hold"
-        return limit
+                break
+        else:
+            raise AssertionError("the rule list must end in a rule that always fires")
+        new, self.last_reason = hit
+        if new != limit:
+            self._reset_evidence()  # a new limit starts a new evidence window
+        return new
 
     # --- per-tick bookkeeping -------------------------------------------------
 
     def _observe(self, obs: Obs, limit: int) -> None:
-        self._acks += obs.successes
-        self._acked_ever = self._acked_ever or obs.successes > 0
-        if obs.tok_s is not None:
-            self._tok_first = obs.tok_s if not self._tok_n else self._tok_first
-            self._tok_sum, self._tok_n = self._tok_sum + obs.tok_s, self._tok_n + 1
+        self._stall_armed = self._stall_armed or obs.successes > 0
+        if not obs.input_bound:  # a starved window says nothing about the engine
+            self._acks += obs.successes
+            if obs.tok_s is not None:
+                self._toks.append(obs.tok_s)
         self._stalled = self._stalled + 1 if obs.inflight >= limit and obs.successes == 0 else 0
         if obs.waiting is None:
             self._void_probe()  # a probe begun in gauge mode cannot settle blind
@@ -146,15 +156,27 @@ class Auto:
         if self._probe_from is not None:
             self._probe_age += 1
 
+    def _tick(self, obs: Obs) -> float:
+        return obs.tick_s or self.tick_s
+
+    def _ticks(self, obs: Obs, seconds: float) -> int:
+        return math.ceil(seconds / self._tick(obs))
+
+    def _patience(self, obs: Obs) -> int:
+        """Ticks of a full, silent window that count as a stall."""
+        if obs.latency_s is None:
+            return self.stall_ticks
+        return max(self.stall_ticks, self._ticks(obs, 3 * obs.latency_s))
+
     def _reset_evidence(self) -> None:
-        self._acks, self._tok_sum, self._tok_n = 0, 0.0, 0
+        self._acks, self._toks = 0, []
 
     def _evaluate(self) -> bool | None:
         """Verdict on the evidence window: True = throughput improved, False = flat, None = no signal."""
         grew = None
-        if self._tok_n:  # the first tick after a change still reflects the old window: leave it out
-            n = self._tok_n
-            avg = self._tok_sum / n if n == 1 else (self._tok_sum - self._tok_first) / (n - 1)
+        if self._toks:
+            samples = self._toks[1:] or self._toks  # the first tick after a change reflects the old window
+            avg = sum(samples) / len(samples)
             grew = avg > self._best_tok * self.improve
             if grew:
                 self._best_tok = avg
@@ -164,40 +186,49 @@ class Auto:
     def _void_probe(self) -> None:
         self._probe_from, self._probe_wait = None, 0
 
-    def _shrink(self, limit: int, new: int) -> int:
-        if new < limit:  # the baseline follows the reduction: flat throughput at the floor is not growth
-            self._best_tok *= new / limit
-        return new
+    def _clamp(self, n: int) -> int:
+        return min(self.max, max(self.min, n))
 
-    def _cut(self, obs: Obs, limit: int) -> int:
+    def _shrink(self, limit: int, new: int, reason: str) -> tuple[int, str]:
+        """The single way down: ends slow-start, voids any probe, scales the baseline with the reduction."""
         self._slow_start = False
-        self._void_probe()
-        self._cooldown = 3 if obs.latency_s is None else max(2, math.ceil(obs.latency_s / self.tick_s))
-        return self._shrink(limit, max(self.min, limit // 2))
+        self._void_probe()  # an independent reduction: a pending revert must not climb back over it
+        new = self._clamp(new)
+        if new >= limit:  # at the floor: flat throughput there is not growth, so the baseline stays
+            return limit, "hold:floor"
+        self._best_tok *= new / limit
+        return new, reason
+
+    def _cut(self, obs: Obs, limit: int, reason: str) -> tuple[int, str]:
+        self._cooldown = 3 if obs.latency_s is None else max(2, self._ticks(obs, obs.latency_s))
+        self._since_cut_s, self._stalled, self._stall_armed = 0.0, 0, False
+        return self._shrink(limit, limit // 2, reason)
 
     # --- rules, in priority order ----------------------------------------------
 
     def _backpressure(self, obs: Obs, limit: int):
         if obs.backpressure and not self._cooldown:
-            return self._cut(obs, limit), "cut:bp"
+            return self._cut(obs, limit, "cut:bp")
 
     def _cooling(self, obs: Obs, limit: int):
-        if self._cooldown:
-            self._cooldown -= 1
-            self._reset_evidence()  # completions of the old window say nothing about the new one
-            return limit, "hold:cooldown"
+        if not self._cooldown:
+            return None
+        self._cooldown -= 1
+        self._since_cut_s += self._tick(obs)
+        draining = obs.oldest_s is not None and obs.oldest_s > self._since_cut_s  # oldest predates the cut
+        if not self._cooldown and draining and self._since_cut_s < self._patience(obs) * self._tick(obs):
+            self._cooldown = 1  # keep holding; a wedged request cannot pin the window past the stall patience
+        self._reset_evidence()  # completions of the old window say nothing about the new one
+        return limit, "hold:cooldown"
 
     def _kv_pressure(self, obs: Obs, limit: int):
         # with no hits signal at all (prefix caching off), high KV is unverifiably benign -> cut
         if obs.kv is not None and obs.kv >= self.kv_hi and (obs.hits is None or obs.hits < self.hits_lo):
-            return self._cut(obs, limit), "cut:kv"
+            return self._cut(obs, limit, "cut:kv")
 
     def _stall(self, obs: Obs, limit: int):
-        patience = self.stall_ticks
-        if obs.latency_s is not None:
-            patience = max(patience, math.ceil(2 * obs.latency_s / self.tick_s))
-        if self._acked_ever and self._stalled >= patience:
-            return self._cut(obs, limit), "cut:stall"
+        if self._stall_armed and self._stalled >= self._patience(obs):
+            return self._cut(obs, limit, "cut:stall")
 
     def _input_bound(self, obs: Obs, limit: int):
         if obs.input_bound:
@@ -205,9 +236,7 @@ class Auto:
 
     def _queue(self, obs: Obs, limit: int):
         if obs.waiting is not None and obs.waiting > self.hi:
-            self._slow_start = False
-            self._void_probe()  # an independent reduction: a pending revert must not climb back over it
-            return self._shrink(limit, max(self.min, limit - self.step)), "cut:queue"
+            return self._shrink(limit, limit - self.step, "cut:queue")
 
     def _widen(self, obs: Obs, limit: int):
         due = self._acks >= limit
@@ -218,7 +247,7 @@ class Auto:
             elif due and self._probe_age >= 3:
                 back, self._probe_from = self._probe_from, None
                 self._probe_cooldown = min(self._probe_cooldown * 2, 32)
-                return min(self.max, max(self.min, back)), "revert"  # clamped both ends
+                return self._clamp(back), "revert"
         headroom = obs.waiting is None or obs.waiting < self.lo
         if not (headroom and obs.inflight >= int(limit * 0.8)):
             return limit, "hold"
@@ -226,12 +255,12 @@ class Auto:
             return limit, "hold:ack"
         if grew is not False:
             if obs.waiting is None:
-                return min(self.max, limit + 1), "grow"  # blind floor: creep
-            return min(self.max, limit * 2 if self._slow_start else limit + self.step), "grow"
+                return self._clamp(limit + 1), "grow"  # blind floor: creep
+            return self._clamp(limit * 2 if self._slow_start else limit + self.step), "grow"
         self._slow_start = False
         if obs.waiting is not None and self._probe_from is None:  # plateau-blocked: probe on backoff
             self._probe_wait += 1
             if self._probe_wait >= self._probe_cooldown:
                 self._probe_wait, self._probe_from, self._probe_age = 0, limit, 0
-                return min(self.max, limit + self.step), "probe"
+                return self._clamp(limit + self.step), "probe"
         return limit, "hold:plateau"

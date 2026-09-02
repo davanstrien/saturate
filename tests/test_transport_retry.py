@@ -99,3 +99,17 @@ def test_multipart_never_retries():
         {"backpressure": 0, "successes": 0}, Breaker()))
     assert body is None and err == "http 500 after retries"
     assert client.posts == 1  # single attempt: the file stream is already consumed
+
+
+def test_parse_retry_after_never_raises():
+    """A malformed Retry-After header must fall back to normal backoff, not crash the row."""
+    from saturate.transport import _parse_retry_after
+
+    assert _parse_retry_after("12") == 12.0
+    assert _parse_retry_after("1.5") == 1.5
+    assert _parse_retry_after("1.5.3") is None
+    assert _parse_retry_after("") is None
+    assert _parse_retry_after("abc") is None
+    assert _parse_retry_after("inf") is None
+    assert _parse_retry_after("nan") is None
+    assert _parse_retry_after(None) is None

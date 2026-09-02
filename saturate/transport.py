@@ -186,7 +186,7 @@ def _parse_retry_after(value: str | None) -> float | None:
     """Retry-After is either delta-seconds or an HTTP-date (RFC 9110)."""
     if not value:
         return None
-    if value.replace(".", "").isdigit():
+    if value.replace(".", "", 1).isdigit():  # one dot at most: "1.5.3" is not a number
         return float(value)
     try:
         from email.utils import parsedate_to_datetime
@@ -194,4 +194,4 @@ def _parse_retry_after(value: str | None) -> float | None:
         dt = parsedate_to_datetime(value)
         return max(0.0, dt.timestamp() - time.time())
     except (TypeError, ValueError):
-        return None
+        return None  # anything unparseable: fall back to jittered backoff, never crash the row

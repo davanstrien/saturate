@@ -74,7 +74,7 @@ def test_breaker_open_time_credited_back_to_budget(monkeypatch):
     monkeypatch.setattr(transport, "RETRY_BUDGET_S", 0.05)
 
     class SlowGate(Breaker):
-        async def gate(self, client, probe_url):
+        async def gate(self, client, probe_url, probe_json=None):
             await asyncio.sleep(0.1)  # longer than the entire budget
 
     class _SeqClient:

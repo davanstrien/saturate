@@ -23,6 +23,9 @@ import httpx2 as httpx
 
 RETRY_ACTIVE = True  # kill-switch: flip off in tests for determinism
 RETRY_BUDGET_S = 300.0  # total retry wall-clock per row
+PROBE_BODY = {"model": "readiness-probe", "messages": [{"role": "user", "content": "hi"}],
+              "max_tokens": 1}  # breaker probe when the request has no json body (multipart)
+PROBE_HEADERS = {"x-saturate-probe": "breaker"}  # lets a server (or a stub) tell probes from rows
 
 
 class FatalTransportError(RuntimeError):
@@ -77,10 +80,14 @@ class Breaker:
     def ok(self) -> None:
         self.consecutive = 0
 
-    async def gate(self, client: httpx.AsyncClient, probe_url: str) -> None:
+    async def gate(self, client: httpx.AsyncClient, probe_url: str, probe_json: dict | None = None
+                   ) -> None:
         """Called at admission AND before every retry attempt — an open breaker
         pauses the whole pump, not just new rows. One caller probes; the rest
-        wait on the close event (no double-counted opens)."""
+        wait on the close event (no double-counted opens). The probe re-sends the
+        caller's own request (`probe_json` to `probe_url`): any response below 500,
+        a 4xx included, proves the server is up — the probe never has to guess a
+        body for a route it does not know."""
         while True:
             if self.dead:
                 raise FatalTransportError(
@@ -104,8 +111,8 @@ class Breaker:
                     raise FatalTransportError(
                         f"circuit breaker open for {self.max_open_s}s — server is not coming back")
                 try:
-                    r = await client.post(probe_url, json={"model": "readiness-probe", "messages": [
-                        {"role": "user", "content": "hi"}], "max_tokens": 1}, timeout=30)
+                    r = await client.post(probe_url, json=probe_json if probe_json is not None else
+                                          PROBE_BODY, timeout=30, headers=PROBE_HEADERS)
                     if r.status_code < 500:
                         break
                 except (httpx.TimeoutException, httpx.TransportError):
@@ -139,13 +146,12 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
         await asyncio.sleep(min(wait, max(0.0, left())))
         delay = min(delay * 2, 60.0)
 
-    probe_url = f"{base.rstrip('/')}/chat/completions"
     last_err = "retry budget exhausted"
     for attempt in range(5):
         if attempt and (not RETRY_ACTIVE or left() <= 0):
             return None, last_err  # hard wall-clock deadline: no attempt starts past it (r6)
         g0 = time.monotonic()
-        await breaker.gate(client, probe_url)  # an open breaker pauses retries too
+        await breaker.gate(client, url, req.json)  # an open breaker pauses retries too
         t0 += time.monotonic() - g0  # r6: breaker-open time never consumes the row budget (docstring)
         a0 = time.monotonic()
         try:

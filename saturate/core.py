@@ -220,7 +220,7 @@ class AdaptiveClient:
     async def post(self, request: Request | dict, route: str = "/chat/completions"
                    ) -> tuple[dict | None, str | None]:
         req = coerce_request(request, route)
-        await self.breaker.gate(self._client, f"{self.base}/chat/completions")
+        await self.breaker.gate(self._client, f"{self.base}{req.route}", req.json)
         async with self.limiter.slot():
             body, err = await call_endpoint(self._client, self.base, req,
                                             self.limiter.events, self.breaker)

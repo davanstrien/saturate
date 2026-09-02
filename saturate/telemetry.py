@@ -6,8 +6,8 @@ from collections import Counter
 
 
 def tick_record(t: float, limit: int, inflight: int, gauges: dict | None,
-                bp: int, ok: int, input_bound: bool, tok_s: float,
-                reason: str = "hold", latency_s: float | None = None) -> dict:
+                bp: int, ok: int, input_bound: bool, tok_s: float, reason: str,
+                latency_s: float | None = None) -> dict:
     g = gauges or {}
     return {"t": round(t, 1), "limit": limit, "inflight": inflight,
             "waiting": g.get("waiting"), "running": g.get("running"),

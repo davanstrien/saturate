@@ -101,6 +101,34 @@ def test_multipart_never_retries():
     assert client.posts == 1  # single attempt: the file stream is already consumed
 
 
+def test_latency_is_the_successful_attempt_alone():
+    """A slow failed attempt, its backoff and a fast success: the controller's
+    latency signal is the fast success, not the row's whole retry ladder."""
+
+    class _Ok(_Resp):
+        def json(self):
+            return {"ok": True}
+
+    class _SlowThenFast:
+        def __init__(self):
+            self.posts = 0
+
+        async def post(self, url, data=None, files=None, json=None, timeout="absent"):
+            self.posts += 1
+            if self.posts == 1:
+                await asyncio.sleep(0.05)  # a slow attempt that fails...
+                return _Resp(429, {"retry-after": "0.05"})  # ...then a backoff
+            return _Ok(200)  # a fast success
+
+    events = {"backpressure": 0, "successes": 0}
+    t = time.monotonic()
+    body, err = asyncio.run(call_endpoint(
+        _SlowThenFast(), "http://x", make_json_request("/chat/completions", {}), events, Breaker()))
+    assert body == {"ok": True} and err is None
+    assert time.monotonic() - t >= 0.1  # the row took the slow attempt plus the backoff...
+    assert len(events["latencies"]) == 1 and events["latencies"][0] < 0.05  # ...the sample did not
+
+
 def test_parse_retry_after_never_raises():
     """A malformed Retry-After header must fall back to normal backoff, not crash the row."""
     from saturate.transport import _parse_retry_after

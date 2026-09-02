@@ -23,13 +23,11 @@ from collections.abc import AsyncIterator, Callable, Iterable
 
 import httpx2 as httpx
 
-from saturate.controller import Auto, Fixed, Obs
+from saturate.controller import TICK_S, Auto, Fixed, Obs
 from saturate.signals import HttpScrape, Null
 from saturate.telemetry import tick_record
 from saturate.transport import Breaker, FatalTransportError, Request, call_endpoint, coerce_request
 from saturate.window import Window
-
-TICK_S = 2.0
 
 
 @dataclasses.dataclass
@@ -66,7 +64,7 @@ class _Slot:
         self._l._admitted[self] = admitted
 
     async def __aexit__(self, *exc):
-        self._l._latencies.append(time.monotonic() - self._l._admitted.pop(self))
+        self._l._admitted.pop(self, None)  # never in the way of the release: a leaked count wedges admission
         await self._l.window.release()
 
 
@@ -84,12 +82,12 @@ class AdaptiveLimiter:
         self.signals = signals or Null()
         self.on_tick = on_tick
         self.window = Window(getattr(self.controller, "initial", 16))
-        self.events = {"backpressure": 0, "successes": 0}
+        self.events = {"backpressure": 0, "successes": 0, "latencies": []}
         self.ticks: list[dict] = []
         self.tokens_total = 0
         self._wait = {"source": 0.0, "acquire": 0.0}
         self._admitted: dict[_Slot, float] = {}  # admission time of every request in flight
-        self._latencies: deque[float] = deque(maxlen=max(64, getattr(self.controller, "max", 64)))
+        self._latencies: deque[float] = deque(maxlen=128)  # successful attempts only; recent is what matters
         self.input_bound_ever = False
         self._task: asyncio.Task | None = None
         self._t0 = self._t_last = time.monotonic()
@@ -98,11 +96,15 @@ class AdaptiveLimiter:
     def slot(self) -> _Slot:
         return _Slot(self)
 
-    def observe(self, ok: bool, tokens: int = 0, rate_limited: bool = False) -> None:
-        """Outcome feedback for embedders driving their own transport."""
+    def observe(self, ok: bool, tokens: int = 0, rate_limited: bool = False,
+                latency_s: float | None = None) -> None:
+        """Outcome feedback for embedders driving their own transport. `latency_s` is the
+        duration of the successful attempt alone (no retries, backoff or breaker waits)."""
         if ok:
             self.events["successes"] += 1
             self.tokens_total += tokens
+            if latency_s is not None:
+                self.events["latencies"].append(latency_s)
         if rate_limited:
             self.events["backpressure"] += 1
 
@@ -111,7 +113,7 @@ class AdaptiveLimiter:
 
     @property
     def latency_s(self) -> float | None:
-        """p50 admission-to-completion time of recent requests (None before the first)."""
+        """p50 duration of recent successful attempts (None before the first)."""
         return statistics.median(self._latencies) if self._latencies else None
 
     @property
@@ -143,6 +145,8 @@ class AdaptiveLimiter:
             await self._tick()
 
     async def _tick(self):
+        self._latencies.extend(self.events["latencies"])
+        self.events["latencies"].clear()
         gauges = await self.signals.read()
         now = time.monotonic()  # actual elapsed, not TICK_S: scrape latency skews the rate
         dt = now - self._t_last
@@ -166,7 +170,7 @@ class AdaptiveLimiter:
         new_limit = self.controller.decide(obs, self.window.limit)
         rec = tick_record(now - self._t0, self.window.limit, self.window.inflight, gauges,
                           self.events["backpressure"], self.events["successes"], input_bound, tok_s,
-                          reason=getattr(self.controller, "last_reason", "hold"), latency_s=latency_s)
+                          self.controller.last_reason, latency_s)
         self.ticks.append(rec)
         if self.on_tick:
             self.on_tick(rec)

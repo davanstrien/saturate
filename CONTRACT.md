@@ -57,8 +57,8 @@ before its type is ever seen is absent from those early parts, so readers doing 
 unions should expect nullable user columns. For a fixed schema from part one, declare it —
 `pump(schema=...)` — every part is cast to it, and a row carrying fields outside the
 declared schema becomes an error row (§4; a direct sink append raises instead). Without a
-declared schema, a row whose type conflicts with an already-pinned column likewise becomes
-an error row under `pump()` (§8). The library itself writes no token/latency columns — they
+declared schema, a row whose value does not cast losslessly to an already-pinned column
+likewise becomes an error row under `pump()` (§8). The library itself writes no token/latency columns — they
 appear when your `parse` emits them. Standard names when written: `prompt_tokens`,
 `completion_tokens`, `latency_s` — copied from the response `usage` or your own
 measurement, blank never guessed.
@@ -153,7 +153,8 @@ rule): `rows_total`, `rows_done_prior`, `rows_processed`, `rows_failed`, `rows_d
 ## 8. Non-guarantees
 
 No output ordering · no dedup beyond `id` · no schema migration (keep `parse` types stable
-per output dir; under `pump()` a row whose type conflicts with the pinned schema becomes an
-error row, a direct sink append raises at flush; a declared schema is the fully stable
-option) · one request per row (rollouts/trajectories are a different primitive) ·
+per output dir; a pinned column type never moves — a value that casts to it losslessly is
+accepted (an int into a double column), a lossy one (a float into an int column) is an
+error row under `pump()` and a raise at flush for a direct sink append; a declared schema
+is the fully stable option) · one request per row (rollouts/trajectories are a different primitive) ·
 no dollar figures in the data.

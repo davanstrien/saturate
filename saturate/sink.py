@@ -132,16 +132,19 @@ class ParquetSink:
         inferred-schema check alone missed declared-type mismatches like score='oops')."""
         if self._declared is None:
             pa.array([record])  # every field must be Arrow-serializable
-            if self._schema is not None:  # dynamic mode, types pinned: the row must merge into them
-                # the same infer + strict-unify flush applies to the batch, applied to this one
-                # row over the fields it shares with the pinned schema (new fields may still
-                # grow the schema). A conflicting type (int pinned, float arriving) would
-                # otherwise raise at flush and discard the whole buffer — here it is an error row.
+            if self._schema is not None:  # dynamic mode, types pinned: the row must cast to them
+                # the same rule flush applies to the batch, applied to this one row over the
+                # fields it shares with the pinned schema (new fields may still grow the schema):
+                # a safe cast — lossless widening (1 -> double) passes, a lossy one (0.5 ->
+                # int64) raises. Left to flush, that raise would discard the whole buffer.
                 shared = [n for n in self._schema.names if n in record]
                 if shared:
-                    pinned = pa.schema([self._schema.field(n) for n in shared])
                     row = pa.Table.from_pylist([{n: record[n] for n in shared}])
-                    pa.unify_schemas([pinned, row.schema])
+                    try:
+                        for n in shared:
+                            row[n].cast(self._schema.field(n).type)
+                    except pa.ArrowNotImplementedError as e:  # no such cast: still a type error
+                        raise TypeError(str(e)) from e
             return
         extra = record.keys() - set(self._declared.names)
         if extra:
@@ -180,9 +183,14 @@ class ParquetSink:
                 i = table.schema.get_field_index("error")
                 table = table.set_column(i, pa.field("error", pa.string()),
                                          table["error"].cast(pa.string()))
-            # pin seen columns at first sight; a same-run type change raises here (§8) — r6:
-            # strict unify, since silently widening only the NEW part breaks multi-part reads
-            self._schema = (table.schema if self._schema is None else
+            # pinned columns: safe-cast the batch to the pinned type — lossless widening
+            # (int -> double) is accepted, a lossy cast (0.5 -> int64) raises (§8). The pinned
+            # type never moves: widening only the NEW part would break multi-part reads.
+            for f in self._schema or ():
+                if f.name in table.schema.names and table.schema.field(f.name).type != f.type:
+                    i = table.schema.get_field_index(f.name)
+                    table = table.set_column(i, f, table[f.name].cast(f.type))
+            self._schema = (table.schema if self._schema is None else  # unify: new columns only
                             pa.unify_schemas([self._schema, table.schema]))
             # every part carries the FULL pinned schema — absent or all-null columns become
             # typed all-null arrays (#12): pyarrow.dataset takes the FIRST fragment's schema

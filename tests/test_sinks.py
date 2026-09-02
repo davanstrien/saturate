@@ -244,6 +244,48 @@ def test_dynamic_type_conflict_becomes_error_row_under_drain(tmp_path):
         assert pq.read_schema(part).field("score").type == pa.int64()  # the pinned type held
 
 
+def test_dynamic_lossless_widening_is_accepted(tmp_path):
+    """An int arriving in a pinned double column is lossless (1 -> 1.0): both rows
+    durable, no error rows, and every part carries the pinned double type."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    async def results():
+        yield Done("f", {}, {"score": 0.5}, None, {})
+        yield Done("i", {}, {"score": 1}, None, {})
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (2, 0)
+    assert sink.existing_ids(retry_errors=True) == {"f", "i"}
+    parts = list(tmp_path.glob("part-*.parquet"))
+    assert len(parts) == 2
+    for part in parts:
+        assert pq.read_schema(part).field("score").type == pa.float64()
+    assert dict(read_output(str(tmp_path))) == {"f": {"score": 0.5}, "i": {"score": 1.0}}
+
+
+def test_dynamic_lossy_cast_is_error_row(tmp_path):
+    """The reverse is lossy (0.5 into a pinned int64): the float row is an error row."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    async def results():
+        yield Done("i", {}, {"score": 1}, None, {})
+        yield Done("f", {}, {"score": 0.5}, None, {})
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (1, 1)
+    assert sink.existing_ids() == {"i", "f"} and sink.existing_ids(retry_errors=True) == {"i"}
+
+
 def test_dynamic_probe_accepts_nulls_new_fields_and_empty_lists(tmp_path):
     """The pinned-type check must not reject rows flush would accept: nulls, empty
     lists and fields the schema has not seen yet all merge into the pinned schema."""

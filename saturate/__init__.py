@@ -108,6 +108,29 @@ def pump(
     signal_source: str = "auto",  # "auto" (scrape, blind fallback) | "none"
     schema=None,  # pa.Schema: declared immutable output schema (CONTRACT §8) — else dynamic/sparse
 ) -> Stats:
+    """Run every row through the endpoint and land the results; safe to re-run (resumes).
+
+    rows: iterable of dict rows (or (id, row) pairs) — the input to process.
+    to_request: row -> Request (or a plain dict body posted to `route`).
+    parse: (row, response_json) -> output dict; a single-arg parse(response_json) is accepted.
+    endpoint: base URL of the OpenAI-compatible server, e.g. "http://host:8000/v1".
+    output: output directory or URI (local, hf://, s3://...) or a sink object.
+    window: Auto (default) adapts concurrency to the engine; Fixed(n) pins it.
+    shard: (rank, world) label written into output file names and completion markers.
+    flush_every: rows buffered before a parquet part is written.
+    read_timeout: seconds to wait for a single response (long generations are legitimate).
+    route: path appended to `endpoint` when to_request returns a plain dict.
+    headers: extra HTTP headers merged over the default User-Agent.
+    retry_errors: re-run rows whose stored record carries an error instead of skipping them.
+    id_key: row field to use as the row id (default: content hash of the row).
+    id_fn: callable row -> id, an alternative to id_key.
+    signal_source: "auto" scrapes /metrics and falls back to blind mode; "none" never scrapes.
+    schema: pa.Schema declaring an immutable output schema; None infers it per part.
+
+    Warning: `shard=(rank, world)` labels output files and completion markers only. It does
+    not select input rows — every shard given the same `rows` processes all of them. Pre-shard
+    the input yourself: `pump(shard_select(stream(rows), rank, world), ..., shard=(rank, world))`.
+    """
     return asyncio.run(_pump(rows, to_request, parse, endpoint, output, window, shard,
                              flush_every, read_timeout, route, headers, retry_errors,
                              id_key, id_fn, signal_source, schema))
@@ -117,6 +140,9 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
                 read_timeout, route, extra_headers, retry_errors, id_key, id_fn,
                 signal_source, schema=None) -> Stats:
     stats = Stats()
+    if shard[1] > 1:
+        _log(f"shard={tuple(shard)}: labels output only — input must be pre-sharded with "
+             "shard_select(stream(rows), rank, world)")
     sink = as_sink(output, flush_every, schema=schema)
     hdrs = {"User-Agent": USER_AGENT + (" (agent)" if agent_mode() else ""),
             **(extra_headers or {})}

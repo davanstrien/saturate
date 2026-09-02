@@ -9,6 +9,17 @@ uv run pytest tests/ -q                  # unit + regression tests; -k name for 
 uv run --with blacken-docs blacken-docs -l 100 README.md CONTRACT.md docs/*.md  # snippet formatting
 ```
 
+**End-to-end tests** (`tests/test_pump_e2e.py`) run `pump()` over real HTTP against a local
+stub inference server (`tests/stub_server.py`: stdlib asyncio, keep-alive HTTP/1.1, serves
+`/v1/chat/completions` with OpenAI-shaped JSON and `usage`, `/health`, and `/metrics` with
+vLLM-shaped gauges, so the scrape path and the gauge-mode controller run too). They cover the
+happy path against the storage CONTRACT (parts, manifests, markers, stats, telemetry keys),
+exact resume, error rows and healing via `retry_errors`, the agent-mode stdout line, the
+breaker giving up on a dead server, and the adaptive window widening as seen from the endpoint.
+The whole file runs in a few seconds (`saturate.core.TICK_S` is patched to 0.1 s); per-request
+behaviour is a `status_for(request) -> int` attribute on the stub, so a test can flip an endpoint
+between healthy and failing mid-scenario. CI runs the suite on Python 3.10 and 3.13.
+
 **The acceptance oracle** is a differential test suite in a separate, currently-private
 repo: nine end-to-end scenarios (kill/resume, breaker behavior, fan-out uniqueness, …) run
 against fake engines, written so that any implementation of the pump API can sit behind its

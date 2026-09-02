@@ -167,6 +167,8 @@ async with AdaptiveClient(endpoint, window=Auto()) as client:
 #   read_output(stage1_out) -> through(judge_client, ...) -> drain(stage2_out)
 # read_output() reads a saturate output dir back as an (id, row) source, applying the
 # healing reader rule (the error-IS-NULL record wins) — so stage 2 sees clean rows.
+for row_id, row in read_output(stage1_out):  # yields (id, row) tuples, not bare rows
+    print(row_id, row["text"])
 ```
 
 Two rules keep this honest:

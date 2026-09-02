@@ -1,6 +1,6 @@
 [project]
 name = "saturate"
-version = "0.1.2"
+version = "0.2.0"
 description = "Adaptive batch-inference client: dataset in, any OpenAI-compatible endpoint, resumable parquet out"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -203,18 +203,393 @@ def test_generic_sink_not_subject_to_arrow_rules(tmp_path):
     assert (tmp_path / "out" / "a.md").read_text() == "# rendered"
 
 
-def test_dynamic_type_change_raises_at_flush(tmp_path):
-    """Codex r6 blocker #4: int64 -> double was permissively widened only in
-    the NEW part, breaking multi-part reads while CONTRACT §8 promised a raise.
-    Strict unify makes the documented behavior true."""
-    import pytest
-
+def test_dynamic_type_change_becomes_error_row_at_flush(tmp_path):
+    """A direct sink append bypasses probe(): a same-run type change (int64 pinned,
+    double arriving) is caught at flush and written as an error row — the pinned type
+    never moves (widening only the new part would break multi-part reads, CONTRACT §8)
+    and flush never raises for a type conflict."""
     from saturate import ParquetSink
 
     sink = ParquetSink(str(tmp_path), flush_every=1)
     sink.append({"id": "a", "score": 1, "error": None})
-    with pytest.raises((TypeError, ValueError)):
-        sink.append({"id": "b", "score": 1.5, "error": None})
+    sink.append({"id": "b", "score": 1.5, "error": None})
+    assert sink.existing_ids() == {"a", "b"} and sink.existing_ids(retry_errors=True) == {"a"}
+    recs = {r["id"]: r for _, r in ((r["id"], r) for p in tmp_path.glob("part-*.parquet")
+                                      for r in pq.read_table(p).to_pylist())}
+    assert recs["b"]["error"].startswith("parse output not storable") and recs["b"]["score"] is None
+    for part in tmp_path.glob("part-*.parquet"):
+        assert pq.read_schema(part).field("score").type == pa.int64()
+
+
+def test_dynamic_type_conflict_becomes_error_row_under_drain(tmp_path):
+    """Under drain, a row whose type conflicts with the pinned dynamic schema must
+    become a durable error row: previously probe() only checked serializability, so
+    the conflict surfaced at flush, discarded the buffered rows and crashed the run
+    (and every resume of it, since the same rows arrive in the same order)."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    async def results():
+        for i in range(5):
+            yield Done(f"int-{i}", {}, {"score": 1}, None, {})
+        for i in range(5):
+            yield Done(f"float-{i}", {}, {"score": 0.5}, None, {})
+
+    sink = ParquetSink(str(tmp_path), flush_every=5)
+    stats = asyncio.run(drain(results(), sink))
+    ints, floats = {f"int-{i}" for i in range(5)}, {f"float-{i}" for i in range(5)}
+    assert (stats.rows_processed, stats.rows_failed) == (5, 5)
+    assert sink.existing_ids() == ints | floats  # every row durable
+    assert sink.existing_ids(retry_errors=True) == ints  # the float rows are healable errors
+    for part in tmp_path.glob("part-*.parquet"):
+        assert pq.read_schema(part).field("score").type == pa.int64()  # the pinned type held
+
+
+def test_dynamic_lossless_widening_is_accepted(tmp_path):
+    """An int arriving in a pinned double column is lossless (1 -> 1.0): both rows
+    durable, no error rows, and every part carries the pinned double type."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    async def results():
+        yield Done("f", {}, {"score": 0.5}, None, {})
+        yield Done("i", {}, {"score": 1}, None, {})
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (2, 0)
+    assert sink.existing_ids(retry_errors=True) == {"f", "i"}
+    parts = list(tmp_path.glob("part-*.parquet"))
+    assert len(parts) == 2
+    for part in parts:
+        assert pq.read_schema(part).field("score").type == pa.float64()
+    assert dict(read_output(str(tmp_path))) == {"f": {"score": 0.5}, "i": {"score": 1.0}}
+
+
+def test_dynamic_lossy_cast_is_error_row(tmp_path):
+    """The reverse is lossy (0.5 into a pinned int64): the float row is an error row."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    async def results():
+        yield Done("i", {}, {"score": 1}, None, {})
+        yield Done("f", {}, {"score": 0.5}, None, {})
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (1, 1)
+    assert sink.existing_ids() == {"i", "f"} and sink.existing_ids(retry_errors=True) == {"i"}
+
+
+def test_dynamic_integral_float_into_int_is_conflict(tmp_path):
+    """Widening is directional: 2.0 into a pinned int64 column is a float into an int
+    column (CONTRACT §8), not a widening, even though the value happens to be integral —
+    an error row under drain and at flush for a direct append."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    async def results():
+        yield Done("i", {}, {"score": 1}, None, {})
+        yield Done("f", {}, {"score": 2.0}, None, {})
+
+    sink = ParquetSink(str(tmp_path / "drain"), flush_every=1)
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (1, 1)
+    assert sink.existing_ids() == {"i", "f"} and sink.existing_ids(retry_errors=True) == {"i"}
+    direct = ParquetSink(str(tmp_path / "direct"), flush_every=1)
+    direct.append({"id": "a", "score": 1, "error": None})
+    direct.append({"id": "b", "score": 2.0, "error": None})  # direct append: error row at flush
+    assert direct.existing_ids(retry_errors=True) == {"a"}
+
+
+def test_dynamic_value_rewrites_are_conflicts(tmp_path):
+    """Only numeric widening is accepted into a pinned column. Arrow would happily cast
+    1 -> "1" or True -> 1, but those rewrite the value — record, never guess — so an int
+    into a pinned string column and a bool into a pinned int column are error rows."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    async def results():
+        yield Done("s", {}, {"label": "a", "n": 1}, None, {})
+        yield Done("int-into-string", {}, {"label": 1}, None, {})
+        yield Done("bool-into-int", {}, {"n": True}, None, {})
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (1, 2)
+    assert sink.existing_ids() == {"s", "int-into-string", "bool-into-int"}
+    assert sink.existing_ids(retry_errors=True) == {"s"}
+
+
+def test_dynamic_value_rewrite_is_error_row_at_flush(tmp_path):
+    """The same rule on the direct-append path: int -> string is an error row at flush."""
+    from saturate import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "a", "label": "a", "error": None})
+    sink.append({"id": "b", "label": 1, "error": None})
+    assert sink.existing_ids() == {"a", "b"} and sink.existing_ids(retry_errors=True) == {"a"}
+
+
+def test_mixed_types_in_first_buffer_cost_one_row(tmp_path, capsys):
+    """Before any type is pinned, probe cannot see the buffer: {score: 1} then {score: "a"}
+    in ONE buffer used to fail batch inference at flush and lose every buffered row. flush
+    now falls back to a per-row pass: the first typed value pins, the conflicting row is
+    written as an error row, and the flush is logged once with the count."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    async def results():
+        yield Done("i", {}, {"score": 1}, None, {})
+        yield Done("s", {}, {"score": "a"}, None, {})
+        yield Done("j", {}, {"score": 2}, None, {})
+
+    sink = ParquetSink(str(tmp_path), flush_every=10)
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (2, 1)
+    assert sink.rows_demoted == 0  # probe sees the buffered rows' types: caught before buffering
+    assert sink.existing_ids() == {"i", "s", "j"} and sink.existing_ids(retry_errors=True) == {"i", "j"}
+    assert dict(read_output(str(tmp_path))) == {"i": {"score": 1}, "j": {"score": 2}}
+    # the same rows appended directly (no probe) reach flush, which demotes instead of raising
+    direct = ParquetSink(str(tmp_path / "direct"), flush_every=10)
+    for rec in ({"id": "i", "score": 1, "error": None}, {"id": "s", "score": "a", "error": None},
+                {"id": "j", "score": 2, "error": None}):
+        direct.append(rec)
+    direct.flush()
+    assert direct.rows_demoted == 1 and direct.existing_ids(retry_errors=True) == {"i", "j"}
+    assert "1 of 3 rows do not fit the pinned schema" in capsys.readouterr().err
+
+
+def test_mixed_types_in_new_column_after_pin_cost_one_row(tmp_path):
+    """After a pin, a NEW column with mixed types inside one buffer is the same case: the
+    batch cannot be built, the per-row pass keeps the first typed value and demotes the
+    conflicting row. The pinned column is untouched and every part stays readable."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    async def results():
+        yield Done("a", {}, {"score": 1}, None, {})                # buffer 1 pins score: int64
+        yield Done("a2", {}, {"score": 1}, None, {})
+        yield Done("b", {}, {"score": 2, "tag": 7}, None, {})      # buffer 2: tag int64 ...
+        yield Done("c", {}, {"score": 3, "tag": "x"}, None, {})    # ... then tag string: demoted
+
+    sink = ParquetSink(str(tmp_path), flush_every=2)
+    asyncio.run(drain(results(), sink))
+    assert sink.existing_ids() == {"a", "a2", "b", "c"}
+    assert sink.existing_ids(retry_errors=True) == {"a", "a2", "b"}
+    parts = sorted(str(p) for p in tmp_path.glob("part-*.parquet"))
+    assert len(parts) == 2
+    second = pq.read_schema(parts[1])  # tag first appears in part 2: pinned there as int64
+    assert second.field("tag").type == pa.int64() and second.field("score").type == pa.int64()
+    assert dict(read_output(str(tmp_path)))["b"] == {"score": 2, "tag": 7}
+
+
+def test_nested_widening_follows_the_scalar_rule(tmp_path):
+    """The conform rule is recursive: [1] widens into a pinned list<double> exactly as 1
+    widens into double; a struct missing a pinned field is filled with null; a struct with
+    a field the pin lacks, or a retyped field, is a conflict."""
+    import asyncio
+
+    import pyarrow.dataset as ds
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    async def results():
+        yield Done("p", {}, {"v": [1.5], "m": {"a": 1, "b": "x"}}, None, {})  # pins list<double>, struct<a,b>
+        yield Done("w", {}, {"v": [1], "m": {"a": 2}}, None, {})              # widens: list<int64>, struct<a>
+        yield Done("x", {}, {"v": [1.5], "m": {"a": 3, "c": 1}}, None, {})    # struct field the pin lacks
+        yield Done("y", {}, {"v": [1.5], "m": {"a": "z"}}, None, {})          # struct field retyped
+        yield Done("z", {}, {"v": [0.5, "s"]}, None, {})                      # unserializable list
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (2, 3)
+    assert sink.existing_ids(retry_errors=True) == {"p", "w"}
+    parts = sorted(str(p) for p in tmp_path.glob("part-*.parquet"))
+    t = ds.dataset(parts, format="parquet").to_table()
+    assert t.schema.field("v").type == pa.list_(pa.float64())
+    got = dict(read_output(str(tmp_path)))
+    assert got["w"] == {"v": [1.0], "m": {"a": 2, "b": None}}
+
+
+def test_pinned_schema_is_read_back_on_resume(tmp_path):
+    """The pin is a property of the output dir, not of one sink object: a fresh sink on a
+    dir with parts reads the newest part's schema before its first flush. Otherwise a
+    retry run whose first row is the float the previous run error-rowed would pin double
+    and write a part unreadable beside the int64 ones."""
+    import asyncio
+
+    import pyarrow.dataset as ds
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    first = ParquetSink(str(tmp_path), flush_every=1)  # run 1 pins score: int64
+    asyncio.run(drain(iter_async([Done("a", {}, {"score": 1}, None, {})]), first))
+    again = ParquetSink(str(tmp_path), flush_every=1)  # run 2: the float first
+    stats = asyncio.run(drain(iter_async([Done("f", {}, {"score": 0.5}, None, {})]), again))
+    assert stats.rows_failed == 1 and again.existing_ids(retry_errors=True) == {"a"}
+    third = ParquetSink(str(tmp_path), flush_every=1)  # run 3: an int, written as int64
+    asyncio.run(drain(iter_async([Done("b", {}, {"score": 2}, None, {})]), third))
+    parts = sorted(str(p) for p in tmp_path.glob("part-*.parquet"))
+    assert len(parts) == 3
+    for p in parts:
+        assert pq.read_schema(p).field("score").type == pa.int64()
+    assert ds.dataset(parts, format="parquet").to_table().num_rows == 3  # readable as one dataset
+
+
+def test_unreadable_newest_part_falls_back_to_an_older_pin(tmp_path, capsys):
+    """A crash-truncated newest part must not defeat the seed: the pin comes from the newest
+    part whose footer reads. Only when no part is readable does the sink start unpinned."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    ParquetSink(str(tmp_path), flush_every=1).append({"id": "a", "score": 1, "error": None})  # int64
+    (tmp_path / "part-9999999999999-000000-deadbeef.parquet").write_bytes(b"not parquet")
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    stats = asyncio.run(drain(iter_async([Done("f", {}, {"score": 0.5}, None, {})]), sink))
+    assert stats.rows_failed == 1  # the older part's int64 pin held: a float is a conflict
+    assert "trying an older part" in capsys.readouterr().err
+    only_bad = tmp_path / "only-bad"
+    only_bad.mkdir()
+    (only_bad / "part-1-000000-deadbeef.parquet").write_bytes(b"not parquet")
+    ParquetSink(str(only_bad), flush_every=1).append({"id": "a", "score": 1, "error": None})
+    assert "starting unpinned" in capsys.readouterr().err
+
+
+def test_empty_lists_never_pin(tmp_path):
+    """A column seen only as empty lists (list<null>) carries no type: it must not pin, or
+    every later real value in that column would be an error row for the rest of the run."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    async def results():
+        yield Done("a", {}, {"tags": []}, None, {})
+        yield Done("b", {}, {"tags": []}, None, {})
+        yield Done("c", {}, {"tags": ["x"]}, None, {})
+        yield Done("d", {}, {"tags": ["y"]}, None, {})
+
+    sink = ParquetSink(str(tmp_path), flush_every=2)
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (4, 0)
+    assert dict(read_output(str(tmp_path)))["c"] == {"tags": ["x"]}
+    fresh = ParquetSink(str(tmp_path), flush_every=1)  # the pin read back is list<string>
+    asyncio.run(drain(iter_async([Done("e", {}, {"tags": ["z"]}, None, {})]), fresh))
+    assert fresh.existing_ids(retry_errors=True) >= {"c", "d", "e"}
+
+
+def test_narrow_pinned_types_accept_values_that_fit(tmp_path):
+    """A declared run leaves int32/float32 parts behind; a dynamic resume infers int64/double.
+    Same kind of thing and the value fits: accepted and cast. A float into the int column
+    stays a conflict."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    declared = pa.schema([("id", pa.string()), ("error", pa.string()),
+                          ("n", pa.int32()), ("sc", pa.float32())])
+    ParquetSink(str(tmp_path), flush_every=1, schema=declared).append(
+        {"id": "a", "n": 1, "sc": 0.5, "error": None})
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    stats = asyncio.run(drain(iter_async([Done("b", {}, {"n": 2, "sc": 0.25}, None, {}),
+                                          Done("c", {}, {"n": 2.5}, None, {})]), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (1, 1)
+    parts = sorted(str(p) for p in tmp_path.glob("part-*.parquet"))
+    assert all(pq.read_schema(p).field("n").type == pa.int32() for p in parts)
+
+
+def test_demoted_row_keeps_a_string_id(tmp_path):
+    """A conflict in the id column itself must still land as an error row, not a raise."""
+    from saturate import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=2)
+    sink.append({"id": "b", "score": 2, "error": None})
+    sink.append({"id": 7, "score": 3, "error": None})
+    sink.flush()
+    assert sink.existing_ids() == {"b", "7"} and sink.existing_ids(retry_errors=True) == {"b"}
+
+
+def test_begin_run_gives_each_run_its_own_telemetry_file(tmp_path):
+    from saturate import ParquetSink
+
+    sink = ParquetSink(str(tmp_path))
+    sink.begin_run((0, 1))
+    sink.write_telemetry((0, 1), ["{}"])  # run 1 crashes before its marker
+    sink.begin_run((0, 1))
+    sink.write_telemetry((0, 1), ["{}"])
+    assert len(list(tmp_path.glob("telemetry-shard0-*.jsonl"))) == 2
+
+
+def test_manifest_read_retries_transient_errors(tmp_path, monkeypatch):
+    """A transient remote failure (a 429 under concurrent reads) must not mark a manifest
+    unreadable and re-pay its rows: the read is retried before giving up."""
+    from saturate import ParquetSink
+    from saturate import sink as sink_mod
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "a", "text": "x", "error": None})
+    monkeypatch.setattr(sink_mod.time, "sleep", lambda s: None)
+    real_open, calls = sink.fs.open, {"n": 0}
+
+    def flaky_open(path, *a, **k):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise OSError("429 Too Many Requests")
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(sink.fs, "open", flaky_open)
+    assert sink.existing_ids() == {"a"}
+
+
+def test_dynamic_probe_accepts_nulls_new_fields_and_empty_lists(tmp_path):
+    """The pinned-type check must not reject rows flush would accept: nulls, empty
+    lists and fields the schema has not seen yet all merge into the pinned schema."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    async def results():
+        yield Done("a", {}, {"score": 1, "tags": ["x"]}, None, {})
+        yield Done("b", {}, {"score": None, "tags": [], "extra": "new"}, None, {})
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (2, 0)
+    assert dict(read_output(str(tmp_path)))["b"] == {"score": None, "tags": [], "extra": "new"}
 
 
 def test_schema_rejected_for_custom_sink_objects():
@@ -429,3 +804,104 @@ def test_hf_autocreate_needs_exact_protocol_match(monkeypatch):
     monkeypatch.setattr(fsspec, "url_to_fs", lambda uri: (FakeFs(("hf",)), "datasets/owner/name/runs"))
     ParquetSink("hf://datasets/owner/name/runs")
     assert calls == ["owner/name"]
+
+def test_existing_ids_concurrent_reads_match_sequential(tmp_path):
+    """Resume reads manifest sidecars on a thread pool: the result must be exactly
+    the sequential one — an uncovered part (sidecar deleted) is scanned, a corrupt
+    sidecar is skipped and its part scanned as fallback, every id is recovered."""
+    from saturate import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    ids = {f"row-{i:03d}" for i in range(200)}
+    for i, id_ in enumerate(sorted(ids)):
+        sink.append({"id": id_, "error": "http 500: nope" if i % 7 == 0 else None})
+    manifests = sorted((tmp_path / "_manifest").glob("ids-part-*.parquet"))
+    assert len(manifests) == 200
+    manifests[3].unlink()  # uncovered part: scanned individually
+    manifests[150].write_bytes(b"not parquet")  # unreadable sidecar: its part is scanned
+    errored = {f"row-{i:03d}" for i in range(200) if i % 7 == 0}
+    for workers in (16, 1):
+        s = ParquetSink(str(tmp_path), read_workers=workers)
+        assert s.existing_ids() == ids
+        assert s.existing_ids(retry_errors=True) == ids - errored
+
+
+def test_existing_ids_warns_on_many_manifest_files(tmp_path, capsys):
+    """Past ~1000 sidecars, resume cost on a remote store is the per-file round-trip;
+    say so once and point at the knob (flush_every)."""
+    from saturate import ParquetSink
+
+    mdir = tmp_path / "_manifest"
+    mdir.mkdir()
+    table = pa.Table.from_pylist([{"id": "x", "error": None}])
+    for i in range(1001):
+        pq.write_table(table, mdir / f"ids-part-{i:05d}.parquet")
+    assert ParquetSink(str(tmp_path)).existing_ids() == {"x"}
+    err = capsys.readouterr().err
+    assert "resume: reading 1001 manifest files" in err and "flush_every" in err
+
+
+def test_struct_field_first_seen_null_fills_in_later(tmp_path):
+    """A nested field only ever seen as None must not pin as null: the first typed value
+    fills the pin in, exactly as a top-level all-null column waits for its first value."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    rows = [Done("a", {}, {"meta": {"model": "x", "reason": None}}, None, {}),
+            Done("b", {}, {"meta": {"model": "x", "reason": "stop"}}, None, {})]
+    stats = asyncio.run(drain(iter_async(rows), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (2, 0)
+    assert dict(read_output(str(tmp_path)))["b"] == {"meta": {"model": "x", "reason": "stop"}}
+    fresh = ParquetSink(str(tmp_path), flush_every=1)  # the pin read back is the filled-in one
+    asyncio.run(drain(iter_async([Done("c", {}, {"meta": {"model": "y", "reason": "len"}}, None, {})]),
+                      fresh))
+    assert fresh.existing_ids(retry_errors=True) == {"a", "b", "c"}
+
+
+def test_nested_empty_object_is_an_error_row_not_a_crash(tmp_path):
+    """Parquet cannot write a struct with no fields below the top level. Such a row is an
+    error row (probe under drain, demotion at flush for a direct append); the part write
+    never raises and never leaves a partial file behind."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    bad = {"meta": {"model": "x", "extra": {}}}
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    good = {"meta": {"model": "y", "extra": {"k": 1}}}
+    stats = asyncio.run(drain(iter_async([Done("a", {}, bad, None, {}), Done("b", {}, good, None, {})]),
+                              sink))
+    assert (stats.rows_processed, stats.rows_failed) == (1, 1)
+    direct = ParquetSink(str(tmp_path / "direct"), flush_every=1)
+    direct.append({"id": "a", **bad, "error": None})
+    direct.flush()
+    assert direct.rows_demoted == 1 and direct.existing_ids() == {"a"}
+    assert all(p.stat().st_size > 0 for p in (tmp_path / "direct").glob("part-*.parquet"))
+
+
+def test_pin_is_seeded_by_existing_ids_before_any_request(tmp_path):
+    from saturate import ParquetSink
+
+    ParquetSink(str(tmp_path), flush_every=1).append({"id": "a", "score": 1, "error": None})
+    sink = ParquetSink(str(tmp_path))
+    sink.existing_ids()
+    assert sink._seeded and sink._pinned["score"] == pa.int64()
+
+
+def test_salvage_demotes_a_value_that_does_not_fit_the_widened_type(tmp_path):
+    """Two rows whose TYPES unify (int64 + double) but whose VALUES do not (2**60 is not
+    exactly representable as a double) must cost one error row, never a raise at flush."""
+    from saturate import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=2)
+    sink.append({"id": "big", "x": 2**60, "error": None})
+    sink.append({"id": "half", "x": 0.5, "error": None})
+    sink.flush()
+    assert sink.rows_demoted == 1 and sink.existing_ids() == {"big", "half"}
+    assert sink.existing_ids(retry_errors=True) == {"half"}  # widened to double: 2**60 does not fit

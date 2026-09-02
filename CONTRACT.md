@@ -56,10 +56,12 @@ carries the full schema** (absent values as typed nulls); a column whose values 
 before its type is ever seen is absent from those early parts, so readers doing strict
 unions should expect nullable user columns. For a fixed schema from part one, declare it —
 `pump(schema=...)` — every part is cast to it, and a row carrying fields outside the
-declared schema becomes an error row (§4; a direct sink append raises instead). The
-library itself writes no token/latency columns — they appear when your `parse` emits them. Standard
-names when written: `prompt_tokens`, `completion_tokens`, `latency_s` — copied from the
-response `usage` or your own measurement, blank never guessed.
+declared schema becomes an error row (§4; a direct sink append raises instead). Without a
+declared schema, a row whose value does not widen losslessly into an already-pinned column
+type (§8) likewise becomes an error row — at flush, whichever way it was appended. The library itself writes no token/latency columns — they
+appear when your `parse` emits them. Standard names when written: `prompt_tokens`,
+`completion_tokens`, `latency_s` — copied from the response `usage` or your own
+measurement, blank never guessed.
 
 ## 2. The id scheme
 
@@ -86,7 +88,10 @@ part whose sidecar is missing (a crash between part- and manifest-write costs on
 scanning, never duplicates); skip-and-re-pay any unreadable file (≤ one flush — `flush_every` rows — of rework,
 never a hard error). A manifest entry without a surviving part still counts as done —
 resume trusts manifests; recovering rows from an out-of-band-deleted part means a fresh
-output dir, or deleting its orphaned sidecar.
+output dir, or deleting its orphaned sidecar. Sidecars are read concurrently (on a remote
+store the cost is per-file round-trips, not parsing); the done-set is independent of read
+order. Past ~1000 sidecars the reader says so on stderr — a larger `flush_every` means
+fewer files.
 
 One exception, in resume's favor: rows in flight when a run-fatal abort fires (the circuit
 breaker gave up — the server is gone) produce **no** record and are re-admitted next run;
@@ -116,7 +121,10 @@ and telemetry writes are best-effort sidecars: failures are non-fatal, and sinks
 
 ## 6. Telemetry (frozen keys)
 
-One `telemetry-…jsonl` per run; one object per controller tick (~2s):
+One `telemetry-…jsonl` per run; one object per controller tick (~2s). The file is rewritten
+periodically during the run (about every minute locally, every five minutes on remote
+stores, stretching as the run grows — each rewrite re-sends the whole trajectory, so the
+interval is a quarter of the run so far) and finalised at exit; readers may see a partial trajectory mid-run.
 
 | key | meaning |
 |---|---|
@@ -146,6 +154,13 @@ rule): `rows_total`, `rows_done_prior`, `rows_processed`, `rows_failed`, `rows_d
 ## 8. Non-guarantees
 
 No output ordering · no dedup beyond `id` · no schema migration (keep `parse` types stable
-per output dir; a same-run type change raises at flush; a declared schema is the fully
-stable option) · one request per row (rollouts/trajectories are a different primitive) ·
+per output dir; a pinned column type never moves and is read back from the newest readable
+existing part on resume — a value of the same kind that fits is accepted and cast (an int
+into a double or int32 column, `[1]` into a `list<double>` column, a struct missing a pinned
+field), any other type change (a float into an int column, an int into a string column, a
+struct field the pin lacks, an int that overflows) becomes an error row at flush, never a
+raise; a column seen only as nulls or empty lists is not pinned until a typed value arrives;
+K shards writing one output dir concurrently each pin from their own first rows, so fan-out
+with a dynamic schema can leave parts that disagree — a declared schema is the fully stable
+option and the right one for fan-out) · one request per row (rollouts/trajectories are a different primitive) ·
 no dollar figures in the data.

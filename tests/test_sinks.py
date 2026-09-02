@@ -475,3 +475,38 @@ def test_hf_autocreate_needs_exact_protocol_match(monkeypatch):
     monkeypatch.setattr(fsspec, "url_to_fs", lambda uri: (FakeFs(("hf",)), "datasets/owner/name/runs"))
     ParquetSink("hf://datasets/owner/name/runs")
     assert calls == ["owner/name"]
+
+def test_existing_ids_concurrent_reads_match_sequential(tmp_path):
+    """Resume reads manifest sidecars on a thread pool: the result must be exactly
+    the sequential one — an uncovered part (sidecar deleted) is scanned, a corrupt
+    sidecar is skipped and its part scanned as fallback, every id is recovered."""
+    from saturate import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    ids = {f"row-{i:03d}" for i in range(200)}
+    for i, id_ in enumerate(sorted(ids)):
+        sink.append({"id": id_, "error": "http 500: nope" if i % 7 == 0 else None})
+    manifests = sorted((tmp_path / "_manifest").glob("ids-part-*.parquet"))
+    assert len(manifests) == 200
+    manifests[3].unlink()  # uncovered part: scanned individually
+    manifests[150].write_bytes(b"not parquet")  # unreadable sidecar: its part is scanned
+    errored = {f"row-{i:03d}" for i in range(200) if i % 7 == 0}
+    for workers in (16, 1):
+        s = ParquetSink(str(tmp_path), read_workers=workers)
+        assert s.existing_ids() == ids
+        assert s.existing_ids(retry_errors=True) == ids - errored
+
+
+def test_existing_ids_warns_on_many_manifest_files(tmp_path, capsys):
+    """Past ~1000 sidecars, resume cost on a remote store is the per-file round-trip;
+    say so once and point at the knob (flush_every)."""
+    from saturate import ParquetSink
+
+    mdir = tmp_path / "_manifest"
+    mdir.mkdir()
+    table = pa.Table.from_pylist([{"id": "x", "error": None}])
+    for i in range(1001):
+        pq.write_table(table, mdir / f"ids-part-{i:05d}.parquet")
+    assert ParquetSink(str(tmp_path)).existing_ids() == {"x"}
+    err = capsys.readouterr().err
+    assert "resume: reading 1001 manifest files" in err and "flush_every" in err

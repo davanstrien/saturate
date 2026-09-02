@@ -28,11 +28,13 @@ def _log(msg: str) -> None:
 
 
 class ParquetSink:
-    def __init__(self, out_uri: str, flush_every: int = 10, schema: pa.Schema | None = None):
+    def __init__(self, out_uri: str, flush_every: int = 10, schema: pa.Schema | None = None,
+                 read_workers: int = 16):
         import fsspec
 
         self.fs, self.root = fsspec.url_to_fs(out_uri)
         self.flush_every = flush_every
+        self.read_workers = read_workers  # resume read concurrency; 1 = sequential
         self._buf: list[dict] = []
         # declared mode (r5): an immutable schema every part is cast to — the only fully
         # schema-stable option for arbitrary parse output. Must carry contract-typed id + error.
@@ -75,16 +77,29 @@ class ParquetSink:
         except Exception:
             pass  # HfFileSystem: directories are implicit beyond the repo itself
 
-    def _read_id_error(self, path: str, done: set, failed: set) -> bool:
+    def _read_id_error(self, path: str) -> tuple[set[str], set[str]] | None:
+        """(done ids, failed ids) of one manifest or part; None if the file is unreadable."""
         try:
             with self.fs.open(path, "rb") as f:
                 t = pq.read_table(f, columns=["id", "error"])
+            done: set[str] = set()
+            failed: set[str] = set()
             for id_, err in zip(t["id"].to_pylist(), t["error"].to_pylist(), strict=True):
                 (failed if err else done).add(id_)
-            return True
+            return done, failed
         except Exception as e:  # truncated file from a crash: skip, re-pay
             _log(f"skipping unreadable {path}: {e}")
-            return False
+            return None
+
+    def _read_many(self, paths: list[str]) -> list[tuple[set[str], set[str]] | None]:
+        """Results in path order. Remote resume is bound by per-file round-trips, not
+        parsing, so the files are read on a thread pool; fsspec is synchronous."""
+        if self.read_workers <= 1 or len(paths) <= 1:
+            return [self._read_id_error(p) for p in paths]
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(min(self.read_workers, len(paths))) as ex:
+            return list(ex.map(self._read_id_error, paths))
 
     def existing_ids(self, retry_errors: bool = False) -> set[str]:
         """Manifest-first, exact: any part lacking its manifest sidecar is
@@ -93,12 +108,21 @@ class ParquetSink:
         done: set[str] = set()
         failed: set[str] = set()
         covered: set[str] = set()
-        for path in sorted(self.fs.glob(f"{self.root}/_manifest/ids-*.parquet")):
-            if self._read_id_error(path, done, failed):
+        manifests = sorted(self.fs.glob(f"{self.root}/_manifest/ids-*.parquet"))
+        if len(manifests) > 1000:
+            _log(f"resume: reading {len(manifests)} manifest files "
+                 "(consider larger flush_every for remote outputs)")
+        for path, got in zip(manifests, self._read_many(manifests), strict=True):
+            if got is not None:
+                done |= got[0]
+                failed |= got[1]
                 covered.add(path.rsplit("/", 1)[-1][4:])
-        for path in sorted(self.fs.glob(f"{self.root}/part-*.parquet")):
-            if path.rsplit("/", 1)[-1] not in covered:
-                self._read_id_error(path, done, failed)
+        parts = [p for p in sorted(self.fs.glob(f"{self.root}/part-*.parquet"))
+                 if p.rsplit("/", 1)[-1] not in covered]
+        for got in self._read_many(parts):
+            if got is not None:
+                done |= got[0]
+                failed |= got[1]
         return done if retry_errors else done | failed
 
     def probe(self, record: dict) -> None:

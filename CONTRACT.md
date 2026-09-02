@@ -88,7 +88,10 @@ part whose sidecar is missing (a crash between part- and manifest-write costs on
 scanning, never duplicates); skip-and-re-pay any unreadable file (≤ one flush — `flush_every` rows — of rework,
 never a hard error). A manifest entry without a surviving part still counts as done —
 resume trusts manifests; recovering rows from an out-of-band-deleted part means a fresh
-output dir, or deleting its orphaned sidecar.
+output dir, or deleting its orphaned sidecar. Sidecars are read concurrently (on a remote
+store the cost is per-file round-trips, not parsing); the done-set is independent of read
+order. Past ~1000 sidecars the reader says so on stderr — a larger `flush_every` means
+fewer files.
 
 One exception, in resume's favor: rows in flight when a run-fatal abort fires (the circuit
 breaker gave up — the server is gone) produce **no** record and are re-admitted next run;

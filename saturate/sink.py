@@ -144,7 +144,10 @@ class ParquetSink:
                 for id_, err in zip(t["id"].to_pylist(), t["error"].to_pylist(), strict=True):
                     (failed if err else done).add(id_)
                 return done, failed
-            except Exception as e:  # truncated file from a crash, or a transient remote error
+            except pa.ArrowException as e:  # the bytes are not parquet (crash-truncated): no retry
+                _log(f"skipping unreadable {path}: {e}")
+                return None
+            except Exception as e:  # an I/O or remote error: may be transient
                 if i + 1 < attempts:
                     time.sleep(0.5 * 2**i)
                 else:

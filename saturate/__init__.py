@@ -24,16 +24,16 @@ from saturate.core import AdaptiveClient, AdaptiveLimiter, Done, through
 from saturate.engine import Engine, wait_for_health
 from saturate.signals import CEILING_FLAG
 from saturate.sink import FileSink, ParquetSink, as_sink, drain, read_output
-from saturate.source import content_id, shard_select, skip_done, stream
+from saturate.source import content_id, prepare_ahead, shard_select, skip_done, stream
 from saturate.sources import bucket_rows, dataset_rows
-from saturate.telemetry import advise, cut_reasons
+from saturate.telemetry import advise, advise_input, bound_by_counts, cut_reasons
 from saturate.transport import FatalTransportError, Request, make_json_request, make_multipart_request
 
 __all__ = [
     "pump", "Stats", "Fixed", "Auto", "Obs", "Engine", "wait_for_health",
     "Request", "make_json_request", "make_multipart_request", "existing_ids",
     "AdaptiveClient", "AdaptiveLimiter", "Done", "through", "stream", "skip_done",
-    "drain", "read_output", "ParquetSink", "FileSink", "shard_select", "content_id",
+    "drain", "read_output", "ParquetSink", "FileSink", "shard_select", "content_id", "prepare_ahead",
     "FatalTransportError", "dataset_rows", "bucket_rows"]
 try:
     __version__ = importlib.metadata.version("saturate")
@@ -79,6 +79,7 @@ class Stats:
     breaker_opens: int = 0
     hints: list = dataclasses.field(default_factory=list)
     cut_reasons: dict = dataclasses.field(default_factory=dict)  # window reductions by controller reason
+    bound_by: dict = dataclasses.field(default_factory=dict)  # ticks per bottleneck verdict (CONTRACT §6)
 
     @property
     def tokens_per_sec(self) -> float:
@@ -108,6 +109,7 @@ def pump(
     id_fn: Callable | None = None,
     signal_source: str = "auto",  # "auto" (scrape, blind fallback) | "none"
     schema=None,  # pa.Schema: declared immutable output schema (CONTRACT §8) — else dynamic/sparse
+    prepare_workers: int = 0,
 ) -> Stats:
     """Run every row through the endpoint and land the results; safe to re-run (resumes).
 
@@ -127,6 +129,13 @@ def pump(
     id_fn: callable row -> id, an alternative to id_key.
     signal_source: "auto" scrapes /metrics and falls back to blind mode; "none" never scrapes.
     schema: pa.Schema declaring an immutable output schema; None infers it per part.
+    prepare_workers: threads running `to_request` ahead of admission (0 = on the event loop).
+        Use it when `to_request` does real work per row (image decode, PDF render, tokenising):
+        on the loop that work serialises the whole pump and idles the engine — the run-end
+        advisor says "PREP-BOUND" and quotes the ms/row when that happened. It helps only
+        if the work releases the GIL (PIL, numpy, IO); `parse` always stays on the loop.
+        For pure-Python CPU work, or to own the pool, prepare rows before the pump instead:
+        `pump(prepare_ahead(rows, fn, executor=ProcessPoolExecutor()), ...)`.
 
     Warning: `shard=(rank, world)` labels output files and completion markers only. It does
     not select input rows — every shard given the same `rows` processes all of them. Pre-shard
@@ -134,12 +143,12 @@ def pump(
     """
     return asyncio.run(_pump(rows, to_request, parse, endpoint, output, window, shard,
                              flush_every, read_timeout, route, headers, retry_errors,
-                             id_key, id_fn, signal_source, schema))
+                             id_key, id_fn, signal_source, schema, prepare_workers))
 
 
 async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_every,
                 read_timeout, route, extra_headers, retry_errors, id_key, id_fn,
-                signal_source, schema=None) -> Stats:
+                signal_source, schema=None, prepare_workers=0) -> Stats:
     stats = Stats()
     if shard[1] > 1:
         _log(f"shard={tuple(shard)}: labels output only — input must be pre-sharded with "
@@ -178,7 +187,8 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
     async with AdaptiveClient(endpoint, window=window, headers=hdrs,
                               read_timeout=read_timeout,
                               signal_source=signal_source, on_tick=on_tick) as client:
-        results = through(client, pending, to_request, _adapt_parse(parse), route=route)
+        results = through(client, pending, to_request, _adapt_parse(parse), route=route,
+                          prepare_workers=prepare_workers)
         await drain(results, sink, shard=shard, stats=stats)
         limiter = client.limiter
         dialect = client.dialect
@@ -188,13 +198,13 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
         await writer  # never two writers on one file
     stats.elapsed_s = round(time.monotonic() - t0, 2)
     stats.final_limit = limiter.window.limit
-    stats.input_bound = limiter.input_bound_ever
+    stats.bound_by = bound_by_counts(limiter.ticks)
+    stats.input_bound = stats.bound_by.get("source", 0) + stats.bound_by.get("prep", 0) > 0
     stats.cut_reasons = cut_reasons(limiter.ticks)
     if lines and write_lines is not None:
         await write_telemetry(lines)  # final: the complete trajectory
     stats.hints = advise(limiter.ticks, dialect, stats.final_limit, CEILING_FLAG)
-    if stats.input_bound:
-        stats.hints.append("run was INPUT-BOUND — the source, not the engine, was the bottleneck")
+    stats.hints += advise_input(limiter.ticks, prepare_workers)
     for h in stats.hints:
         _log(f"advisor: {h}")
     if hasattr(sink, "write_stats"):  # console-facing exact summary (CONTRACT §5)

@@ -93,6 +93,10 @@ store the cost is per-file round-trips, not parsing); the done-set is independen
 order. Past ~1000 sidecars the reader says so on stderr — a larger `flush_every` means
 fewer files.
 
+While the circuit is open the breaker probes the run's real route about once a second for
+up to `max_open_s` (600 s by default) with a one-token request; against a shared hosted API
+those probes may count toward a requests-per-minute quota.
+
 One exception, in resume's favor: rows in flight when a run-fatal abort fires (the circuit
 breaker gave up — the server is gone) produce **no** record and are re-admitted next run;
 writing them as errors would make resume skip them forever.
@@ -134,11 +138,15 @@ interval is a quarter of the run so far) and finalised at exit; readers may see 
 | `waiting` / `running` | engine queue gauges (null when blind) |
 | `bp` | backpressure events this tick (saturation-shaped 429/timeout/5xx) |
 | `ok` | requests that succeeded this tick (failures surface in `bp`) |
-| `input_bound` | true when the source, not the endpoint, is the bottleneck |
+| `input_bound` | true when the client side (the source iterator or `to_request`), not the endpoint, starved admission this tick: `bound_by` is `source` or `prep` with the window under half used |
 | `tok_s` | delivered tokens/sec this tick (the controller's plateau signal) |
 | `kv` / `hits` / `preempts` | KV-cache utilization · prefix-cache hit rate · scheduler preemptions (when exposed) |
 | `reason` | the controller's decision at the end of this tick: `hold`, `grow`, `probe`, `revert`, `cut:bp`, `cut:kv`, `cut:stall`, `cut:queue`, or `hold:<why>` (`hold` for `Fixed` and custom controllers) |
 | `latency_s` | p50 admission-to-completion time of recent requests (null before the first completes) |
+| `bound_by` | what limited this tick, in this order: `source` when `source_s` is at least a quarter of the tick with the window under half used (`inflight < 0.5 * limit`); `prep` when `prep_s / max(1, prep_workers)` is at least a quarter of the tick with the window under half used, or when `prep_workers` is 0 and `prep_s` is at least half the tick; `loop` when `loop_lag_s` is at least half the tick (the loop was blocked outside `to_request`: `parse` or sink writes); `engine` when the window was full or admission waits dominated; null when nothing was conclusive (idle) |
+| `source_s` / `prep_s` | seconds this tick spent in the source iterator / in `to_request` (`prep_s` is the raw sum over prepare workers) |
+| `prep_n` / `prep_workers` | `to_request` calls measured this tick / threads running it (0 = on the event loop) |
+| `loop_lag_s` | seconds of this tick beyond the tick period and the gauge scrape: time the event loop was blocked |
 
 ## 7. Agent contract (stdout / stderr)
 
@@ -149,7 +157,9 @@ detection is truthiness of any of the three, so there is no off-switch once one 
 rule): `rows_total`, `rows_done_prior`, `rows_processed`, `rows_failed`, `rows_deduped`, `prompt_tokens`,
 `completion_tokens`, `elapsed_s`, `final_limit`, `input_bound`, `breaker_opens`, `hints`,
 `tokens_per_sec`, `cut_reasons` (window reductions counted by telemetry `reason`, e.g.
-`{"cut:bp": 1, "cut:stall": 2}`; empty when the window never shrank).
+`{"cut:bp": 1, "cut:stall": 2}`; empty when the window never shrank), `bound_by` (ticks per
+telemetry `bound_by` verdict, e.g. `{"engine": 40, "prep": 3}`; inconclusive ticks are not
+counted). `input_bound` is true when any tick's `input_bound` was true.
 
 ## 8. Non-guarantees
 

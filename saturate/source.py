@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Iterator
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import Executor, ThreadPoolExecutor
+from functools import partial
 
 
 def _reject_non_json(o):
@@ -81,6 +84,57 @@ def skip_done(rows: Iterable[tuple[str, dict]], done, retry_errors: bool = False
             continue
         seen.add(id_)
         yield id_, row
+
+
+def rolling_map(items: Iterable, fn: Callable, executor: Executor, window: int) -> Iterator:
+    """`map(fn, items)` on `executor`, in order, with at most `window` calls in flight:
+    one result out, one call in. The consumer's pace bounds the look-ahead, so a slow
+    consumer never accumulates results in RAM. The first exception from `fn` is raised
+    at the consumer and the calls still queued are cancelled."""
+    window = max(1, window)
+    pending: deque = deque()
+    it = iter(items)
+    try:
+        for item in it:  # prime the window
+            pending.append(executor.submit(fn, item))
+            if len(pending) >= window:
+                break
+        while pending:  # rolling: one out, one in — never more than `window` in flight
+            fut = pending.popleft()
+            nxt = next(it, None)
+            if nxt is not None:
+                pending.append(executor.submit(fn, nxt))
+            yield fut.result()
+    finally:
+        for fut in pending:
+            fut.cancel()
+
+
+def _apply_to_row(fn: Callable[[dict], dict], item: tuple[str, dict]) -> tuple[str, dict]:
+    id_, row = item
+    return id_, fn(row)
+
+
+def prepare_ahead(rows: Iterable[tuple[str, dict]], fn: Callable[[dict], dict], workers: int = 4,
+                  executor: Executor | None = None) -> Iterator[tuple[str, dict]]:
+    """(id, row) -> (id, fn(row)) computed ahead of the consumer on `executor`, order
+    preserved, at most `workers` calls in flight. The default executor is a
+    `ThreadPoolExecutor(workers)` owned by the iterator; pass your own (a
+    `ProcessPoolExecutor` for pure-Python CPU work, or anything `concurrent.futures`-shaped)
+    to control its lifetime and size — with a process pool, `fn` and the rows must be
+    picklable (a module-level function, not a lambda). An exception in `fn` is raised at
+    the consumer. Work done here happens before the pump sees the row, so a pump fed by
+    prepare_ahead reads that cost as source wait (SOURCE-BOUND), not prep."""
+
+    apply = partial(_apply_to_row, fn)  # module-level + partial: picklable for a process pool
+    if executor is not None:
+        yield from rolling_map(rows, apply, executor, workers)
+        return
+    pool = ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="saturate-prepare-ahead")
+    try:
+        yield from rolling_map(rows, apply, pool, workers)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def shard_select(rows: Iterable[tuple[str, dict]], rank: int = 0, world: int = 1,

@@ -2,15 +2,19 @@
 
 Speaks enough HTTP/1.1 (keep-alive, Content-Length bodies) for httpx to treat
 it as a real endpoint: `POST /v1/chat/completions` answers OpenAI-shaped JSON
-with `usage`, `GET /health` answers 200, and `GET /metrics` publishes vLLM-shaped
-gauges so the scrape path and gauge-mode controller are exercised too.
+with `usage`, `POST /v1/embeddings` answers an embeddings list, `GET /health`
+answers 200, and `GET /metrics` publishes vLLM-shaped gauges so the scrape path
+and gauge-mode controller are exercised too.
 
 Runs on its own event loop in a daemon thread, so a test can drive `pump()`
 (which owns the main thread's loop via asyncio.run) against it. Behaviour is
-set through plain attributes read on every request: `latency_s` and
+set through plain attributes read on every request: `latency_s` (or
+`latency_for(request_json) -> seconds` to make it depend on the body) and
 `status_for(request_json) -> int` may be changed between runs. Counters
 (`requests`, `probes`, `peak_inflight`, token totals) are what the endpoint
-observed, for asserting against the client's own accounting.
+observed, for asserting against the client's own accounting; `probe_log` keeps
+the (path, body) of every circuit-breaker probe (identified by the
+`x-saturate-probe` header the breaker sends).
 
     python tests/stub_server.py [latency_ms]   # serve until Ctrl-C, for manual runs
 """
@@ -30,13 +34,32 @@ def always_ok(request: dict) -> int:
     return 200
 
 
+class StubLimiter:
+    """Stand-in for AdaptiveLimiter where a test drives through() or _pump() without HTTP:
+    records what the pipeline reports (source waits, to_request times, prepare workers)."""
+
+    def __init__(self, limit: int = 4):
+        self.window = type("W", (), {"limit": limit})()
+        self.ticks: list[dict] = []
+        self.prep_workers = 0
+        self.source_waits: list[float] = []
+        self.preps: list[float] = []
+
+    def note_source_wait(self, seconds: float) -> None:
+        self.source_waits.append(seconds)
+
+    def note_prep(self, seconds: float) -> None:
+        self.preps.append(seconds)
+
+
 class StubServer:
     def __init__(self, latency_s: float = 0.0, status_for: Callable[[dict], int] = always_ok):
         self.latency_s = latency_s
+        self.latency_for: Callable[[dict], float] | None = None  # overrides latency_s per body
         self.status_for = status_for
         self.port = 0
         self.requests = 0  # completion requests served (any status), probes excluded
-        self.probes = 0  # circuit-breaker readiness probes seen
+        self.probe_log: list[tuple[str, dict]] = []  # (path, body) of every circuit-breaker probe
         self.inflight = 0
         self.peak_inflight = 0
         self.prompt_tokens = 0  # usage reported on 200 responses only
@@ -49,6 +72,10 @@ class StubServer:
     @property
     def endpoint(self) -> str:
         return f"http://127.0.0.1:{self.port}/v1"
+
+    @property
+    def probes(self) -> int:
+        return len(self.probe_log)
 
     # -- lifecycle -----------------------------------------------------------------------
     def start(self) -> StubServer:
@@ -100,7 +127,8 @@ class StubServer:
                 headers = {k.strip().lower(): v.strip() for k, _, v in
                            (line.partition(":") for line in header_block.split("\r\n") if line)}
                 body = await reader.readexactly(int(headers.get("content-length", 0)))
-                status, ctype, payload = await self._respond(method, path.split("?", 1)[0], body)
+                status, ctype, payload = await self._respond(method, path.split("?", 1)[0], body,
+                                                             headers)
                 writer.write(f"HTTP/1.1 {status} {_REASON.get(status, 'OK')}\r\n"
                              f"Content-Type: {ctype}\r\nContent-Length: {len(payload)}\r\n"
                              "Connection: keep-alive\r\n\r\n".encode() + payload)
@@ -116,7 +144,8 @@ class StubServer:
             except (ConnectionError, OSError):
                 pass
 
-    async def _respond(self, method: str, path: str, body: bytes) -> tuple[int, str, bytes]:
+    async def _respond(self, method: str, path: str, body: bytes, headers: dict
+                       ) -> tuple[int, str, bytes]:
         if method == "GET" and path == "/health":
             return 200, "text/plain", b"ok"
         if method == "GET" and path == "/metrics":
@@ -127,21 +156,32 @@ class StubServer:
         if method != "POST":
             return 404, "text/plain", b"not found"
         request = json.loads(body or b"{}")
-        if request.get("model") == "readiness-probe":
-            self.probes += 1
+        if "x-saturate-probe" in headers:
+            self.probe_log.append((path, request))
         else:
             self.requests += 1
         self.inflight += 1
         self.peak_inflight = max(self.peak_inflight, self.inflight)
         try:
-            if self.latency_s:
-                await asyncio.sleep(self.latency_s)
+            latency = self.latency_for(request) if self.latency_for else self.latency_s
+            if latency:
+                await asyncio.sleep(latency)
         finally:
             self.inflight -= 1
         status = self.status_for(request)
         if status != 200:
             err = json.dumps({"error": {"message": f"stub returned {status}", "type": "stub"}})
             return status, "application/json", err.encode()
+        if path == "/v1/embeddings":
+            texts = request.get("input") or []
+            texts = [texts] if isinstance(texts, str) else texts
+            usage = {"prompt_tokens": sum(len(t) for t in texts), "completion_tokens": 0}
+            self.prompt_tokens += usage["prompt_tokens"]
+            resp = {"object": "list", "model": request.get("model", "stub"),
+                    "data": [{"object": "embedding", "index": i, "embedding": [float(len(t)), 0.0]}
+                             for i, t in enumerate(texts)],
+                    "usage": {**usage, "total_tokens": usage["prompt_tokens"]}}
+            return 200, "application/json", json.dumps(resp).encode()
         content = str((request.get("messages") or [{}])[-1].get("content", ""))
         reply = f"echo: {content}"
         usage = {"prompt_tokens": len(content), "completion_tokens": len(reply)}

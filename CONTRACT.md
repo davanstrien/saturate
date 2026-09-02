@@ -93,6 +93,10 @@ store the cost is per-file round-trips, not parsing); the done-set is independen
 order. Past ~1000 sidecars the reader says so on stderr — a larger `flush_every` means
 fewer files.
 
+While the circuit is open the breaker probes the run's real route about once a second for
+up to `max_open_s` (600 s by default) with a one-token request; against a shared hosted API
+those probes may count toward a requests-per-minute quota.
+
 One exception, in resume's favor: rows in flight when a run-fatal abort fires (the circuit
 breaker gave up — the server is gone) produce **no** record and are re-admitted next run;
 writing them as errors would make resume skip them forever.

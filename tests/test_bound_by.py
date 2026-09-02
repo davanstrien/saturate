@@ -190,8 +190,9 @@ def test_advisor_names_the_source_and_a_blocked_loop():
                     "bucket_rows(prefetch=)), select fewer columns, or shard the input")
     run = ticks("loop", 4, lag=1.5) + ticks("engine", 4, t0=8.0)  # 6 s of lag over a 16 s run
     (hint,) = advise_input(run)
-    assert hint == ("LOOP-BOUND: the event loop was blocked 38% of the run outside to_request "
-                    "(parse or sink writes); keep parse cheap and raise flush_every")
+    assert hint == ("LOOP-BOUND: the event loop was blocked 38% of the run (parse, sink writes, and "
+                    "any to_request share under the prep threshold); keep parse cheap, raise "
+                    "flush_every, and move to_request work off the loop")
 
 
 class _EchoClient:

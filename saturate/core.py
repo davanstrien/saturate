@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import inspect
 import statistics
 import sys
 import time
@@ -127,7 +128,11 @@ class AdaptiveLimiter:
         when the loop was blocked that long by something else (parse, a sink flush): a blocked
         loop holds slots without serving them, so the window count says nothing — but the
         window IS full, so these are not input-bound. `engine` when the window was full or
-        admission waits dominated; None when nothing is conclusive (idle)."""
+        admission waits dominated; None when nothing is conclusive (idle).
+
+        Per-worker occupancy is an average over the prepare threads: one saturated lane (a
+        single huge video row) can read under the threshold while the others idle. A
+        per-lane maximum would catch that; it is a possible refinement, not done here."""
         if dt <= 0:
             return None, False
         w = self._wait
@@ -275,9 +280,9 @@ async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]],
     """(id, row) stream -> Done stream, in completion order, adaptively concurrent.
 
     Row PAYLOADS never materialize beyond two bounds: request bodies in flight are
-    capped by the window, and prepared-but-unadmitted bodies by the prepare bound
-    (`max(2 * prepare_workers, 4)` when `prepare_workers` > 0; with `to_request` on
-    the loop a body is built right before its admission wait). The feeder itself
+    capped by the window, and built-but-unadmitted bodies by the prepare bound,
+    `max(2 * prepare_workers, 4)`, held from before `to_request` until the window
+    admits the request — the same rule on the loop and in threads. The feeder itself
     runs ahead of completions by at most ~2x the window (rows, not bodies). Honest
     bound: the id SETS are in-memory — resume holds the done-set and dedup holds
     admitted ids (~60B/id: fine to ~10M rows, plan shard-scoped done-sets beyond
@@ -298,9 +303,12 @@ async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]],
     feeding_done = asyncio.Event()
     pool = ThreadPoolExecutor(prepare_workers, thread_name_prefix="saturate-prepare") \
         if prepare_workers > 0 else None
-    prepared = asyncio.Semaphore(max(2 * prepare_workers, 4))  # prepared bodies awaiting a slot
+    prepared = asyncio.Semaphore(max(2 * prepare_workers, 4))  # built bodies awaiting a slot
     loop = asyncio.get_running_loop()
     limiter = client.limiter
+    # the bound is released at admission when the client's post offers the hook; a client
+    # that predates it (the embedder seam) releases just before posting — a weaker bound
+    admit_hook = "on_admit" in inspect.signature(client.post).parameters
     note_prep = getattr(limiter, "note_prep", None)  # an embedder's own limiter may predate it
     if hasattr(limiter, "prep_workers"):
         limiter.prep_workers = prepare_workers
@@ -319,17 +327,15 @@ async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]],
                 holding = False
 
         try:
-            if pool:
-                await prepared.acquire()
-                holding = True
-                req, took = await loop.run_in_executor(pool, prepare, row)
-            else:
-                req, took = prepare(row)
+            await prepared.acquire()
+            holding = True
+            req, took = await loop.run_in_executor(pool, prepare, row) if pool else prepare(row)
             if note_prep is not None:
                 note_prep(took)
-            if pool:
+            if admit_hook:
                 body, err = await client.post(req, route, on_admit=admitted)
             else:
+                admitted()
                 body, err = await client.post(req, route)
             if err is None:
                 out = parse(row, body)

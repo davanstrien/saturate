@@ -253,9 +253,11 @@ def test_a_slow_parse_reads_loop_bound(stub, tmp_path):
     assert stats.bound_by, stats.bound_by  # the control run did tick
 
 
-def test_prepared_bodies_are_bounded_independently_of_the_feeder(stub, tmp_path):
-    """With prepare_workers=2 and Fixed(2), at most max(2*2, 4) prepared bodies wait for a slot
-    plus 2 in flight: 6 to_request calls can have completed before the first response."""
+@pytest.mark.parametrize("workers", [0, 2])
+def test_prepared_bodies_are_bounded_independently_of_the_feeder(stub, tmp_path, workers):
+    """With Fixed(2), at most max(2*workers, 4) built bodies wait for a slot plus 2 in flight:
+    6 to_request calls can have completed before the first response — on the loop (0) and in
+    threads (2) alike, while the feeder runs 2*2+8 = 12 rows ahead."""
     stub.latency_s = 0.15
     prepared = 0
     at_first_response = []
@@ -271,7 +273,7 @@ def test_prepared_bodies_are_bounded_independently_of_the_feeder(stub, tmp_path)
         return parse(row, resp)
 
     stats = pump(rows(24), counting_to_request, first_parse, endpoint=stub.endpoint,
-                 output=str(tmp_path), window=Fixed(2), prepare_workers=2)
+                 output=str(tmp_path), window=Fixed(2), prepare_workers=workers)
     assert stats.rows_processed == 24
     assert at_first_response[0] <= 6, at_first_response
 

@@ -59,8 +59,9 @@ def advise_input(telemetry: list[dict], prepare_workers: int = 0) -> list[str]:
     if counts.get("loop", 0) / len(telemetry) >= 0.3:
         run_s = max(telemetry[-1].get("t", 0.0), 1e-9)
         pct = min(100, round(100 * sum(t.get("loop_lag_s", 0.0) for t in telemetry) / run_s))
-        hints.append(f"LOOP-BOUND: the event loop was blocked {pct}% of the run outside to_request "
-                     "(parse or sink writes); keep parse cheap and raise flush_every")
+        hints.append(f"LOOP-BOUND: the event loop was blocked {pct}% of the run (parse, sink writes, "
+                     "and any to_request share under the prep threshold); keep parse cheap, raise "
+                     "flush_every, and move to_request work off the loop")
     return hints
 
 

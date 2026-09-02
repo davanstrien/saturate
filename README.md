@@ -84,7 +84,10 @@ succeeds, the output holds both records for that id and readers let the success 
 (we call that **healing**).
 
 Already have an endpoint (a colleague's server, an exposed Job, a hosted API)? Skip
-`Engine` and pass its URL as `endpoint=` — everything else is identical.
+`Engine` and pass its URL as `endpoint=` — everything else is identical. One caveat for a
+shared hosted API: after sustained 5xx the circuit breaker pauses the run and probes the real
+route about once a second (a one-token request) for up to `max_open_s`; those probes may
+count toward a requests-per-minute quota.
 
 Where do `rows` come from? Any iterable works; for Hub datasets there's a built-in
 (streaming by default — `load_dataset(streaming=True)` now runs at local-SSD speed for

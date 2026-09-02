@@ -23,9 +23,18 @@ import httpx2 as httpx
 
 RETRY_ACTIVE = True  # kill-switch: flip off in tests for determinism
 RETRY_BUDGET_S = 300.0  # total retry wall-clock per row
-PROBE_BODY = {"model": "readiness-probe", "messages": [{"role": "user", "content": "hi"}],
-              "max_tokens": 1}  # breaker probe when the request has no json body (multipart)
 PROBE_HEADERS = {"x-saturate-probe": "breaker"}  # lets a server (or a stub) tell probes from rows
+PROBE_TIMEOUT_S = 30.0
+
+
+def probe_body(model: str | None) -> dict:
+    """A tiny request for any OpenAI-style route: a chat server answers it in milliseconds,
+    an embeddings or other route rejects the extra fields with a 4xx — alive either way under
+    the < 500 rule. It carries the caller's model so a multi-model server resolves the same
+    backend. Never a caller's own body: a long generation cannot answer inside the probe
+    timeout, and a poison body would hold the circuit open on a healthy server."""
+    return {"model": model or "readiness-probe", "messages": [{"role": "user", "content": "hi"}],
+            "input": "hi", "max_tokens": 1}
 
 
 class FatalTransportError(RuntimeError):
@@ -80,14 +89,12 @@ class Breaker:
     def ok(self) -> None:
         self.consecutive = 0
 
-    async def gate(self, client: httpx.AsyncClient, probe_url: str, probe_json: dict | None = None
-                   ) -> None:
+    async def gate(self, client: httpx.AsyncClient, probe_url: str, model: str | None = None) -> None:
         """Called at admission AND before every retry attempt — an open breaker
         pauses the whole pump, not just new rows. One caller probes; the rest
-        wait on the close event (no double-counted opens). The probe re-sends the
-        caller's own request (`probe_json` to `probe_url`): any response below 500,
-        a 4xx included, proves the server is up — the probe never has to guess a
-        body for a route it does not know."""
+        wait on the close event (no double-counted opens). The probe is
+        `probe_body(model)` posted to the caller's own route: any response below
+        500, a 4xx included, proves the server is up."""
         while True:
             if self.dead:
                 raise FatalTransportError(
@@ -111,8 +118,8 @@ class Breaker:
                     raise FatalTransportError(
                         f"circuit breaker open for {self.max_open_s}s — server is not coming back")
                 try:
-                    r = await client.post(probe_url, json=probe_json if probe_json is not None else
-                                          PROBE_BODY, timeout=30, headers=PROBE_HEADERS)
+                    r = await client.post(probe_url, json=probe_body(model), timeout=PROBE_TIMEOUT_S,
+                                          headers=PROBE_HEADERS)
                     if r.status_code < 500:
                         break
                 except (httpx.TimeoutException, httpx.TransportError):
@@ -151,7 +158,7 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
         if attempt and (not RETRY_ACTIVE or left() <= 0):
             return None, last_err  # hard wall-clock deadline: no attempt starts past it (r6)
         g0 = time.monotonic()
-        await breaker.gate(client, url, req.json)  # an open breaker pauses retries too
+        await breaker.gate(client, url, (req.json or {}).get("model"))  # an open breaker pauses retries too
         t0 += time.monotonic() - g0  # r6: breaker-open time never consumes the row budget (docstring)
         a0 = time.monotonic()
         try:

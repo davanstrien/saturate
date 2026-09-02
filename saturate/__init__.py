@@ -26,7 +26,7 @@ from saturate.signals import CEILING_FLAG
 from saturate.sink import FileSink, ParquetSink, as_sink, drain, read_output
 from saturate.source import content_id, shard_select, skip_done, stream
 from saturate.sources import bucket_rows, dataset_rows
-from saturate.telemetry import advise, advise_input, cut_reasons
+from saturate.telemetry import advise, advise_input, bound_by_counts, cut_reasons
 from saturate.transport import FatalTransportError, Request, make_json_request, make_multipart_request
 
 __all__ = [
@@ -196,13 +196,13 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
         await writer  # never two writers on one file
     stats.elapsed_s = round(time.monotonic() - t0, 2)
     stats.final_limit = limiter.window.limit
-    stats.input_bound = limiter.input_bound_ever
-    stats.bound_by = dict(limiter.bound_by)
+    stats.bound_by = bound_by_counts(limiter.ticks)
+    stats.input_bound = stats.bound_by.get("source", 0) + stats.bound_by.get("prep", 0) > 0
     stats.cut_reasons = cut_reasons(limiter.ticks)
     if lines and write_lines is not None:
         await write_telemetry(lines)  # final: the complete trajectory
     stats.hints = advise(limiter.ticks, dialect, stats.final_limit, CEILING_FLAG)
-    stats.hints += advise_input(limiter.ticks)
+    stats.hints += advise_input(limiter.ticks, prepare_workers)
     for h in stats.hints:
         _log(f"advisor: {h}")
     if hasattr(sink, "write_stats"):  # console-facing exact summary (CONTRACT §5)

@@ -8,7 +8,8 @@ and gauge-mode controller are exercised too.
 
 Runs on its own event loop in a daemon thread, so a test can drive `pump()`
 (which owns the main thread's loop via asyncio.run) against it. Behaviour is
-set through plain attributes read on every request: `latency_s` and
+set through plain attributes read on every request: `latency_s` (or
+`latency_for(request_json) -> seconds` to make it depend on the body) and
 `status_for(request_json) -> int` may be changed between runs. Counters
 (`requests`, `probes`, `peak_inflight`, token totals) are what the endpoint
 observed, for asserting against the client's own accounting; `probe_log` keeps
@@ -33,15 +34,32 @@ def always_ok(request: dict) -> int:
     return 200
 
 
+class StubLimiter:
+    """Stand-in for AdaptiveLimiter where a test drives through() or _pump() without HTTP:
+    records what the pipeline reports (source waits, to_request times, prepare workers)."""
+
+    def __init__(self, limit: int = 4):
+        self.window = type("W", (), {"limit": limit})()
+        self.ticks: list[dict] = []
+        self.prep_workers = 0
+        self.source_waits: list[float] = []
+        self.preps: list[float] = []
+
+    def note_source_wait(self, seconds: float) -> None:
+        self.source_waits.append(seconds)
+
+    def note_prep(self, seconds: float) -> None:
+        self.preps.append(seconds)
+
+
 class StubServer:
     def __init__(self, latency_s: float = 0.0, status_for: Callable[[dict], int] = always_ok):
         self.latency_s = latency_s
+        self.latency_for: Callable[[dict], float] | None = None  # overrides latency_s per body
         self.status_for = status_for
         self.port = 0
         self.requests = 0  # completion requests served (any status), probes excluded
-        self.probes = 0  # circuit-breaker readiness probes seen
-        self.probe_log: list[tuple[str, dict]] = []  # (path, body) of every probe
-        self.paths: list[str] = []  # every POST path in arrival order, probes included
+        self.probe_log: list[tuple[str, dict]] = []  # (path, body) of every circuit-breaker probe
         self.inflight = 0
         self.peak_inflight = 0
         self.prompt_tokens = 0  # usage reported on 200 responses only
@@ -54,6 +72,10 @@ class StubServer:
     @property
     def endpoint(self) -> str:
         return f"http://127.0.0.1:{self.port}/v1"
+
+    @property
+    def probes(self) -> int:
+        return len(self.probe_log)
 
     # -- lifecycle -----------------------------------------------------------------------
     def start(self) -> StubServer:
@@ -134,17 +156,16 @@ class StubServer:
         if method != "POST":
             return 404, "text/plain", b"not found"
         request = json.loads(body or b"{}")
-        self.paths.append(path)
         if "x-saturate-probe" in headers:
-            self.probes += 1
             self.probe_log.append((path, request))
         else:
             self.requests += 1
         self.inflight += 1
         self.peak_inflight = max(self.peak_inflight, self.inflight)
         try:
-            if self.latency_s:
-                await asyncio.sleep(self.latency_s)
+            latency = self.latency_for(request) if self.latency_for else self.latency_s
+            if latency:
+                await asyncio.sleep(latency)
         finally:
             self.inflight -= 1
         status = self.status_for(request)

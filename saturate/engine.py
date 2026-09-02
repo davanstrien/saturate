@@ -15,6 +15,8 @@ import time
 
 import httpx2 as httpx
 
+from saturate.transport import PROBE_HEADERS, probe_body
+
 
 def _log(msg: str) -> None:
     print(f"[pump] {msg}", file=sys.stderr, flush=True)
@@ -119,11 +121,8 @@ def wait_for_health(endpoint: str, timeout_s: int = 1800, proc: subprocess.Popen
         if ok_streak >= consecutive:
             try:  # trial request: even a 400 proves the API path is alive
                 r = httpx.post(f"{endpoint.rstrip('/')}{route}",
-                               json=payload if payload is not None else
-                               {"model": "readiness-probe",
-                                "messages": [{"role": "user", "content": "hi"}],
-                                "max_tokens": 1},
-                               timeout=30, headers=headers)
+                               json=payload if payload is not None else probe_body(None),
+                               timeout=30, headers={**(headers or {}), **PROBE_HEADERS})
                 if accept(r) if accept is not None else r.status_code < 500:
                     _log(f"engine ready (health x{consecutive} + trial {r.status_code})")
                     return

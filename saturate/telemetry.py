@@ -8,7 +8,8 @@ from collections import Counter
 def tick_record(t: float, limit: int, inflight: int, gauges: dict | None,
                 bp: int, ok: int, input_bound: bool, tok_s: float, reason: str,
                 latency_s: float | None = None, bound_by: str | None = None,
-                source_s: float = 0.0, prep_s: float = 0.0) -> dict:
+                source_s: float = 0.0, prep_s: float = 0.0, prep_n: int = 0, prep_workers: int = 0,
+                loop_lag_s: float = 0.0) -> dict:
     g = gauges or {}
     return {"t": round(t, 1), "limit": limit, "inflight": inflight,
             "waiting": g.get("waiting"), "running": g.get("running"),
@@ -16,7 +17,8 @@ def tick_record(t: float, limit: int, inflight: int, gauges: dict | None,
             "tok_s": round(tok_s, 1), "kv": g.get("kv"), "hits": g.get("hits"),
             "preempts": g.get("preempts"), "reason": reason,
             "latency_s": None if latency_s is None else round(latency_s, 3),
-            "bound_by": bound_by, "source_s": round(source_s, 3), "prep_s": round(prep_s, 3)}
+            "bound_by": bound_by, "source_s": round(source_s, 3), "prep_s": round(prep_s, 3),
+            "prep_n": prep_n, "prep_workers": prep_workers, "loop_lag_s": round(loop_lag_s, 3)}
 
 
 def cut_reasons(telemetry: list[dict]) -> dict[str, int]:
@@ -24,21 +26,36 @@ def cut_reasons(telemetry: list[dict]) -> dict[str, int]:
     return dict(Counter(t["reason"] for t in telemetry if str(t.get("reason", "")).startswith("cut:")))
 
 
-def advise_input(telemetry: list[dict]) -> list[str]:
-    """Client-side bottlenecks: when at least 30% of ticks were bound by `to_request` (prep)
-    or by the source iterator, say so with the measured cost per row and the remedy."""
-    if not telemetry:
+def bound_by_counts(telemetry: list[dict]) -> dict[str, int]:
+    """Ticks per `bound_by` verdict (engine / source / prep / loop); inconclusive ticks are not counted."""
+    return dict(Counter(t["bound_by"] for t in telemetry if t.get("bound_by")))
+
+
+def advise_input(telemetry: list[dict], prepare_workers: int = 0) -> list[str]:
+    """Client-side bottlenecks: when at least 30% of ticks were bound by `to_request` (prep),
+    by the source iterator, or by a blocked event loop, say so with what was measured and
+    the remedy. A run under three ticks is too short to diagnose (start-up and the sink's
+    first flushes dominate it)."""
+    if len(telemetry) < 3:
         return []
-    verdicts = Counter(t.get("bound_by") for t in telemetry)
-    rows = max(1, sum(t.get("ok", 0) for t in telemetry))
+    counts = bound_by_counts(telemetry)
     hints = []
-    if verdicts["prep"] / len(telemetry) >= 0.3:
-        ms = 1000 * sum(t.get("prep_s", 0.0) for t in telemetry) / rows
-        hints.append(f"PREP-BOUND: to_request took {ms:.0f} ms/row on average; run it ahead with "
-                     "pump(prepare_workers=4)")
-    if verdicts["source"] / len(telemetry) >= 0.3:
+    if counts.get("prep", 0) / len(telemetry) >= 0.3:
+        calls = max(1, sum(t.get("prep_n", 0) for t in telemetry))
+        ms = 1000 * sum(t.get("prep_s", 0.0) for t in telemetry) / calls
+        remedy = (f"prep is still the bottleneck at {prepare_workers} workers; raise prepare_workers "
+                  "or make to_request cheaper" if prepare_workers >= 4 else
+                  "run it ahead with pump(prepare_workers=4)")
+        hints.append(f"PREP-BOUND: to_request took {ms:.0f} ms/row on average; {remedy}")
+    if counts.get("source", 0) / len(telemetry) >= 0.3:
+        rows = max(1, sum(t.get("ok", 0) + t.get("bp", 0) for t in telemetry))
         ms = 1000 * sum(t.get("source_s", 0.0) for t in telemetry) / rows
         hints.append(f"SOURCE-BOUND: the source iterator took {ms:.0f} ms/row; prefetch or shard the input")
+    if counts.get("loop", 0) / len(telemetry) >= 0.3:
+        run_s = max(telemetry[-1].get("t", 0.0), 1e-9)
+        pct = min(100, round(100 * sum(t.get("loop_lag_s", 0.0) for t in telemetry) / run_s))
+        hints.append(f"LOOP-BOUND: the event loop was blocked {pct}% of the run outside to_request "
+                     "(parse or sink writes); keep parse cheap and raise flush_every")
     return hints
 
 

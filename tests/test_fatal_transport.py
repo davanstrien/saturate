@@ -5,22 +5,12 @@ becomes a healable error row instead of crashing after the API spend."""
 import asyncio
 
 import pytest
+from stub_server import StubLimiter
 
 from saturate import FatalTransportError, ParquetSink
 from saturate.core import through
 from saturate.sink import drain
 from saturate.transport import Breaker
-
-
-class _StubLimiter:
-    class window:
-        limit = 4
-
-    def note_source_wait(self, s):
-        pass
-
-    def note_prep(self, s, workers=1):
-        pass
 
 
 def test_dead_breaker_gate_raises_fatal():
@@ -32,7 +22,7 @@ def test_dead_breaker_gate_raises_fatal():
 
 def test_fatal_aborts_run_without_error_rows(tmp_path):
     class _FatalClient:
-        limiter = _StubLimiter()
+        limiter = StubLimiter()
 
         async def post(self, request, route="/chat/completions"):
             raise FatalTransportError("circuit breaker gave up")
@@ -51,7 +41,7 @@ def test_fatal_aborts_run_without_error_rows(tmp_path):
 
 def test_nondict_parse_is_error_row(tmp_path):
     class _OkClient:
-        limiter = _StubLimiter()
+        limiter = StubLimiter()
 
         async def post(self, request, route="/chat/completions"):
             return {"usage": {}}, None

@@ -4,6 +4,8 @@ finalised at exit (CONTRACT §6)."""
 import asyncio
 import json
 
+from stub_server import StubLimiter
+
 import saturate
 from saturate import ParquetSink
 
@@ -58,17 +60,10 @@ def test_pump_writes_telemetry_periodically_and_at_exit(tmp_path, monkeypatch):
     write at exit completes the same file."""
     captured = {}
 
-    class FakeLimiter:
-        def __init__(self):
-            self.ticks = []
-            self.input_bound_ever = False
-            self.bound_by = {}
-            self.window = type("W", (), {"limit": 16})()
-
     class FakeClient:
         def __init__(self, endpoint, on_tick=None, **kw):
             captured["on_tick"] = on_tick
-            self.limiter = FakeLimiter()
+            self.limiter = StubLimiter(16)
             self.dialect = None
             self.breaker = type("B", (), {"opens": 0})()
 
@@ -113,8 +108,7 @@ def test_pump_periodic_telemetry_failure_is_not_fatal(tmp_path, monkeypatch, cap
     class FakeClient:
         def __init__(self, endpoint, on_tick=None, **kw):
             captured["on_tick"] = on_tick
-            self.limiter = type("L", (), {"ticks": [], "input_bound_ever": False, "bound_by": {},
-                                          "window": type("W", (), {"limit": 16})()})()
+            self.limiter = StubLimiter(16)
             self.dialect = None
             self.breaker = type("B", (), {"opens": 0})()
 

@@ -203,18 +203,22 @@ def test_generic_sink_not_subject_to_arrow_rules(tmp_path):
     assert (tmp_path / "out" / "a.md").read_text() == "# rendered"
 
 
-def test_dynamic_type_change_raises_at_flush(tmp_path):
+def test_dynamic_type_change_becomes_error_row_at_flush(tmp_path):
     """A direct sink append bypasses probe(): a same-run type change (int64 pinned,
-    double arriving) raises at flush rather than widening only the new part, which
-    would break multi-part reads (CONTRACT §8)."""
-    import pytest
-
+    double arriving) is caught at flush and written as an error row — the pinned type
+    never moves (widening only the new part would break multi-part reads, CONTRACT §8)
+    and flush never raises for a type conflict."""
     from saturate import ParquetSink
 
     sink = ParquetSink(str(tmp_path), flush_every=1)
     sink.append({"id": "a", "score": 1, "error": None})
-    with pytest.raises((TypeError, ValueError)):
-        sink.append({"id": "b", "score": 1.5, "error": None})
+    sink.append({"id": "b", "score": 1.5, "error": None})
+    assert sink.existing_ids() == {"a", "b"} and sink.existing_ids(retry_errors=True) == {"a"}
+    recs = {r["id"]: r for _, r in ((r["id"], r) for p in tmp_path.glob("part-*.parquet")
+                                      for r in pq.read_table(p).to_pylist())}
+    assert recs["b"]["error"].startswith("parse output not storable") and recs["b"]["score"] is None
+    for part in tmp_path.glob("part-*.parquet"):
+        assert pq.read_schema(part).field("score").type == pa.int64()
 
 
 def test_dynamic_type_conflict_becomes_error_row_under_drain(tmp_path):
@@ -286,6 +290,30 @@ def test_dynamic_lossy_cast_is_error_row(tmp_path):
     assert sink.existing_ids() == {"i", "f"} and sink.existing_ids(retry_errors=True) == {"i"}
 
 
+def test_dynamic_integral_float_into_int_is_conflict(tmp_path):
+    """Widening is directional: 2.0 into a pinned int64 column is a float into an int
+    column (CONTRACT §8), not a widening, even though the value happens to be integral —
+    an error row under drain and at flush for a direct append."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    async def results():
+        yield Done("i", {}, {"score": 1}, None, {})
+        yield Done("f", {}, {"score": 2.0}, None, {})
+
+    sink = ParquetSink(str(tmp_path / "drain"), flush_every=1)
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (1, 1)
+    assert sink.existing_ids() == {"i", "f"} and sink.existing_ids(retry_errors=True) == {"i"}
+    direct = ParquetSink(str(tmp_path / "direct"), flush_every=1)
+    direct.append({"id": "a", "score": 1, "error": None})
+    direct.append({"id": "b", "score": 2.0, "error": None})  # direct append: error row at flush
+    assert direct.existing_ids(retry_errors=True) == {"a"}
+
+
 def test_dynamic_value_rewrites_are_conflicts(tmp_path):
     """Only numeric widening is accepted into a pinned column. Arrow would happily cast
     1 -> "1" or True -> 1, but those rewrite the value — record, never guess — so an int
@@ -308,16 +336,133 @@ def test_dynamic_value_rewrites_are_conflicts(tmp_path):
     assert sink.existing_ids(retry_errors=True) == {"s"}
 
 
-def test_dynamic_value_rewrite_raises_at_flush(tmp_path):
-    """The same rule on the direct-append path: int -> string raises at flush."""
-    import pytest
-
+def test_dynamic_value_rewrite_is_error_row_at_flush(tmp_path):
+    """The same rule on the direct-append path: int -> string is an error row at flush."""
     from saturate import ParquetSink
 
     sink = ParquetSink(str(tmp_path), flush_every=1)
     sink.append({"id": "a", "label": "a", "error": None})
-    with pytest.raises((TypeError, ValueError)):
-        sink.append({"id": "b", "label": 1, "error": None})
+    sink.append({"id": "b", "label": 1, "error": None})
+    assert sink.existing_ids() == {"a", "b"} and sink.existing_ids(retry_errors=True) == {"a"}
+
+
+def test_mixed_types_in_first_buffer_cost_one_row(tmp_path, capsys):
+    """Before any type is pinned, probe cannot see the buffer: {score: 1} then {score: "a"}
+    in ONE buffer used to fail batch inference at flush and lose every buffered row. flush
+    now falls back to a per-row pass: the first typed value pins, the conflicting row is
+    written as an error row, and the flush is logged once with the count."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    async def results():
+        yield Done("i", {}, {"score": 1}, None, {})
+        yield Done("s", {}, {"score": "a"}, None, {})
+        yield Done("j", {}, {"score": 2}, None, {})
+
+    sink = ParquetSink(str(tmp_path), flush_every=10)
+    asyncio.run(drain(results(), sink))
+    assert sink.existing_ids() == {"i", "s", "j"} and sink.existing_ids(retry_errors=True) == {"i", "j"}
+    assert dict(read_output(str(tmp_path))) == {"i": {"score": 1}, "j": {"score": 2}}
+    assert "1 of 3 rows do not fit the pinned schema" in capsys.readouterr().err
+
+
+def test_mixed_types_in_new_column_after_pin_cost_one_row(tmp_path):
+    """After a pin, a NEW column with mixed types inside one buffer is the same case: the
+    batch cannot be built, the per-row pass keeps the first typed value and demotes the
+    conflicting row. The pinned column is untouched and every part stays readable."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    async def results():
+        yield Done("a", {}, {"score": 1}, None, {})                # buffer 1 pins score: int64
+        yield Done("a2", {}, {"score": 1}, None, {})
+        yield Done("b", {}, {"score": 2, "tag": 7}, None, {})      # buffer 2: tag int64 ...
+        yield Done("c", {}, {"score": 3, "tag": "x"}, None, {})    # ... then tag string: demoted
+
+    sink = ParquetSink(str(tmp_path), flush_every=2)
+    asyncio.run(drain(results(), sink))
+    assert sink.existing_ids() == {"a", "a2", "b", "c"}
+    assert sink.existing_ids(retry_errors=True) == {"a", "a2", "b"}
+    parts = sorted(str(p) for p in tmp_path.glob("part-*.parquet"))
+    assert len(parts) == 2
+    second = pq.read_schema(parts[1])  # tag first appears in part 2: pinned there as int64
+    assert second.field("tag").type == pa.int64() and second.field("score").type == pa.int64()
+    assert dict(read_output(str(tmp_path)))["b"] == {"score": 2, "tag": 7}
+
+
+def test_nested_widening_follows_the_scalar_rule(tmp_path):
+    """The conform rule is recursive: [1] widens into a pinned list<double> exactly as 1
+    widens into double; a struct missing a pinned field is filled with null; a struct with
+    a field the pin lacks, or a retyped field, is a conflict."""
+    import asyncio
+
+    import pyarrow.dataset as ds
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    async def results():
+        yield Done("p", {}, {"v": [1.5], "m": {"a": 1, "b": "x"}}, None, {})  # pins list<double>, struct<a,b>
+        yield Done("w", {}, {"v": [1], "m": {"a": 2}}, None, {})              # widens: list<int64>, struct<a>
+        yield Done("x", {}, {"v": [1.5], "m": {"a": 3, "c": 1}}, None, {})    # struct field the pin lacks
+        yield Done("y", {}, {"v": [1.5], "m": {"a": "z"}}, None, {})          # struct field retyped
+        yield Done("z", {}, {"v": [0.5, "s"]}, None, {})                      # unserializable list
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (2, 3)
+    assert sink.existing_ids(retry_errors=True) == {"p", "w"}
+    parts = sorted(str(p) for p in tmp_path.glob("part-*.parquet"))
+    t = ds.dataset(parts, format="parquet").to_table()
+    assert t.schema.field("v").type == pa.list_(pa.float64())
+    got = dict(read_output(str(tmp_path)))
+    assert got["w"] == {"v": [1.0], "m": {"a": 2, "b": None}}
+
+
+def test_pinned_schema_is_read_back_on_resume(tmp_path):
+    """The pin is a property of the output dir, not of one sink object: a fresh sink on a
+    dir with parts reads the newest part's schema before its first flush. Otherwise a
+    retry run whose first row is the float the previous run error-rowed would pin double
+    and write a part unreadable beside the int64 ones."""
+    import asyncio
+
+    import pyarrow.dataset as ds
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    first = ParquetSink(str(tmp_path), flush_every=1)  # run 1 pins score: int64
+    asyncio.run(drain(iter_async([Done("a", {}, {"score": 1}, None, {})]), first))
+    again = ParquetSink(str(tmp_path), flush_every=1)  # run 2: the float first
+    stats = asyncio.run(drain(iter_async([Done("f", {}, {"score": 0.5}, None, {})]), again))
+    assert stats.rows_failed == 1 and again.existing_ids(retry_errors=True) == {"a"}
+    third = ParquetSink(str(tmp_path), flush_every=1)  # run 3: an int, written as int64
+    asyncio.run(drain(iter_async([Done("b", {}, {"score": 2}, None, {})]), third))
+    parts = sorted(str(p) for p in tmp_path.glob("part-*.parquet"))
+    assert len(parts) == 3
+    for p in parts:
+        assert pq.read_schema(p).field("score").type == pa.int64()
+    assert ds.dataset(parts, format="parquet").to_table().num_rows == 3  # readable as one dataset
+
+
+def test_unreadable_newest_part_starts_unpinned(tmp_path, capsys):
+    """A footer that cannot be read (a truncated part from a crash) is logged and the sink
+    starts unpinned, exactly as before — never a hard error at the first row."""
+    from saturate import ParquetSink
+
+    (tmp_path / "part-9999999999999-000000-deadbeef.parquet").write_bytes(b"not parquet")
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "a", "score": 1, "error": None})
+    assert "starting unpinned" in capsys.readouterr().err
+    assert sink.existing_ids() == {"a"}
 
 
 def test_dynamic_probe_accepts_nulls_new_fields_and_empty_lists(tmp_path):

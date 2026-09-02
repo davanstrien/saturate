@@ -27,15 +27,6 @@ def _log(msg: str) -> None:
     print(f"[pump] {msg}", file=sys.stderr, flush=True)
 
 
-def _widens(src: pa.DataType, dst: pa.DataType) -> bool:
-    """A pinned column takes a batch column by lossless numeric widening only (int -> double),
-    or when the batch column is all-null / the same type. int -> string or bool -> int would
-    rewrite values, not widen them — record, never guess — so they stay conflicts."""
-    def num(t):
-        return pa.types.is_integer(t) or pa.types.is_floating(t)
-    return src == dst or pa.types.is_null(src) or (num(src) and num(dst))
-
-
 class ParquetSink:
     def __init__(self, out_uri: str, flush_every: int = 10, schema: pa.Schema | None = None,
                  read_workers: int = 16):
@@ -57,9 +48,18 @@ class ParquetSink:
             if bad:  # r7: error rows write user fields as null — non-nullable would crash the flush
                 raise ValueError(f"declared schema: fields must be nullable (error rows are sparse): {bad}")
         self._declared = schema
-        self._schema: pa.Schema | None = schema  # dynamic mode: pinned/unified across flushes
+        self._schema: pa.Schema | None = None  # dynamic mode: pinned at first sight, widened by new columns
+        self._pinned: dict[str, pa.DataType] = {}  # name -> pinned type (empty until pinned)
+        if schema is not None:
+            self._pin(schema)
+        self._seeded = schema is not None  # dynamic mode reads its pin back from existing parts
         self._seq = 0  # per-sink flush counter: sorted(part names) == write order on ms collisions
-        self._telemetry_name: str | None = None  # fixed at the first write_telemetry call
+        self._telemetry_names: dict[int, str] = {}  # shard rank -> this run's telemetry file
+        proto = getattr(self.fs, "protocol", "")
+        local = "file" in (proto if isinstance(proto, (tuple, list)) else (proto,))
+        # periodic telemetry cadence in controller ticks (~2 s each): about a minute locally;
+        # on a remote store every rewrite is a commit, so about five minutes there
+        self.telemetry_every_ticks = 30 if local else 150
         self.rows_written = 0
         # hf:// outputs: ensure the dataset repo / bucket exists (private) at
         # construction — a fresh output path must not crash existing_ids()
@@ -101,61 +101,97 @@ class ParquetSink:
             _log(f"skipping unreadable {path}: {e}")
             return None
 
-    def _read_many(self, paths: list[str]) -> list[tuple[set[str], set[str]] | None]:
-        """Results in path order. Remote resume is bound by per-file round-trips, not
-        parsing, so the files are read on a thread pool; fsspec is synchronous."""
+    def _read_many(self, paths: list[str]) -> dict[str, tuple[set[str], set[str]]]:
+        """{path: (done, failed)} for every readable file, in path order. Remote resume is
+        bound by per-file round-trips, not parsing, so the files are read on a thread pool;
+        fsspec is synchronous."""
         if self.read_workers <= 1 or len(paths) <= 1:
-            return [self._read_id_error(p) for p in paths]
-        from concurrent.futures import ThreadPoolExecutor
+            got = [self._read_id_error(p) for p in paths]
+        else:
+            from concurrent.futures import ThreadPoolExecutor
 
-        with ThreadPoolExecutor(min(self.read_workers, len(paths))) as ex:
-            return list(ex.map(self._read_id_error, paths))
+            with ThreadPoolExecutor(min(self.read_workers, len(paths))) as ex:
+                got = list(ex.map(self._read_id_error, paths))
+        return {p: g for p, g in zip(paths, got, strict=True) if g is not None}
 
     def existing_ids(self, retry_errors: bool = False) -> set[str]:
         """Manifest-first, exact: any part lacking its manifest sidecar is
         scanned individually (kill-safe). retry_errors=True excludes ids whose
         only record is an error."""
-        done: set[str] = set()
-        failed: set[str] = set()
-        covered: set[str] = set()
         manifests = sorted(self.fs.glob(f"{self.root}/_manifest/ids-*.parquet"))
         if len(manifests) > 1000:
             _log(f"resume: reading {len(manifests)} manifest files "
                  "(consider larger flush_every for remote outputs)")
-        for path, got in zip(manifests, self._read_many(manifests), strict=True):
-            if got is not None:
-                done |= got[0]
-                failed |= got[1]
-                covered.add(path.rsplit("/", 1)[-1][4:])
-        parts = [p for p in sorted(self.fs.glob(f"{self.root}/part-*.parquet"))
-                 if p.rsplit("/", 1)[-1] not in covered]
-        for got in self._read_many(parts):
-            if got is not None:
-                done |= got[0]
-                failed |= got[1]
+        read = self._read_many(manifests)
+        covered = {path.rsplit("/", 1)[-1][4:] for path in read}
+        read.update(self._read_many([p for p in sorted(self.fs.glob(f"{self.root}/part-*.parquet"))
+                                     if p.rsplit("/", 1)[-1] not in covered]))
+        done: set[str] = set()
+        failed: set[str] = set()
+        for d, f in read.values():
+            done |= d
+            failed |= f
         return done if retry_errors else done | failed
+
+    def _pin(self, schema: pa.Schema) -> None:
+        self._schema = schema
+        self._pinned = {f.name: f.type for f in schema}
+
+    def _seed_schema(self) -> None:
+        """Dynamic mode, once per sink, before the first probe/flush: read the pin back from
+        the newest existing part (footer only), so a resumed run keeps the on-disk types.
+        Otherwise a run whose first row is one the previous run error-rowed (a float into an
+        int column) would pin the other type and write a part unreadable beside the old ones."""
+        self._seeded = True
+        try:
+            parts = sorted(self.fs.glob(f"{self.root}/part-*.parquet"))
+            if parts:
+                with self.fs.open(parts[-1], "rb") as f:
+                    self._pin(pq.read_schema(f).remove_metadata())
+        except Exception as e:
+            _log(f"could not read the pinned schema from existing parts, starting unpinned: {e}")
+
+    def _conform_type(self, name: str, got: pa.DataType) -> pa.DataType | None:
+        """The pinned type values of type `got` in column `name` must be cast to, or None when
+        `got` already is it. `got` is acceptable when it widens INTO the pin — the permissive
+        unify of the two lands on the pinned type: int64 -> double, list<int64> -> list<double>,
+        struct<a> -> struct<a, b>, all-null -> anything. Everything else raises: a float into
+        an int column (would unify to double), an int into a string column (does not unify at
+        all), a struct field the pin lacks. Recursive by construction — nesting is Arrow's job."""
+        pinned = self._pinned[name]
+        if got == pinned:
+            return None
+        unified = pa.unify_schemas([pa.schema([pa.field(name, pinned)]), pa.schema([pa.field(name, got)])],
+                                   promote_options="permissive")  # ArrowTypeError (a TypeError) on a clash
+        if unified.field(0).type != pinned:
+            raise TypeError(f"{name}: {got} does not widen into the pinned type {pinned}")
+        return pinned
+
+    def _conform(self, table: pa.Table) -> pa.Table:
+        """Cast the columns the table shares with the pin to their pinned types; raise
+        TypeError/ValueError when a column does not widen into its pin (or the cast refuses,
+        e.g. an int64 beyond 2**53 into a double column)."""
+        for i, f in enumerate(table.schema):
+            if f.name in self._pinned:
+                to = self._conform_type(f.name, f.type)
+                if to is not None:
+                    table = table.set_column(i, pa.field(f.name, to), table.column(i).cast(to))
+        return table
 
     def probe(self, record: dict) -> None:
         """Raise (TypeError/ValueError/OverflowError) if this record cannot serialize into
-        THIS sink's schema — drain turns that into an error row before buffering (r6: the
-        inferred-schema check alone missed declared-type mismatches like score='oops')."""
+        THIS sink's schema — drain turns that into an error row before buffering, with the
+        row's tokens still counted. flush() is the guarantee (a row it cannot store becomes
+        an error row there too); probe is the early check that keeps stats exact."""
         if self._declared is None:
-            pa.array([record])  # every field must be Arrow-serializable
-            if self._schema is not None:  # dynamic mode, types pinned: the row must cast to them
-                # the same rule flush applies to the batch, applied to this one row over the
-                # fields it shares with the pinned schema (new fields may still grow the schema):
-                # numeric widening is a safe cast — 1 -> double passes, 0.5 -> int64 raises —
-                # and any other type change must unify, which raises on a conflict. Left to
-                # flush, that raise would discard the whole buffer.
-                shared = [n for n in self._schema.names if n in record]
-                if shared:
-                    row = pa.Table.from_pylist([{n: record[n] for n in shared}])
-                    for n in shared:
-                        pinned, got = self._schema.field(n), row.schema.field(n)
-                        if _widens(got.type, pinned.type):
-                            row[n].cast(pinned.type)
-                        else:
-                            pa.unify_schemas([pa.schema([pinned]), pa.schema([got])])
+            if not self._seeded:
+                self._seed_schema()
+            arr = pa.array([record])  # one serialisation: a struct typed per field
+            for i, f in enumerate(arr.type):  # equal types (the common case) cost a dict lookup
+                if f.name in self._pinned:
+                    to = self._conform_type(f.name, f.type)
+                    if to is not None:
+                        arr.field(i).cast(to)
             return
         extra = record.keys() - set(self._declared.names)
         if extra:
@@ -179,33 +215,29 @@ class ParquetSink:
             table = pa.Table.from_pylist([{n: r.get(n) for n in self._declared.names}
                                           for r in self._buf], schema=self._declared)
         else:
-            keys = {k for r in self._buf for k in r}  # union: row 0 alone must not set the schema
-            table = pa.Table.from_pylist([{k: r.get(k) for k in keys} for r in self._buf])
+            if not self._seeded:
+                self._seed_schema()
+            try:  # the batch as a whole: infer over the union of keys, conform pinned columns
+                table = self._conform(self._batch(self._buf))
+            except (TypeError, ValueError, OverflowError):  # some row does not fit: find it
+                table = self._salvage()
             # an all-null user column with no pinned type yet is unknowable — drop it rather
             # than guess a type a later real value (float, list) would conflict with on disk.
             # Once a type IS pinned, the column is kept and materialized below. Residual gap
             # (§8): a column whose first-ever appearance is all-null stays absent from that
             # part until its first typed value arrives.
-            known = set(self._schema.names) if self._schema is not None else set()
             table = table.drop_columns([f.name for f in table.schema
                                         if pa.types.is_null(f.type) and f.name != "error"
-                                        and f.name not in known])
+                                        and f.name not in self._pinned])
             if pa.types.is_null(table.schema.field("error").type):  # error is required: pin to string
                 i = table.schema.get_field_index("error")
                 table = table.set_column(i, pa.field("error", pa.string()),
                                          table["error"].cast(pa.string()))
-            # pinned columns: lossless numeric widening is a safe cast to the pinned type
-            # (int -> double passes, 0.5 -> int64 raises); any other type change is left to
-            # the strict unify below, which raises on a conflict (§8). The pinned type never
-            # moves: widening only the NEW part would break multi-part reads.
-            for f in self._schema or ():
-                if f.name in table.schema.names:
-                    src = table.schema.field(f.name).type
-                    if src != f.type and _widens(src, f.type):
-                        i = table.schema.get_field_index(f.name)
-                        table = table.set_column(i, f, table[f.name].cast(f.type))
-            self._schema = (table.schema if self._schema is None else
-                            pa.unify_schemas([self._schema, table.schema]))
+            # pin seen columns at first sight; pinned columns already conform, so the unify
+            # only ever appends new columns — a pinned type never moves, since widening only
+            # the NEW part would break multi-part reads
+            self._pin(table.schema if self._schema is None else
+                      pa.unify_schemas([self._schema, table.schema]))
             # every part carries the FULL pinned schema — absent or all-null columns become
             # typed all-null arrays (#12): pyarrow.dataset takes the FIRST fragment's schema
             # by default, so any part missing a pinned column loses that column for the
@@ -225,10 +257,38 @@ class ParquetSink:
         self.rows_written += len(self._buf)
         self._buf.clear()
 
+    @staticmethod
+    def _batch(rows: list[dict]) -> pa.Table:
+        keys = {k for r in rows for k in r}  # union: row 0 alone must not set the schema
+        return pa.Table.from_pylist([{k: r.get(k) for k in keys} for r in rows])
+
+    def _salvage(self) -> pa.Table:
+        """Per-row fallback when the batch does not build or conform as a whole: each row is
+        built alone and checked against the running schema (the pin, widened by the rows
+        accepted before it in this batch — first typed value wins, as batch inference would);
+        a row that fails is demoted in place to an error row. A type conflict costs one row,
+        never the buffer, and flush never raises for it."""
+        running = self._schema
+        tables: list[pa.Table] = []
+        bad = 0
+        for i, rec in enumerate(self._buf):
+            try:
+                t = self._conform(pa.Table.from_pylist([rec]))
+                running = (t.schema if running is None else
+                           pa.unify_schemas([running, t.schema], promote_options="permissive"))
+            except (TypeError, ValueError, OverflowError) as e:
+                self._buf[i] = {"id": rec.get("id"), "error": f"parse output not storable: {e}"}
+                t = pa.Table.from_pylist([self._buf[i]])
+                bad += 1
+            tables.append(t)
+        _log(f"{bad} of {len(self._buf)} rows do not fit the pinned schema: written as error rows")
+        return pa.concat_tables(tables, promote_options="permissive")
+
     def write_marker(self, shard: tuple[int, int]) -> None:
         self.fs.makedirs(f"{self.root}/completions", exist_ok=True)
         with self.fs.open(f"{self.root}/completions/shard-{shard[0]}.done", "wb") as f:
             f.write(b"done")
+        self._telemetry_names.pop(shard[0], None)  # the marker ends a run: the next one gets a new file
 
     def write_stats(self, shard: tuple[int, int], stats_json: str) -> None:
         """Console-facing run summary beside the marker (CONTRACT §5): exact
@@ -243,14 +303,15 @@ class ParquetSink:
             f.write(_json.dumps(payload).encode())
 
     def write_telemetry(self, shard: tuple[int, int], lines: list[str]) -> None:
-        """One telemetry file per sink instance (= per run): the name is chosen on the
-        first call and every later call rewrites the whole file from the full tick list.
-        Whole-file rewrite rather than append: object stores have no append, and a
+        """One telemetry file per run and shard: the name is chosen on the first call and every
+        later call rewrites the whole file from the full tick list, until write_marker() ends
+        the run. Whole-file rewrite rather than append: object stores have no append, and a
         rewrite is one operation on every fsspec backend."""
-        if self._telemetry_name is None:
-            self._telemetry_name = (f"telemetry-shard{shard[0]}-{int(time.time())}-"
-                                    f"{uuid.uuid4().hex[:6]}.jsonl")
-        with self.fs.open(f"{self.root}/{self._telemetry_name}", "wb") as f:
+        name = self._telemetry_names.get(shard[0])
+        if name is None:
+            name = f"telemetry-shard{shard[0]}-{int(time.time())}-{uuid.uuid4().hex[:6]}.jsonl"
+            self._telemetry_names[shard[0]] = name
+        with self.fs.open(f"{self.root}/{name}", "wb") as f:
             f.write("\n".join(lines).encode())
 
 

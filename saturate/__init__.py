@@ -152,20 +152,29 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
     pending = stream(rows, id_key=id_key, id_fn=id_fn)
     pending = skip_done(pending, sink, retry_errors=retry_errors, stats=stats)
 
-    def write_telemetry(ticks: list[dict]) -> None:  # best-effort sidecar: never fails the run
-        if ticks and hasattr(sink, "write_telemetry"):
+    lines: list[str] = []  # one JSON line per tick, serialised once (a run is many ticks)
+    every = max(1, getattr(sink, "telemetry_every_ticks", 30))
+    writer: asyncio.Task | None = None
+
+    def write_telemetry() -> None:  # final, on the loop: the complete trajectory
+        if lines and hasattr(sink, "write_telemetry"):
             try:
-                sink.write_telemetry(shard, [json.dumps(x) for x in ticks])
+                sink.write_telemetry(shard, lines)
             except Exception as e:
                 _log(f"telemetry write failed (non-fatal): {e}")
 
-    tick_n = 0
+    async def write_telemetry_off_loop(snapshot: list[str]) -> None:
+        try:  # a remote rewrite is a commit (seconds): never on the loop, never overlapping
+            await asyncio.to_thread(sink.write_telemetry, shard, snapshot)
+        except Exception as e:
+            _log(f"telemetry write failed (non-fatal): {e}")
 
-    def on_tick(_rec: dict) -> None:  # every 30 ticks (~60 s) the trajectory so far lands on
-        nonlocal tick_n  # storage, so a reader sees a partial run, not only a finished one
-        tick_n += 1
-        if tick_n % 30 == 0:
-            write_telemetry(client.limiter.ticks)
+    def on_tick(rec: dict) -> None:  # periodically the trajectory so far lands on storage, so a
+        nonlocal writer  # reader sees a partial run, not only a finished one (CONTRACT §6)
+        lines.append(json.dumps(rec))
+        if (len(lines) % every == 0 and hasattr(sink, "write_telemetry")
+                and (writer is None or writer.done())):
+            writer = asyncio.get_running_loop().create_task(write_telemetry_off_loop(lines[:]))
 
     async with AdaptiveClient(endpoint, window=window, headers=hdrs,
                               read_timeout=read_timeout,
@@ -176,11 +185,13 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
         dialect = client.dialect
         stats.breaker_opens = client.breaker.opens
 
+    if writer is not None:
+        await writer  # never two writers on one file
     stats.elapsed_s = round(time.monotonic() - t0, 2)
     stats.final_limit = limiter.window.limit
     stats.input_bound = limiter.input_bound_ever
     stats.cut_reasons = cut_reasons(limiter.ticks)
-    write_telemetry(limiter.ticks)  # final: the complete trajectory, same file
+    write_telemetry()
     stats.hints = advise(limiter.ticks, dialect, stats.final_limit, CEILING_FLAG)
     if stats.input_bound:
         stats.hints.append("run was INPUT-BOUND — the source, not the engine, was the bottleneck")

@@ -21,9 +21,41 @@ def test_write_telemetry_rewrites_one_file_per_run(tmp_path):
     assert len(list(tmp_path.glob("telemetry-shard0-*.jsonl"))) == 2
 
 
+def test_telemetry_file_is_per_shard_and_per_run(tmp_path):
+    """A sink object may serve several pump() calls: the file is keyed by shard, and the
+    completion marker (the end of a run) releases it so the next run gets a fresh one."""
+    sink = ParquetSink(str(tmp_path))
+    sink.write_telemetry((0, 2), ['{"t": 2}'])
+    sink.write_telemetry((1, 2), ['{"t": 2}'])
+    assert len(list(tmp_path.glob("telemetry-shard0-*.jsonl"))) == 1
+    assert len(list(tmp_path.glob("telemetry-shard1-*.jsonl"))) == 1
+    sink.write_marker((0, 2))
+    sink.write_telemetry((0, 2), ['{"t": 2}'])
+    assert len(list(tmp_path.glob("telemetry-shard0-*.jsonl"))) == 2
+    assert len(list(tmp_path.glob("telemetry-shard*.jsonl"))) == 3
+
+
+def test_telemetry_cadence_depends_on_the_store(tmp_path, monkeypatch):
+    """Every rewrite on a remote store is a commit: about a minute locally, about five
+    minutes elsewhere. The attribute is what _pump reads."""
+    import fsspec
+
+    assert ParquetSink(str(tmp_path)).telemetry_every_ticks == 30
+
+    class RemoteFs:
+        protocol = ("hf",)
+
+        def makedirs(self, *a, **kw):
+            pass
+
+    monkeypatch.setattr(fsspec, "url_to_fs", lambda uri: (RemoteFs(), "owner/name/out"))
+    assert ParquetSink("hf://owner/name/out").telemetry_every_ticks == 150
+
+
 def test_pump_writes_telemetry_periodically_and_at_exit(tmp_path, monkeypatch):
     """pump() hands the controller an on_tick hook that rewrites the telemetry file
-    every 30 ticks; the final write at exit completes the same file."""
+    every telemetry_every_ticks (30 on a local store), off the event loop; the final
+    write at exit completes the same file."""
     captured = {}
 
     class FakeLimiter:
@@ -49,6 +81,8 @@ def test_pump_writes_telemetry_periodically_and_at_exit(tmp_path, monkeypatch):
         for i in range(60):  # 60 controller ticks, no rows
             client.limiter.ticks.append({"t": 2 * i, "limit": 16})
             captured["on_tick"]({"t": 2 * i, "limit": 16})
+            if (i + 1) % 30 == 0:
+                await asyncio.sleep(0.2)  # the periodic write runs off the loop: let it land
         return
         yield
 

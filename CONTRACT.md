@@ -57,8 +57,8 @@ before its type is ever seen is absent from those early parts, so readers doing 
 unions should expect nullable user columns. For a fixed schema from part one, declare it —
 `pump(schema=...)` — every part is cast to it, and a row carrying fields outside the
 declared schema becomes an error row (§4; a direct sink append raises instead). Without a
-declared schema, a row whose value is not a lossless numeric widening of an already-pinned
-column type likewise becomes an error row under `pump()` (§8). The library itself writes no token/latency columns — they
+declared schema, a row whose value does not widen losslessly into an already-pinned column
+type (§8) likewise becomes an error row — at flush, whichever way it was appended. The library itself writes no token/latency columns — they
 appear when your `parse` emits them. Standard names when written: `prompt_tokens`,
 `completion_tokens`, `latency_s` — copied from the response `usage` or your own
 measurement, blank never guessed.
@@ -122,8 +122,8 @@ and telemetry writes are best-effort sidecars: failures are non-fatal, and sinks
 ## 6. Telemetry (frozen keys)
 
 One `telemetry-…jsonl` per run; one object per controller tick (~2s). The file is rewritten
-periodically during the run (every ~60 s) and finalised at exit; readers may see a partial
-trajectory mid-run.
+periodically during the run (about every minute locally, every five minutes on remote
+stores) and finalised at exit; readers may see a partial trajectory mid-run.
 
 | key | meaning |
 |---|---|
@@ -153,8 +153,10 @@ rule): `rows_total`, `rows_done_prior`, `rows_processed`, `rows_failed`, `rows_d
 ## 8. Non-guarantees
 
 No output ordering · no dedup beyond `id` · no schema migration (keep `parse` types stable
-per output dir; a pinned column type never moves — lossless numeric widening is accepted
-(an int into a double column), any other type change (a float into an int column, an int
-into a string column) is an error row under `pump()` and a raise at flush for a direct
-sink append; a declared schema is the fully stable option) · one request per row (rollouts/trajectories are a different primitive) ·
+per output dir; a pinned column type never moves and is read back from the existing parts
+on resume — a value that widens losslessly into it is accepted (an int into a double
+column, `[1]` into a `list<double>` column, a struct missing a pinned field), any other
+type change (a float into an int column, an int into a string column, a struct field the
+pin lacks) becomes an error row at flush, never a raise; a declared schema is the fully
+stable option) · one request per row (rollouts/trajectories are a different primitive) ·
 no dollar figures in the data.

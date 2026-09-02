@@ -55,7 +55,9 @@ class ParquetSink:
         # typo'd path becomes an empty private repo instead of a hard crash;
         # exist_ok makes re-runs no-ops. Failure here is logged, not fatal —
         # the later glob raises with the real story if the repo truly can't exist.
-        if "hf" in getattr(self.fs, "protocol", "") and self.root.startswith(("datasets/", "buckets/")):
+        proto = getattr(self.fs, "protocol", ())  # fsspec: a str or a tuple of aliases — match exactly
+        if "hf" in (proto if isinstance(proto, tuple) else (proto,)) and \
+                self.root.startswith(("datasets/", "buckets/")):
             parts = self.root.split("/")
             if len(parts) >= 3:
                 repo = f"{parts[1]}/{parts[2]}"

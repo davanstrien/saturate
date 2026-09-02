@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import importlib.metadata
 import inspect
 import json
 import os
@@ -34,7 +35,10 @@ __all__ = [
     "AdaptiveClient", "AdaptiveLimiter", "Done", "through", "stream", "skip_done",
     "drain", "read_output", "ParquetSink", "FileSink", "shard_select", "content_id",
     "FatalTransportError", "dataset_rows", "bucket_rows"]
-__version__ = "0.1.1"
+try:
+    __version__ = importlib.metadata.version("saturate")
+except importlib.metadata.PackageNotFoundError:  # source tree without an installed dist
+    __version__ = "0.0.0+unknown"
 
 USER_AGENT = f"saturate/{__version__}"
 AGENT_ENV_VARS = ("CLAUDECODE", "CODEX_SANDBOX", "AI_AGENT")

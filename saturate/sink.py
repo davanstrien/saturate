@@ -53,6 +53,7 @@ class ParquetSink:
         if schema is not None:
             self._pin(schema)
         self._seeded = schema is not None  # dynamic mode reads its pin back from existing parts
+        self.rows_demoted = 0  # rows flush turned into error rows (type conflicts, cumulative)
         self._seq = 0  # per-sink flush counter: sorted(part names) == write order on ms collisions
         self._telemetry_names: dict[int, str] = {}  # shard rank -> this run's telemetry file
         proto = getattr(self.fs, "protocol", "")
@@ -281,6 +282,7 @@ class ParquetSink:
                 t = pa.Table.from_pylist([self._buf[i]])
                 bad += 1
             tables.append(t)
+        self.rows_demoted += bad
         _log(f"{bad} of {len(self._buf)} rows do not fit the pinned schema: written as error rows")
         return pa.concat_tables(tables, promote_options="permissive")
 
@@ -369,6 +371,7 @@ async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
     # r7: validation is the SINK'S contract — only a sink that supplies probe() gets it.
     # A generic duck-typed sink (FileSink str()s its values) must not inherit Arrow's rules.
     probe = getattr(sink, "probe", None)
+    demoted0 = getattr(sink, "rows_demoted", 0)  # rows flush demotes were counted as processed here
     try:
         async for done in results:
             if done.error is None:
@@ -393,6 +396,9 @@ async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
                 sink.append({"id": done.id, "error": done.error})
     finally:
         sink.flush()  # a fatal abort must still land the rows already paid for
+        demoted = getattr(sink, "rows_demoted", 0) - demoted0
+        stats.rows_processed -= demoted  # reconcile: those rows landed as error rows, not successes
+        stats.rows_failed += demoted
     return stats
 
 

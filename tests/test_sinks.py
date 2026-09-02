@@ -363,7 +363,9 @@ def test_mixed_types_in_first_buffer_cost_one_row(tmp_path, capsys):
         yield Done("j", {}, {"score": 2}, None, {})
 
     sink = ParquetSink(str(tmp_path), flush_every=10)
-    asyncio.run(drain(results(), sink))
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (2, 1)  # the demoted row is reconciled
+    assert sink.rows_demoted == 1
     assert sink.existing_ids() == {"i", "s", "j"} and sink.existing_ids(retry_errors=True) == {"i", "j"}
     assert dict(read_output(str(tmp_path))) == {"i": {"score": 1}, "j": {"score": 2}}
     assert "1 of 3 rows do not fit the pinned schema" in capsys.readouterr().err

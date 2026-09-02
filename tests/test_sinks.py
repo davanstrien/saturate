@@ -396,3 +396,36 @@ def test_hf_output_repo_autocreated(tmp_path, monkeypatch):
     assert ("bucket", "owner/name", True) in calls
     ParquetSink(str(tmp_path / "datasets/owner/name"))  # local lookalike: untouched
     assert len(calls) == 2
+
+
+def test_hf_autocreate_needs_exact_protocol_match(monkeypatch):
+    """Only the HF filesystem gets a repo auto-created: a protocol name that merely
+    contains "hf" is not it, while HfFileSystem's alias tuple is."""
+    calls = []
+
+    class FakeApi:
+        def create_repo(self, repo, **kw):
+            calls.append(repo)
+
+        def create_bucket(self, repo, **kw):
+            calls.append(repo)
+
+    class FakeFs:
+        def __init__(self, protocol):
+            self.protocol = protocol
+
+        def makedirs(self, path, exist_ok=False):
+            pass
+
+    import fsspec
+    import huggingface_hub
+
+    from saturate import ParquetSink
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(fsspec, "url_to_fs", lambda uri: (FakeFs("shfs"), "datasets/owner/name/runs"))
+    ParquetSink("shfs://datasets/owner/name/runs")
+    assert calls == []
+    monkeypatch.setattr(fsspec, "url_to_fs", lambda uri: (FakeFs(("hf",)), "datasets/owner/name/runs"))
+    ParquetSink("hf://datasets/owner/name/runs")
+    assert calls == ["owner/name"]

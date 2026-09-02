@@ -21,6 +21,7 @@ returns a partial dict and the controller runs on the one real signal.
 from __future__ import annotations
 
 import re
+import sys
 
 import httpx2 as httpx
 
@@ -91,21 +92,38 @@ class Null:
         return None
 
 
-class HttpScrape:
-    """Poll the engine's /metrics; give up gracefully after `max_fails`
-    consecutive failures (metrics are opt-in on SGLang/llama.cpp)."""
+def _log(msg: str) -> None:
+    print(f"[pump] {msg}", file=sys.stderr, flush=True)
 
-    def __init__(self, client: httpx.AsyncClient, endpoint: str, max_fails: int = 5):
+
+class HttpScrape:
+    """Poll the engine's /metrics. After `max_fails` consecutive failures the
+    controller runs blind (metrics are opt-in on SGLang/llama.cpp, and an
+    exporter can come up after /health does), but one probe every `retry_every`
+    reads keeps the door open; the skipped reads cost no request."""
+
+    def __init__(self, client: httpx.AsyncClient, endpoint: str, max_fails: int = 5,
+                 retry_every: int = 30):
         base = endpoint.rsplit("/v1", 1)[0]
         self.url = f"{base}/metrics"
         self.client = client
         self.max_fails = max_fails
+        self.retry_every = retry_every
         self._fails = 0
+        self._blind = False
+        self._skipped = 0
         self.dialect: str | None = None
 
     async def read(self) -> dict | None:
         if self._fails >= self.max_fails:
-            return None
+            if not self._blind:
+                self._blind = True
+                self._skipped = 0
+                _log(f"metrics scrape unavailable at {self.url} — running blind; will retry periodically")
+            self._skipped += 1
+            if self._skipped < self.retry_every:
+                return None
+            self._skipped = 0
         try:
             r = await self.client.get(self.url, timeout=5)
             gauges = parse_gauges(r.text)
@@ -118,4 +136,7 @@ class HttpScrape:
         self._fails = 0
         if gauges["dialect"]:
             self.dialect = gauges["dialect"]
+        if self._blind:
+            self._blind = False
+            _log(f"metrics scrape recovered ({self.dialect})")
         return gauges

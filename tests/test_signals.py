@@ -60,3 +60,45 @@ def test_vllm_still_parses():
     g = parse_gauges(VLLM_METRICS)
     assert g["dialect"] == "vllm"
     assert (g["waiting"], g["running"], g["kv"], g["hits"]) == (5, 12, 0.42, 0.9)
+
+
+class _FlakyClient:
+    """GET raises `fail_first` times, then serves vLLM gauges."""
+
+    def __init__(self, fail_first: int):
+        self.fail_first = fail_first
+        self.calls = 0
+
+    async def get(self, url, timeout=None):
+        self.calls += 1
+        if self.calls <= self.fail_first:
+            raise ConnectionError("metrics not up yet")
+        return type("R", (), {"text": VLLM_METRICS})()
+
+
+def test_scrape_retries_periodically_after_going_blind(capsys):
+    """Five failures put the scrape in blind mode; it then skips requests for
+    retry_every-1 reads and probes again, recovering when /metrics comes up."""
+    import asyncio
+
+    from saturate.signals import HttpScrape
+
+    client = _FlakyClient(fail_first=5)
+    scrape = HttpScrape(client, "http://x/v1", max_fails=5, retry_every=30)
+
+    async def run():
+        results = []
+        for _ in range(35):
+            results.append((await scrape.read(), client.calls))
+        return results
+
+    results = asyncio.run(run())
+    assert [calls for _, calls in results[:5]] == [1, 2, 3, 4, 5]  # reads 1-5 each attempt
+    assert all(g is None for g, _ in results[:34])
+    assert all(calls == 5 for _, calls in results[5:34])  # reads 6-34: no request
+    gauges, calls = results[34]
+    assert calls == 6 and gauges["dialect"] == "vllm"  # read 35 probes and recovers
+    assert scrape.dialect == "vllm"
+    err = capsys.readouterr().err
+    assert "running blind" in err and "http://x/metrics" in err
+    assert "metrics scrape recovered (vllm)" in err

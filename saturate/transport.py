@@ -147,6 +147,7 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
         g0 = time.monotonic()
         await breaker.gate(client, probe_url)  # an open breaker pauses retries too
         t0 += time.monotonic() - g0  # r6: breaker-open time never consumes the row budget (docstring)
+        a0 = time.monotonic()
         try:
             if req.kind == "multipart":
                 r = await client.post(url, data=req.data, files=req.files)
@@ -164,6 +165,9 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
             continue
         if r.status_code == 200:
             events["successes"] += 1
+            # the successful attempt alone: retries, backoff, breaker waits and poison rows are not
+            # what a request costs the engine, and the controller's waits are scaled to that
+            events.setdefault("latencies", []).append(time.monotonic() - a0)
             breaker.ok()
             return r.json(), None
         retry_after = r.headers.get("retry-after")

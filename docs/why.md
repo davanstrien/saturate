@@ -449,8 +449,9 @@ and hundreds of in-flight 1540px images killed the container.
 
 The fix is the TCP rule — never widen a window nothing has ever been acknowledged through:
 
-> Receipt: `saturate/controller.py:72` (`self._seen_ok = False  # ACK-clock: no growth before the
-> first completion ever`); enforcement at `:96-98`.
+> Receipt: `saturate/controller.py`, `Auto._widen` — growth is clocked by completions (`hold:ack`
+> until `limit` completions have arrived since the last evaluation), so nothing widens before the
+> first completion ever.
 
 This is also the honest admission that an adaptive controller has its own failure mode. It cost
 us a job to find. The mitigation is in the code and in the guidance to cap `max_limit` for vision

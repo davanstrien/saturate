@@ -839,3 +839,56 @@ def test_existing_ids_warns_on_many_manifest_files(tmp_path, capsys):
     assert ParquetSink(str(tmp_path)).existing_ids() == {"x"}
     err = capsys.readouterr().err
     assert "resume: reading 1001 manifest files" in err and "flush_every" in err
+
+
+def test_struct_field_first_seen_null_fills_in_later(tmp_path):
+    """A nested field only ever seen as None must not pin as null: the first typed value
+    fills the pin in, exactly as a top-level all-null column waits for its first value."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    rows = [Done("a", {}, {"meta": {"model": "x", "reason": None}}, None, {}),
+            Done("b", {}, {"meta": {"model": "x", "reason": "stop"}}, None, {})]
+    stats = asyncio.run(drain(iter_async(rows), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (2, 0)
+    assert dict(read_output(str(tmp_path)))["b"] == {"meta": {"model": "x", "reason": "stop"}}
+    fresh = ParquetSink(str(tmp_path), flush_every=1)  # the pin read back is the filled-in one
+    asyncio.run(drain(iter_async([Done("c", {}, {"meta": {"model": "y", "reason": "len"}}, None, {})]),
+                      fresh))
+    assert fresh.existing_ids(retry_errors=True) == {"a", "b", "c"}
+
+
+def test_nested_empty_object_is_an_error_row_not_a_crash(tmp_path):
+    """Parquet cannot write a struct with no fields below the top level. Such a row is an
+    error row (probe under drain, demotion at flush for a direct append); the part write
+    never raises and never leaves a partial file behind."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    bad = {"meta": {"model": "x", "extra": {}}}
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    good = {"meta": {"model": "y", "extra": {"k": 1}}}
+    stats = asyncio.run(drain(iter_async([Done("a", {}, bad, None, {}), Done("b", {}, good, None, {})]),
+                              sink))
+    assert (stats.rows_processed, stats.rows_failed) == (1, 1)
+    direct = ParquetSink(str(tmp_path / "direct"), flush_every=1)
+    direct.append({"id": "a", **bad, "error": None})
+    direct.flush()
+    assert direct.rows_demoted == 1 and direct.existing_ids() == {"a"}
+    assert all(p.stat().st_size > 0 for p in (tmp_path / "direct").glob("part-*.parquet"))
+
+
+def test_pin_is_seeded_by_existing_ids_before_any_request(tmp_path):
+    from saturate import ParquetSink
+
+    ParquetSink(str(tmp_path), flush_every=1).append({"id": "a", "score": 1, "error": None})
+    sink = ParquetSink(str(tmp_path))
+    sink.existing_ids()
+    assert sink._seeded and sink._pinned["score"] == pa.int64()

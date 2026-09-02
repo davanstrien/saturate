@@ -172,8 +172,8 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
         if len(lines) >= next_at and write_lines is not None and (writer is None or writer.done()):
             writer = asyncio.get_running_loop().create_task(write_telemetry(lines[:]))
             # every rewrite re-sends the whole trajectory: stretch the cadence with the run
-            # (a quarter of its length, at most an hour) so total bytes stay a few times the file
-            next_at = len(lines) + max(every, min(len(lines) // 4, 1800))
+            # (a quarter of its length so far) so total bytes stay under ~5x the final file
+            next_at = len(lines) + max(every, len(lines) // 4)
 
     async with AdaptiveClient(endpoint, window=window, headers=hdrs,
                               read_timeout=read_timeout,

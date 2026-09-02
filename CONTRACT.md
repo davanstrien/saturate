@@ -123,8 +123,8 @@ and telemetry writes are best-effort sidecars: failures are non-fatal, and sinks
 
 One `telemetry-…jsonl` per run; one object per controller tick (~2s). The file is rewritten
 periodically during the run (about every minute locally, every five minutes on remote
-stores, stretching to at most hourly as the run grows, since every rewrite re-sends the
-whole trajectory) and finalised at exit; readers may see a partial trajectory mid-run.
+stores, stretching as the run grows — each rewrite re-sends the whole trajectory, so the
+interval is a quarter of the run so far) and finalised at exit; readers may see a partial trajectory mid-run.
 
 | key | meaning |
 |---|---|

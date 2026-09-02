@@ -52,6 +52,27 @@ def _error_row(id_, exc: BaseException) -> dict:
     return {"id": str(id_), "error": f"parse output not storable: {exc}"}
 
 
+def _has_untyped_leaf(t: pa.DataType) -> bool:
+    """Whether some leaf of `t` is null-typed (a struct field only ever seen as None)."""
+    if pa.types.is_null(t):
+        return True
+    if pa.types.is_list(t) or pa.types.is_large_list(t):
+        return _has_untyped_leaf(t.value_type)
+    if pa.types.is_struct(t):
+        return any(_has_untyped_leaf(f.type) for f in t)
+    return False
+
+
+def _storable(t: pa.DataType, top: bool = True) -> bool:
+    """Parquet cannot write a struct with no fields below the top level (a nested `{}`);
+    a top-level one is an untyped column and is simply dropped."""
+    if pa.types.is_struct(t):
+        return (top or len(t) > 0) and all(_storable(f.type, False) for f in t)
+    if pa.types.is_list(t) or pa.types.is_large_list(t):
+        return _storable(t.value_type, False)
+    return True
+
+
 def _accepts(got: pa.DataType, pinned: pa.DataType) -> bool:
     """Whether values of type `got` may be stored in a column pinned to `pinned`: same type,
     untyped (nulls), or the same kind of thing with the value-level check left to a safe cast
@@ -204,6 +225,8 @@ class ParquetSink:
         for d, f in read.values():
             done |= d
             failed |= f
+        if self._declared is None and not self._seeded:
+            self._seed_schema()  # now, before any request is in flight, not at the first probe
         return done if retry_errors else done | failed
 
     def _pin(self, schema: pa.Schema) -> None:
@@ -239,6 +262,15 @@ class ParquetSink:
         pinned = self._pinned[name]
         if got == pinned:
             return None
+        if not _storable(got):
+            raise TypeError(f"{name}: {got} has a nested empty object, which parquet cannot store")
+        if _has_untyped_leaf(pinned):  # a struct field only ever seen as None: the pin fills in
+            widened = pa.unify_schemas([pa.schema([pa.field(name, pinned)]),
+                                        pa.schema([pa.field(name, got)])]).field(0).type  # raises on a clash
+            if widened != pinned:
+                self._pinned[name] = widened
+                self._schema = self._schema.set(self._schema.get_field_index(name), pa.field(name, widened))
+            return widened
         key = (name, got)
         ok = self._accepted.get(key)
         if ok is None:
@@ -256,6 +288,8 @@ class ParquetSink:
                 to = self._conform_type(f.name, f.type)
                 if to is not None:
                     table = table.set_column(i, pa.field(f.name, to), table.column(i).cast(to))
+            elif not _storable(f.type):
+                raise TypeError(f"{f.name}: {f.type} has a nested empty object: parquet cannot store it")
         return table
 
     def probe(self, record: dict) -> None:
@@ -272,6 +306,8 @@ class ParquetSink:
                     to = self._conform_type(f.name, f.type)
                     if to is not None:
                         arr.field(i).cast(to)
+                elif not _storable(f.type):
+                    raise TypeError(f"{f.name}: {f.type} has a nested empty object: parquet cannot store it")
             # and against the rows already buffered: two types for one not-yet-pinned column
             # inside one batch cannot both be stored — the newcomer is the row that does not fit
             got = pa.schema(list(arr.type))
@@ -344,8 +380,15 @@ class ParquetSink:
                 if f.name not in table.schema.names:
                     table = table.append_column(f, pa.nulls(len(table), type=f.type))
             table = table.select(self._schema.names).cast(self._schema)
-        with self.fs.open(f"{self.root}/{name}", "wb") as f:
-            pq.write_table(table, f, compression="zstd")
+        try:
+            with self.fs.open(f"{self.root}/{name}", "wb") as f:
+                pq.write_table(table, f, compression="zstd")
+        except BaseException:  # never leave a partial part behind (it would cost a scan on every resume)
+            try:
+                self.fs.rm(f"{self.root}/{name}")
+            except Exception:
+                pass
+            raise
         try:  # manifest second: a crash in between leaves an uncovered part -> scanned
             self.fs.makedirs(f"{self.root}/_manifest", exist_ok=True)
             with self.fs.open(f"{self.root}/_manifest/ids-{name}", "wb") as f:

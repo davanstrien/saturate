@@ -892,3 +892,16 @@ def test_pin_is_seeded_by_existing_ids_before_any_request(tmp_path):
     sink = ParquetSink(str(tmp_path))
     sink.existing_ids()
     assert sink._seeded and sink._pinned["score"] == pa.int64()
+
+
+def test_salvage_demotes_a_value_that_does_not_fit_the_widened_type(tmp_path):
+    """Two rows whose TYPES unify (int64 + double) but whose VALUES do not (2**60 is not
+    exactly representable as a double) must cost one error row, never a raise at flush."""
+    from saturate import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=2)
+    sink.append({"id": "big", "x": 2**60, "error": None})
+    sink.append({"id": "half", "x": 0.5, "error": None})
+    sink.flush()
+    assert sink.rows_demoted == 1 and sink.existing_ids() == {"big", "half"}
+    assert sink.existing_ids(retry_errors=True) == {"half"}  # widened to double: 2**60 does not fit

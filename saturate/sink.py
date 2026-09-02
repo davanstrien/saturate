@@ -422,9 +422,23 @@ class ParquetSink:
                            pa.unify_schemas([running, t.schema], promote_options="permissive"))
             except (TypeError, ValueError, OverflowError) as e:
                 self._buf[i] = _error_row(rec.get("id"), e)
-                t = pa.Table.from_pylist([self._buf[i]])
+                t = None
                 bad += 1
             tables.append(t)
+        for i, t in enumerate(tables):  # the VALUES must fit the widened types too: a row accepted
+            if t is None:  # before a later row widened its column (2**60, then 0.5) may not
+                continue
+            try:
+                for j, f in enumerate(t.schema):
+                    to = running.field(f.name).type
+                    if to != f.type:
+                        t = t.set_column(j, pa.field(f.name, to), t.column(j).cast(to))
+                tables[i] = t
+            except (TypeError, ValueError, OverflowError) as e:
+                self._buf[i] = _error_row(self._buf[i].get("id"), e)
+                tables[i] = None
+                bad += 1
+        tables = [pa.Table.from_pylist([self._buf[i]]) if t is None else t for i, t in enumerate(tables)]
         self.rows_demoted += bad
         _log(f"{bad} of {len(self._buf)} rows do not fit the pinned schema: written as error rows")
         return pa.concat_tables(tables, promote_options="permissive")

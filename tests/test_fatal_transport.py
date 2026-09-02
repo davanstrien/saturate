@@ -19,6 +19,9 @@ class _StubLimiter:
     def note_source_wait(self, s):
         pass
 
+    def note_prep(self, s, workers=1):
+        pass
+
 
 def test_dead_breaker_gate_raises_fatal():
     b = Breaker()

@@ -134,11 +134,13 @@ interval is a quarter of the run so far) and finalised at exit; readers may see 
 | `waiting` / `running` | engine queue gauges (null when blind) |
 | `bp` | backpressure events this tick (saturation-shaped 429/timeout/5xx) |
 | `ok` | requests that succeeded this tick (failures surface in `bp`) |
-| `input_bound` | true when the source, not the endpoint, is the bottleneck |
+| `input_bound` | true when the client side (the source iterator or `to_request`), not the endpoint, is the bottleneck — `bound_by` is `source` or `prep` |
 | `tok_s` | delivered tokens/sec this tick (the controller's plateau signal) |
 | `kv` / `hits` / `preempts` | KV-cache utilization · prefix-cache hit rate · scheduler preemptions (when exposed) |
 | `reason` | the controller's decision at the end of this tick: `hold`, `grow`, `probe`, `revert`, `cut:bp`, `cut:kv`, `cut:stall`, `cut:queue`, or `hold:<why>` (`hold` for `Fixed` and custom controllers) |
 | `latency_s` | p50 admission-to-completion time of recent requests (null before the first completes) |
+| `bound_by` | what limited this tick: `engine` (window full or admission waits dominated), `source` (the source iterator took ≥ 25% of the tick with the window under half used), `prep` (`to_request` likewise, or on the event loop for ≥ 50% of the tick), or null when nothing was conclusive (idle) |
+| `source_s` / `prep_s` | seconds this tick spent in the source iterator / in `to_request` (summed over prepare workers) |
 
 ## 7. Agent contract (stdout / stderr)
 
@@ -149,7 +151,9 @@ detection is truthiness of any of the three, so there is no off-switch once one 
 rule): `rows_total`, `rows_done_prior`, `rows_processed`, `rows_failed`, `rows_deduped`, `prompt_tokens`,
 `completion_tokens`, `elapsed_s`, `final_limit`, `input_bound`, `breaker_opens`, `hints`,
 `tokens_per_sec`, `cut_reasons` (window reductions counted by telemetry `reason`, e.g.
-`{"cut:bp": 1, "cut:stall": 2}`; empty when the window never shrank).
+`{"cut:bp": 1, "cut:stall": 2}`; empty when the window never shrank), `bound_by` (ticks per
+telemetry `bound_by` verdict, e.g. `{"engine": 40, "prep": 3}`; inconclusive ticks are not
+counted). `input_bound` is true when any tick was bound by `source` or `prep`.
 
 ## 8. Non-guarantees
 

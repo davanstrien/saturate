@@ -231,6 +231,14 @@ stats = pump(rows, to_request, parse, endpoint, output, shard=(RANK, 4))
 Each shard adapts to its own node independently and writes `completions/shard-{rank}.done`
 when finished (datatrove's marker convention — a coordinator can watch the directory).
 
+When `to_request` does real work per row (decoding and re-encoding an image for OCR, rendering
+a PDF page), that work runs on the event loop and serialises the whole pump: the GPU idles
+and the run-end advisor says `PREP-BOUND` with the measured ms/row. Pass
+`pump(..., prepare_workers=4)` to run `to_request` in threads ahead of admission — it helps
+when the work releases the GIL (PIL, numpy, file IO), not for pure-Python CPU loops. Each tick
+of the telemetry names the bottleneck as `bound_by` (`engine`, `source`, `prep`) so you can
+read which side to scale before changing anything.
+
 ## Embeddings
 
 Same client, different route — a "row" can be a pre-grouped batch:

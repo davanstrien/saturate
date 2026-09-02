@@ -4,6 +4,7 @@ metrics scrape, adaptive window) -> drain -> the storage CONTRACT on disk."""
 
 import json
 import os
+import time
 
 import pyarrow.parquet as pq
 import pytest
@@ -15,10 +16,11 @@ from saturate.source import content_id
 from saturate.transport import Breaker
 
 TELEMETRY_KEYS = {"t", "limit", "inflight", "waiting", "running", "bp", "ok", "input_bound",
-                  "tok_s", "kv", "hits", "preempts"}  # CONTRACT §6
+                  "tok_s", "kv", "hits", "preempts", "reason", "latency_s", "bound_by", "source_s",
+                  "prep_s"}  # CONTRACT §6
 STATS_KEYS = {"rows_total", "rows_done_prior", "rows_processed", "rows_failed", "rows_deduped",
               "prompt_tokens", "completion_tokens", "elapsed_s", "final_limit", "input_bound",
-              "breaker_opens", "hints", "tokens_per_sec"}  # CONTRACT §7
+              "breaker_opens", "hints", "tokens_per_sec", "cut_reasons", "bound_by"}  # CONTRACT §7
 
 
 def to_request(row):
@@ -152,6 +154,69 @@ def test_breaker_aborts_run_when_server_dies(stub, tmp_path, monkeypatch):
     assert existing_ids(str(tmp_path)) == set()  # nothing durable: every row is re-admitted next run
     assert not list(tmp_path.glob("part-*.parquet"))
     assert not os.path.exists(tmp_path / "completions" / "shard-0.done")
+
+
+def test_breaker_probes_the_request_route_with_its_body(stub, tmp_path, monkeypatch):
+    """A non-chat workload whose server 503s for a while: the recovery probe must hit the
+    route the run uses (/embeddings) with a body that route accepts, never /chat/completions."""
+    calls = 0
+
+    def down_for_a_while(request):
+        nonlocal calls
+        calls += 1
+        return 503 if calls <= 6 else 200
+
+    stub.status_for = down_for_a_while
+
+    class QuickBreaker(Breaker):
+        def __init__(self):
+            super().__init__(threshold=2, probe_interval=0.05, max_open_s=10.0)
+
+    monkeypatch.setattr(saturate.core, "Breaker", QuickBreaker)
+    stats = pump(rows(12), lambda r: {"model": "stub", "input": [r["text"]]},
+                 lambda r, resp: {"dim": len(resp["data"][0]["embedding"])},
+                 endpoint=stub.endpoint, output=str(tmp_path), window=Fixed(4), route="/embeddings")
+
+    assert stats.breaker_opens >= 1 and stub.probes >= 1
+    assert {path for path, _ in stub.probe_log} == {"/v1/embeddings"}
+    assert all("input" in body for _, body in stub.probe_log)  # the run's own request shape
+    assert "/v1/chat/completions" not in stub.paths
+    assert (stats.rows_processed, stats.rows_failed) == (12, 0)  # the run recovered
+
+
+def slow_to_request(row):
+    time.sleep(0.05)  # image decode + encode stands in: real work that releases the GIL
+    return to_request(row)
+
+
+def test_prepare_stage_offloads_to_request_and_the_verdict_names_it(stub, tmp_path, monkeypatch):
+    """to_request at 50 ms/row on the loop serialises the pump: the endpoint idles and the
+    ticks say `prep`. prepare_workers=4 runs it ahead in threads, the window fills, the run is
+    at least 2x faster, and the ticks stop blaming prep."""
+    monkeypatch.setattr(saturate.core, "TICK_S", 0.5)  # a tick spans many 50 ms calls
+    stub.latency_s = 0.2
+    timings = {}
+    for workers in (0, 4):
+        out = tmp_path / f"w{workers}"
+        t = time.monotonic()
+        stats = pump(rows(200), slow_to_request, parse, endpoint=stub.endpoint, output=str(out),
+                     window=Fixed(14), prepare_workers=workers)
+        timings[workers] = time.monotonic() - t
+        assert (stats.rows_processed, stats.rows_failed) == (200, 0)
+        (telemetry,) = list(out.glob("telemetry-shard0-*.jsonl"))
+        ticks = [json.loads(line) for line in telemetry.read_text().splitlines()]
+        prep_ticks = sum(t["bound_by"] == "prep" for t in ticks)
+        assert sum(t["prep_s"] for t in ticks) >= 200 * 0.05 * 0.9  # the measurement itself
+        if workers == 0:
+            assert prep_ticks > len(ticks) / 2, [t["bound_by"] for t in ticks]
+            assert stats.input_bound and stats.bound_by.get("prep", 0) == prep_ticks
+            assert any(h.startswith("PREP-BOUND: to_request took") for h in stats.hints), stats.hints
+        else:
+            assert prep_ticks <= len(ticks) / 2, [t["bound_by"] for t in ticks]
+            assert not any(h.startswith("PREP-BOUND") for h in stats.hints), stats.hints
+    print(f"prepare_workers=0: {timings[0]:.2f}s  prepare_workers=4: {timings[4]:.2f}s  "
+          f"speedup {timings[0] / timings[4]:.1f}x")
+    assert timings[0] >= 2 * timings[4], timings
 
 
 def test_window_ramps_and_endpoint_sees_concurrency(stub, tmp_path):

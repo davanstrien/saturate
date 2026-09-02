@@ -50,6 +50,7 @@ class ParquetSink:
         self._declared = schema
         self._schema: pa.Schema | None = schema  # dynamic mode: pinned/unified across flushes
         self._seq = 0  # per-sink flush counter: sorted(part names) == write order on ms collisions
+        self._telemetry_name: str | None = None  # fixed at the first write_telemetry call
         self.rows_written = 0
         # hf:// outputs: ensure the dataset repo / bucket exists (private) at
         # construction — a fresh output path must not crash existing_ids()
@@ -220,8 +221,14 @@ class ParquetSink:
             f.write(_json.dumps(payload).encode())
 
     def write_telemetry(self, shard: tuple[int, int], lines: list[str]) -> None:
-        name = f"telemetry-shard{shard[0]}-{int(time.time())}-{uuid.uuid4().hex[:6]}.jsonl"
-        with self.fs.open(f"{self.root}/{name}", "wb") as f:
+        """One telemetry file per sink instance (= per run): the name is chosen on the
+        first call and every later call rewrites the whole file from the full tick list.
+        Whole-file rewrite rather than append: object stores have no append, and a
+        rewrite is one operation on every fsspec backend."""
+        if self._telemetry_name is None:
+            self._telemetry_name = (f"telemetry-shard{shard[0]}-{int(time.time())}-"
+                                    f"{uuid.uuid4().hex[:6]}.jsonl")
+        with self.fs.open(f"{self.root}/{self._telemetry_name}", "wb") as f:
             f.write("\n".join(lines).encode())
 
 

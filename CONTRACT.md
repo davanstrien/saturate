@@ -121,7 +121,9 @@ and telemetry writes are best-effort sidecars: failures are non-fatal, and sinks
 
 ## 6. Telemetry (frozen keys)
 
-One `telemetry-…jsonl` per run; one object per controller tick (~2s):
+One `telemetry-…jsonl` per run; one object per controller tick (~2s). The file is rewritten
+periodically during the run (every ~60 s) and finalised at exit; readers may see a partial
+trajectory mid-run.
 
 | key | meaning |
 |---|---|

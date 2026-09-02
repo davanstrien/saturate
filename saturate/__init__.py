@@ -152,9 +152,24 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
     pending = stream(rows, id_key=id_key, id_fn=id_fn)
     pending = skip_done(pending, sink, retry_errors=retry_errors, stats=stats)
 
+    def write_telemetry(ticks: list[dict]) -> None:  # best-effort sidecar: never fails the run
+        if ticks and hasattr(sink, "write_telemetry"):
+            try:
+                sink.write_telemetry(shard, [json.dumps(x) for x in ticks])
+            except Exception as e:
+                _log(f"telemetry write failed (non-fatal): {e}")
+
+    tick_n = 0
+
+    def on_tick(_rec: dict) -> None:  # every 30 ticks (~60 s) the trajectory so far lands on
+        nonlocal tick_n  # storage, so a reader sees a partial run, not only a finished one
+        tick_n += 1
+        if tick_n % 30 == 0:
+            write_telemetry(client.limiter.ticks)
+
     async with AdaptiveClient(endpoint, window=window, headers=hdrs,
                               read_timeout=read_timeout,
-                              signal_source=signal_source) as client:
+                              signal_source=signal_source, on_tick=on_tick) as client:
         results = through(client, pending, to_request, _adapt_parse(parse), route=route)
         await drain(results, sink, shard=shard, stats=stats)
         limiter = client.limiter
@@ -165,11 +180,7 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
     stats.final_limit = limiter.window.limit
     stats.input_bound = limiter.input_bound_ever
     stats.cut_reasons = cut_reasons(limiter.ticks)
-    if limiter.ticks and hasattr(sink, "write_telemetry"):
-        try:
-            sink.write_telemetry(shard, [json.dumps(x) for x in limiter.ticks])
-        except Exception as e:
-            _log(f"telemetry write failed (non-fatal): {e}")
+    write_telemetry(limiter.ticks)  # final: the complete trajectory, same file
     stats.hints = advise(limiter.ticks, dialect, stats.final_limit, CEILING_FLAG)
     if stats.input_bound:
         stats.hints.append("run was INPUT-BOUND — the source, not the engine, was the bottleneck")

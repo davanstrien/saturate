@@ -152,29 +152,28 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
     pending = stream(rows, id_key=id_key, id_fn=id_fn)
     pending = skip_done(pending, sink, retry_errors=retry_errors, stats=stats)
 
+    if hasattr(sink, "begin_run"):
+        sink.begin_run(shard)  # this run's telemetry gets its own file, whatever the last run did
     lines: list[str] = []  # one JSON line per tick, serialised once (a run is many ticks)
     every = max(1, getattr(sink, "telemetry_every_ticks", 30))
+    next_at = every
     writer: asyncio.Task | None = None
+    write_lines = getattr(sink, "write_telemetry", None)
 
-    def write_telemetry() -> None:  # final, on the loop: the complete trajectory
-        if lines and hasattr(sink, "write_telemetry"):
-            try:
-                sink.write_telemetry(shard, lines)
-            except Exception as e:
-                _log(f"telemetry write failed (non-fatal): {e}")
-
-    async def write_telemetry_off_loop(snapshot: list[str]) -> None:
+    async def write_telemetry(snapshot: list[str]) -> None:
         try:  # a remote rewrite is a commit (seconds): never on the loop, never overlapping
-            await asyncio.to_thread(sink.write_telemetry, shard, snapshot)
+            await asyncio.to_thread(write_lines, shard, snapshot)
         except Exception as e:
             _log(f"telemetry write failed (non-fatal): {e}")
 
     def on_tick(rec: dict) -> None:  # periodically the trajectory so far lands on storage, so a
-        nonlocal writer  # reader sees a partial run, not only a finished one (CONTRACT §6)
+        nonlocal writer, next_at  # reader sees a partial run, not only a finished one (CONTRACT §6)
         lines.append(json.dumps(rec))
-        if (len(lines) % every == 0 and hasattr(sink, "write_telemetry")
-                and (writer is None or writer.done())):
-            writer = asyncio.get_running_loop().create_task(write_telemetry_off_loop(lines[:]))
+        if len(lines) >= next_at and write_lines is not None and (writer is None or writer.done()):
+            writer = asyncio.get_running_loop().create_task(write_telemetry(lines[:]))
+            # every rewrite re-sends the whole trajectory: stretch the cadence with the run
+            # (a quarter of its length, at most an hour) so total bytes stay a few times the file
+            next_at = len(lines) + max(every, min(len(lines) // 4, 1800))
 
     async with AdaptiveClient(endpoint, window=window, headers=hdrs,
                               read_timeout=read_timeout,
@@ -191,7 +190,8 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
     stats.final_limit = limiter.window.limit
     stats.input_bound = limiter.input_bound_ever
     stats.cut_reasons = cut_reasons(limiter.ticks)
-    write_telemetry()
+    if lines and write_lines is not None:
+        await write_telemetry(lines)  # final: the complete trajectory
     stats.hints = advise(limiter.ticks, dialect, stats.final_limit, CEILING_FLAG)
     if stats.input_bound:
         stats.hints.append("run was INPUT-BOUND — the source, not the engine, was the bottleneck")

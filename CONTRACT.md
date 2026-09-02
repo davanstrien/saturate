@@ -123,7 +123,8 @@ and telemetry writes are best-effort sidecars: failures are non-fatal, and sinks
 
 One `telemetry-…jsonl` per run; one object per controller tick (~2s). The file is rewritten
 periodically during the run (about every minute locally, every five minutes on remote
-stores) and finalised at exit; readers may see a partial trajectory mid-run.
+stores, stretching to at most hourly as the run grows, since every rewrite re-sends the
+whole trajectory) and finalised at exit; readers may see a partial trajectory mid-run.
 
 | key | meaning |
 |---|---|
@@ -153,10 +154,13 @@ rule): `rows_total`, `rows_done_prior`, `rows_processed`, `rows_failed`, `rows_d
 ## 8. Non-guarantees
 
 No output ordering · no dedup beyond `id` · no schema migration (keep `parse` types stable
-per output dir; a pinned column type never moves and is read back from the existing parts
-on resume — a value that widens losslessly into it is accepted (an int into a double
-column, `[1]` into a `list<double>` column, a struct missing a pinned field), any other
-type change (a float into an int column, an int into a string column, a struct field the
-pin lacks) becomes an error row at flush, never a raise; a declared schema is the fully
-stable option) · one request per row (rollouts/trajectories are a different primitive) ·
+per output dir; a pinned column type never moves and is read back from the newest readable
+existing part on resume — a value of the same kind that fits is accepted and cast (an int
+into a double or int32 column, `[1]` into a `list<double>` column, a struct missing a pinned
+field), any other type change (a float into an int column, an int into a string column, a
+struct field the pin lacks, an int that overflows) becomes an error row at flush, never a
+raise; a column seen only as nulls or empty lists is not pinned until a typed value arrives;
+K shards writing one output dir concurrently each pin from their own first rows, so fan-out
+with a dynamic schema can leave parts that disagree — a declared schema is the fully stable
+option and the right one for fan-out) · one request per row (rollouts/trajectories are a different primitive) ·
 no dollar figures in the data.

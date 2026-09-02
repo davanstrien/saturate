@@ -286,6 +286,40 @@ def test_dynamic_lossy_cast_is_error_row(tmp_path):
     assert sink.existing_ids() == {"i", "f"} and sink.existing_ids(retry_errors=True) == {"i"}
 
 
+def test_dynamic_value_rewrites_are_conflicts(tmp_path):
+    """Only numeric widening is accepted into a pinned column. Arrow would happily cast
+    1 -> "1" or True -> 1, but those rewrite the value — record, never guess — so an int
+    into a pinned string column and a bool into a pinned int column are error rows."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    async def results():
+        yield Done("s", {}, {"label": "a", "n": 1}, None, {})
+        yield Done("int-into-string", {}, {"label": 1}, None, {})
+        yield Done("bool-into-int", {}, {"n": True}, None, {})
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (1, 2)
+    assert sink.existing_ids() == {"s", "int-into-string", "bool-into-int"}
+    assert sink.existing_ids(retry_errors=True) == {"s"}
+
+
+def test_dynamic_value_rewrite_raises_at_flush(tmp_path):
+    """The same rule on the direct-append path: int -> string raises at flush."""
+    import pytest
+
+    from saturate import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "a", "label": "a", "error": None})
+    with pytest.raises((TypeError, ValueError)):
+        sink.append({"id": "b", "label": 1, "error": None})
+
+
 def test_dynamic_probe_accepts_nulls_new_fields_and_empty_lists(tmp_path):
     """The pinned-type check must not reject rows flush would accept: nulls, empty
     lists and fields the schema has not seen yet all merge into the pinned schema."""

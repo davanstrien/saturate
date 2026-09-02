@@ -27,6 +27,15 @@ def _log(msg: str) -> None:
     print(f"[pump] {msg}", file=sys.stderr, flush=True)
 
 
+def _widens(src: pa.DataType, dst: pa.DataType) -> bool:
+    """A pinned column takes a batch column by lossless numeric widening only (int -> double),
+    or when the batch column is all-null / the same type. int -> string or bool -> int would
+    rewrite values, not widen them — record, never guess — so they stay conflicts."""
+    def num(t):
+        return pa.types.is_integer(t) or pa.types.is_floating(t)
+    return src == dst or pa.types.is_null(src) or (num(src) and num(dst))
+
+
 class ParquetSink:
     def __init__(self, out_uri: str, flush_every: int = 10, schema: pa.Schema | None = None,
                  read_workers: int = 16):
@@ -135,16 +144,18 @@ class ParquetSink:
             if self._schema is not None:  # dynamic mode, types pinned: the row must cast to them
                 # the same rule flush applies to the batch, applied to this one row over the
                 # fields it shares with the pinned schema (new fields may still grow the schema):
-                # a safe cast — lossless widening (1 -> double) passes, a lossy one (0.5 ->
-                # int64) raises. Left to flush, that raise would discard the whole buffer.
+                # numeric widening is a safe cast — 1 -> double passes, 0.5 -> int64 raises —
+                # and any other type change must unify, which raises on a conflict. Left to
+                # flush, that raise would discard the whole buffer.
                 shared = [n for n in self._schema.names if n in record]
                 if shared:
                     row = pa.Table.from_pylist([{n: record[n] for n in shared}])
-                    try:
-                        for n in shared:
-                            row[n].cast(self._schema.field(n).type)
-                    except pa.ArrowNotImplementedError as e:  # no such cast: still a type error
-                        raise TypeError(str(e)) from e
+                    for n in shared:
+                        pinned, got = self._schema.field(n), row.schema.field(n)
+                        if _widens(got.type, pinned.type):
+                            row[n].cast(pinned.type)
+                        else:
+                            pa.unify_schemas([pa.schema([pinned]), pa.schema([got])])
             return
         extra = record.keys() - set(self._declared.names)
         if extra:
@@ -183,14 +194,17 @@ class ParquetSink:
                 i = table.schema.get_field_index("error")
                 table = table.set_column(i, pa.field("error", pa.string()),
                                          table["error"].cast(pa.string()))
-            # pinned columns: safe-cast the batch to the pinned type — lossless widening
-            # (int -> double) is accepted, a lossy cast (0.5 -> int64) raises (§8). The pinned
-            # type never moves: widening only the NEW part would break multi-part reads.
+            # pinned columns: lossless numeric widening is a safe cast to the pinned type
+            # (int -> double passes, 0.5 -> int64 raises); any other type change is left to
+            # the strict unify below, which raises on a conflict (§8). The pinned type never
+            # moves: widening only the NEW part would break multi-part reads.
             for f in self._schema or ():
-                if f.name in table.schema.names and table.schema.field(f.name).type != f.type:
-                    i = table.schema.get_field_index(f.name)
-                    table = table.set_column(i, f, table[f.name].cast(f.type))
-            self._schema = (table.schema if self._schema is None else  # unify: new columns only
+                if f.name in table.schema.names:
+                    src = table.schema.field(f.name).type
+                    if src != f.type and _widens(src, f.type):
+                        i = table.schema.get_field_index(f.name)
+                        table = table.set_column(i, f, table[f.name].cast(f.type))
+            self._schema = (table.schema if self._schema is None else
                             pa.unify_schemas([self._schema, table.schema]))
             # every part carries the FULL pinned schema — absent or all-null columns become
             # typed all-null arrays (#12): pyarrow.dataset takes the FIRST fragment's schema

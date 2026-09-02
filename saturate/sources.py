@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 
-from saturate.source import content_id
+from saturate.source import content_id, rolling_map
 
 
 def dataset_rows(
@@ -186,7 +186,6 @@ def bucket_rows(
             yield rid, {"path": p}
         return
 
-    from collections import deque
     from concurrent.futures import ThreadPoolExecutor
 
     def fetch(item):
@@ -196,15 +195,4 @@ def bucket_rows(
 
     window = max(1, prefetch)
     with ThreadPoolExecutor(max_workers=window) as pool:
-        pending: deque = deque()
-        it = iter(selected)
-        for item in it:  # prime the window
-            pending.append(pool.submit(fetch, item))
-            if len(pending) >= window:
-                break
-        while pending:  # rolling: one out, one in — never > window bytes-in-flight
-            fut = pending.popleft()
-            nxt = next(it, None)
-            if nxt is not None:
-                pending.append(pool.submit(fetch, nxt))
-            yield fut.result()
+        yield from rolling_map(selected, fetch, pool, window)  # never > window bytes-in-flight

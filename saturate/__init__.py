@@ -24,7 +24,7 @@ from saturate.core import AdaptiveClient, AdaptiveLimiter, Done, through
 from saturate.engine import Engine, wait_for_health
 from saturate.signals import CEILING_FLAG
 from saturate.sink import FileSink, ParquetSink, as_sink, drain, read_output
-from saturate.source import content_id, shard_select, skip_done, stream
+from saturate.source import content_id, prepare_ahead, shard_select, skip_done, stream
 from saturate.sources import bucket_rows, dataset_rows
 from saturate.telemetry import advise, advise_input, bound_by_counts, cut_reasons
 from saturate.transport import FatalTransportError, Request, make_json_request, make_multipart_request
@@ -33,7 +33,7 @@ __all__ = [
     "pump", "Stats", "Fixed", "Auto", "Obs", "Engine", "wait_for_health",
     "Request", "make_json_request", "make_multipart_request", "existing_ids",
     "AdaptiveClient", "AdaptiveLimiter", "Done", "through", "stream", "skip_done",
-    "drain", "read_output", "ParquetSink", "FileSink", "shard_select", "content_id",
+    "drain", "read_output", "ParquetSink", "FileSink", "shard_select", "content_id", "prepare_ahead",
     "FatalTransportError", "dataset_rows", "bucket_rows"]
 try:
     __version__ = importlib.metadata.version("saturate")
@@ -134,6 +134,8 @@ def pump(
         on the loop that work serialises the whole pump and idles the engine — the run-end
         advisor says "PREP-BOUND" and quotes the ms/row when that happened. It helps only
         if the work releases the GIL (PIL, numpy, IO); `parse` always stays on the loop.
+        For pure-Python CPU work, or to own the pool, prepare rows before the pump instead:
+        `pump(prepare_ahead(rows, fn, executor=ProcessPoolExecutor()), ...)`.
 
     Warning: `shard=(rank, world)` labels output files and completion markers only. It does
     not select input rows — every shard given the same `rows` processes all of them. Pre-shard

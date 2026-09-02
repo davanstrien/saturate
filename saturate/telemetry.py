@@ -43,14 +43,19 @@ def advise_input(telemetry: list[dict], prepare_workers: int = 0) -> list[str]:
     if counts.get("prep", 0) / len(telemetry) >= 0.3:
         calls = max(1, sum(t.get("prep_n", 0) for t in telemetry))
         ms = 1000 * sum(t.get("prep_s", 0.0) for t in telemetry) / calls
-        remedy = (f"prep is still the bottleneck at {prepare_workers} workers; raise prepare_workers "
-                  "or make to_request cheaper" if prepare_workers >= 4 else
-                  "run it ahead with pump(prepare_workers=4)")
-        hints.append(f"PREP-BOUND: to_request took {ms:.0f} ms/row on average; {remedy}")
+        if prepare_workers >= 4:
+            hints.append(f"PREP-BOUND: prep is still the bottleneck at {prepare_workers} workers "
+                         f"({ms:.0f} ms/row): raise prepare_workers, or move the work to prepare_ahead "
+                         "with a process pool")
+        else:
+            hints.append(f"PREP-BOUND: to_request took {ms:.0f} ms/row on average; if it releases the "
+                         "GIL (Pillow, ffmpeg, I/O) set pump(prepare_workers=4), otherwise prepare rows "
+                         "ahead of the pump with prepare_ahead(rows, fn, executor=ProcessPoolExecutor())")
     if counts.get("source", 0) / len(telemetry) >= 0.3:
         rows = max(1, sum(t.get("ok", 0) + t.get("bp", 0) for t in telemetry))
         ms = 1000 * sum(t.get("source_s", 0.0) for t in telemetry) / rows
-        hints.append(f"SOURCE-BOUND: the source iterator took {ms:.0f} ms/row; prefetch or shard the input")
+        hints.append(f"SOURCE-BOUND: the source took {ms:.0f} ms/row; prefetch it "
+                     "(prepare_ahead / bucket_rows(prefetch=)), select fewer columns, or shard the input")
     if counts.get("loop", 0) / len(telemetry) >= 0.3:
         run_s = max(telemetry[-1].get("t", 0.0), 1e-9)
         pct = min(100, round(100 * sum(t.get("loop_lag_s", 0.0) for t in telemetry) / run_s))

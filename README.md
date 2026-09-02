@@ -231,14 +231,36 @@ stats = pump(rows, to_request, parse, endpoint, output, shard=(RANK, 4))
 Each shard adapts to its own node independently and writes `completions/shard-{rank}.done`
 when finished (datatrove's marker convention — a coordinator can watch the directory).
 
-When `to_request` does real work per row (decoding and re-encoding an image for OCR, rendering
-a PDF page), that work runs on the event loop and serialises the whole pump: the GPU idles
-and the run-end advisor says `PREP-BOUND` with the measured ms/row. Pass
-`pump(..., prepare_workers=4)` to run `to_request` in threads ahead of admission — it helps
-when the work releases the GIL (PIL, numpy, file IO), not for pure-Python CPU loops. Each tick
-of the telemetry names the bottleneck as `bound_by` (`engine`, `source`, `prep`, or `loop` when
-`parse` or a sink flush blocked the event loop) so you can read which side to scale before
-changing anything.
+## Preparing input
+
+`to_request` runs on the event loop. Cheap work (a dict, a template) belongs there. Real work
+per row (decoding and re-encoding an image for OCR, rendering a PDF page) serialises the whole
+pump: the GPU idles and the run-end advisor says `PREP-BOUND` with the measured ms/row. Three
+options, by what the work is:
+
+- **On the loop** (the default) for cheap `to_request`.
+- **`pump(..., prepare_workers=4)`** when `to_request` calls libraries that release the GIL
+  (Pillow, ffmpeg, numpy, file and network I/O): the same function runs in threads ahead of
+  admission, bounded so prepared bodies never pile up.
+- **`prepare_ahead`** with your own executor for pure-Python CPU work, subprocess pipelines,
+  or when you want the pool's lifetime and size under your control:
+
+```python
+from concurrent.futures import ProcessPoolExecutor
+
+from saturate import prepare_ahead, pump, stream
+
+with ProcessPoolExecutor(8) as pool:
+    ready = prepare_ahead(stream(rows), render_page, workers=8, executor=pool)  # order kept
+    stats = pump(ready, to_request, parse, endpoint, output)
+```
+
+  `render_page` and the rows must be picklable for a process pool. The work happens before
+  the pump sees the row, so the verdict then reads `SOURCE-BOUND` rather than `PREP-BOUND`.
+
+Each tick of the telemetry names the bottleneck as `bound_by` (`engine`, `source`, `prep`, or
+`loop` when `parse` or a sink flush blocked the event loop) so you can read which side to
+scale before changing anything.
 
 ## Embeddings
 

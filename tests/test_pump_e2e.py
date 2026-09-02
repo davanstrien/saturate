@@ -71,7 +71,7 @@ def test_pump_happy_path(stub, tmp_path):
     (telemetry,) = list(tmp_path.glob("telemetry-shard0-*.jsonl"))
     ticks = [json.loads(line) for line in telemetry.read_text().splitlines()]
     assert ticks
-    assert all(t.keys() == TELEMETRY_KEYS for t in ticks)
+    assert all(TELEMETRY_KEYS <= t.keys() for t in ticks)  # frozen keys; additive keys allowed
     assert all(t["running"] is not None for t in ticks)  # the /metrics scrape fed the controller
 
 

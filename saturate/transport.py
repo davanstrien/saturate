@@ -7,7 +7,7 @@ slots in post-v1 behind the same call shape.
 Retry discipline (patterns per hynek/stamina; implementation ours because
 429/timeout events must feed the controller live): explicit allowlist only,
 exponential backoff with full jitter, capped by attempts AND total time,
-Retry-After honored. 4xx = poison row, never retried, never a breaker event.
+Retry-After honored. 3xx/4xx = poison row, never retried, never a breaker event.
 429 with Retry-After = a paced quota, not saturation: wait, don't cut.
 """
 
@@ -121,7 +121,7 @@ class Breaker:
 
 async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
                         events: dict, breaker: Breaker) -> tuple[dict | None, str | None]:
-    """Returns (response_json, error). Poison rows (4xx) never retry; multipart is
+    """Returns (response_json, error). Poison rows (3xx/4xx) never retry; multipart is
     single-attempt (file objects are consumed by the wire — a re-send posts empty bodies).
     Budget semantics: the FIRST attempt gets the client's full read window (long generations
     are legitimate); retries get their timeout capped to the remaining budget. Time spent
@@ -170,6 +170,8 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
         if r.status_code == 429:
             if retry_after is None:
                 events["backpressure"] += 1  # saturation-shaped; a paced quota is not
+        elif 300 <= r.status_code < 400:  # redirects are not followed: a config error, not pressure
+            return None, f"http {r.status_code}: endpoint redirects — use the final URL"
         elif 400 <= r.status_code < 500:
             return None, f"http {r.status_code}: {r.text[:300]}"  # poison, no retry, no breaker
         else:

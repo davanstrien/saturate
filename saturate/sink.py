@@ -42,6 +42,16 @@ def _untyped(t: pa.DataType) -> bool:
     return False
 
 
+def _list_parts(fs, root: str) -> list[str]:
+    """The data parts of an output dir, in write order (the CONTRACT part-name pattern)."""
+    return sorted(fs.glob(f"{root}/part-*.parquet"))
+
+
+def _error_row(id_, exc: BaseException) -> dict:
+    """The record a row that cannot be stored leaves behind (CONTRACT §4)."""
+    return {"id": str(id_), "error": f"parse output not storable: {exc}"}
+
+
 def _accepts(got: pa.DataType, pinned: pa.DataType) -> bool:
     """Whether values of type `got` may be stored in a column pinned to `pinned`: same type,
     untyped (nulls), or the same kind of thing with the value-level check left to a safe cast
@@ -100,6 +110,8 @@ class ParquetSink:
         self._telemetry_names: dict[int, str] = {}  # shard rank -> this run's telemetry file
         self._accepted: dict[tuple[str, pa.DataType], bool] = {}  # (name, got) -> _accepts verdict
         self._buf_schema: pa.Schema | None = None  # types of the rows buffered so far (dynamic mode)
+        self._parts: list[str] | None = None  # part listing from existing_ids(), reused by the seed
+        self._probe_cache: tuple[dict, pa.Schema] | None = None  # the record probe() last typed
         proto = getattr(self.fs, "protocol", ())  # fsspec: a str or a tuple of aliases — match exactly
         protos = set(proto) if isinstance(proto, (tuple, list)) else {proto}
         local = "file" in protos
@@ -131,28 +143,35 @@ class ParquetSink:
         except Exception:
             pass  # HfFileSystem: directories are implicit beyond the repo itself
 
-    def _read_id_error(self, path: str, attempts: int = 3) -> tuple[set[str], set[str]] | None:
-        """(done ids, failed ids) of one manifest or part; None if the file is unreadable.
-        A remote read can fail transiently (a 429 under concurrent reads, a reset), and an
-        unreadable file re-pays a whole flush, so the read is retried before giving up."""
+    def _read_parquet(self, path: str, reader, attempts: int = 3):
+        """`reader(file)` on an opened path, or None if the file is unreadable. A remote read can
+        fail transiently (a 429 under concurrent reads, a reset), and an unreadable file re-pays a
+        whole flush, so I/O errors are retried; bytes that are not parquet (crash-truncated) are
+        not."""
         for i in range(attempts):
             try:
                 with self.fs.open(path, "rb") as f:
-                    t = pq.read_table(f, columns=["id", "error"])
-                done: set[str] = set()
-                failed: set[str] = set()
-                for id_, err in zip(t["id"].to_pylist(), t["error"].to_pylist(), strict=True):
-                    (failed if err else done).add(id_)
-                return done, failed
-            except pa.ArrowException as e:  # the bytes are not parquet (crash-truncated): no retry
+                    return reader(f)
+            except pa.ArrowException as e:
                 _log(f"skipping unreadable {path}: {e}")
                 return None
-            except Exception as e:  # an I/O or remote error: may be transient
+            except Exception as e:
                 if i + 1 < attempts:
                     time.sleep(0.5 * 2**i)
                 else:
                     _log(f"skipping unreadable {path}: {e}")
         return None
+
+    def _read_id_error(self, path: str) -> tuple[set[str], set[str]] | None:
+        """(done ids, failed ids) of one manifest or part; None if the file is unreadable."""
+        t = self._read_parquet(path, lambda f: pq.read_table(f, columns=["id", "error"]))
+        if t is None:
+            return None
+        done: set[str] = set()
+        failed: set[str] = set()
+        for id_, err in zip(t["id"].to_pylist(), t["error"].to_pylist(), strict=True):
+            (failed if err else done).add(id_)
+        return done, failed
 
     def _read_many(self, paths: list[str]) -> dict[str, tuple[set[str], set[str]]]:
         """{path: (done, failed)} for every readable file, in path order. Remote resume is
@@ -177,7 +196,8 @@ class ParquetSink:
                  "(consider larger flush_every for remote outputs)")
         read = self._read_many(manifests)
         covered = {path.rsplit("/", 1)[-1][4:] for path in read}
-        read.update(self._read_many([p for p in sorted(self.fs.glob(f"{self.root}/part-*.parquet"))
+        self._parts = _list_parts(self.fs, self.root)  # one listing serves the seed too
+        read.update(self._read_many([p for p in self._parts
                                      if p.rsplit("/", 1)[-1] not in covered]))
         done: set[str] = set()
         failed: set[str] = set()
@@ -197,17 +217,16 @@ class ParquetSink:
         int column) would pin the other type and write a part unreadable beside the old ones."""
         self._seeded = True
         try:
-            parts = sorted(self.fs.glob(f"{self.root}/part-*.parquet"))
+            parts = self._parts if self._parts is not None else _list_parts(self.fs, self.root)
         except Exception as e:
             _log(f"could not list existing parts, starting unpinned: {e}")
             return
         for path in reversed(parts):  # newest first; a crash-truncated newest part is skipped
-            try:
-                with self.fs.open(path, "rb") as f:
-                    self._pin(pq.read_schema(f).remove_metadata())
+            schema = self._read_parquet(path, lambda f: pq.read_schema(f).remove_metadata())
+            if schema is not None:
+                self._pin(schema)
                 return
-            except Exception as e:
-                _log(f"could not read the schema of {path}, trying an older part: {e}")
+            _log(f"could not read the schema of {path}, trying an older part")
         if parts:
             _log("no existing part has a readable schema, starting unpinned")
 
@@ -256,23 +275,26 @@ class ParquetSink:
             # and against the rows already buffered: two types for one not-yet-pinned column
             # inside one batch cannot both be stored — the newcomer is the row that does not fit
             got = pa.schema(list(arr.type))
-            if self._buf_schema is not None:
-                pa.unify_schemas([self._buf_schema, got], promote_options="permissive")
-            self._probe_cache = (id(record), got)
+            self._widen_buffer(got)
+            self._probe_cache = (record, got)  # append() reuses the types without re-serialising
             return
         extra = record.keys() - set(self._declared.names)
         if extra:
             raise ValueError(f"fields outside the declared schema: {sorted(extra)}")
         pa.Table.from_pylist([{n: record.get(n) for n in self._declared.names}], schema=self._declared)
 
+    def _widen_buffer(self, got: pa.Schema) -> pa.Schema:
+        """The buffer's types widened by one more row's; raises (ArrowTypeError) on a clash."""
+        if self._buf_schema is None:
+            return got
+        return pa.unify_schemas([self._buf_schema, got], promote_options="permissive")
+
     def append(self, record: dict) -> None:
         if self._declared is None:  # track the buffer's types so probe() can see the whole batch
-            cached = getattr(self, "_probe_cache", None)
-            got = (cached[1] if cached and cached[0] == id(record)
-                   else pa.schema(list(pa.array([record]).type)))
+            cached = self._probe_cache
+            got = cached[1] if cached and cached[0] is record else pa.schema(list(pa.array([record]).type))
             try:
-                self._buf_schema = (got if self._buf_schema is None else
-                                    pa.unify_schemas([self._buf_schema, got], promote_options="permissive"))
+                self._buf_schema = self._widen_buffer(got)
             except (TypeError, ValueError):
                 pass  # a direct append of a conflicting row: flush demotes it (the guarantee)
         self._buf.append(record)
@@ -356,7 +378,7 @@ class ParquetSink:
                 running = (t.schema if running is None else
                            pa.unify_schemas([running, t.schema], promote_options="permissive"))
             except (TypeError, ValueError, OverflowError) as e:
-                self._buf[i] = {"id": str(rec.get("id")), "error": f"parse output not storable: {e}"}
+                self._buf[i] = _error_row(rec.get("id"), e)
                 t = pa.Table.from_pylist([self._buf[i]])
                 bad += 1
             tables.append(t)
@@ -468,7 +490,7 @@ async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
                         stats.rows_failed += 1
                         stats.prompt_tokens += done.usage.get("prompt_tokens", 0)  # tokens were spent
                         stats.completion_tokens += done.usage.get("completion_tokens", 0)
-                        sink.append({"id": done.id, "error": f"parse output not storable: {e}"})
+                        sink.append(_error_row(done.id, e))
                         continue
                 stats.rows_processed += 1
                 stats.prompt_tokens += done.usage.get("prompt_tokens", 0)
@@ -495,7 +517,7 @@ def read_output(out_uri: str) -> Iterator[tuple[str, dict]]:
 
     fs, root = fsspec.url_to_fs(out_uri)
     best: dict[str, dict] = {}
-    for path in sorted(fs.glob(f"{root}/part-*.parquet")):
+    for path in _list_parts(fs, root):
         try:
             with fs.open(path, "rb") as f:
                 rows = pq.read_table(f).to_pylist()

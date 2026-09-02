@@ -204,9 +204,9 @@ def test_generic_sink_not_subject_to_arrow_rules(tmp_path):
 
 
 def test_dynamic_type_change_raises_at_flush(tmp_path):
-    """Codex r6 blocker #4: int64 -> double was permissively widened only in
-    the NEW part, breaking multi-part reads while CONTRACT §8 promised a raise.
-    Strict unify makes the documented behavior true."""
+    """A direct sink append bypasses probe(): a same-run type change (int64 pinned,
+    double arriving) raises at flush rather than widening only the new part, which
+    would break multi-part reads (CONTRACT §8)."""
     import pytest
 
     from saturate import ParquetSink
@@ -215,6 +215,52 @@ def test_dynamic_type_change_raises_at_flush(tmp_path):
     sink.append({"id": "a", "score": 1, "error": None})
     with pytest.raises((TypeError, ValueError)):
         sink.append({"id": "b", "score": 1.5, "error": None})
+
+
+def test_dynamic_type_conflict_becomes_error_row_under_drain(tmp_path):
+    """Under drain, a row whose type conflicts with the pinned dynamic schema must
+    become a durable error row: previously probe() only checked serializability, so
+    the conflict surfaced at flush, discarded the buffered rows and crashed the run
+    (and every resume of it, since the same rows arrive in the same order)."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    async def results():
+        for i in range(5):
+            yield Done(f"int-{i}", {}, {"score": 1}, None, {})
+        for i in range(5):
+            yield Done(f"float-{i}", {}, {"score": 0.5}, None, {})
+
+    sink = ParquetSink(str(tmp_path), flush_every=5)
+    stats = asyncio.run(drain(results(), sink))
+    ints, floats = {f"int-{i}" for i in range(5)}, {f"float-{i}" for i in range(5)}
+    assert (stats.rows_processed, stats.rows_failed) == (5, 5)
+    assert sink.existing_ids() == ints | floats  # every row durable
+    assert sink.existing_ids(retry_errors=True) == ints  # the float rows are healable errors
+    for part in tmp_path.glob("part-*.parquet"):
+        assert pq.read_schema(part).field("score").type == pa.int64()  # the pinned type held
+
+
+def test_dynamic_probe_accepts_nulls_new_fields_and_empty_lists(tmp_path):
+    """The pinned-type check must not reject rows flush would accept: nulls, empty
+    lists and fields the schema has not seen yet all merge into the pinned schema."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    async def results():
+        yield Done("a", {}, {"score": 1, "tags": ["x"]}, None, {})
+        yield Done("b", {}, {"score": None, "tags": [], "extra": "new"}, None, {})
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (2, 0)
+    assert dict(read_output(str(tmp_path)))["b"] == {"score": None, "tags": [], "extra": "new"}
 
 
 def test_schema_rejected_for_custom_sink_objects():

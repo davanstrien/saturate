@@ -106,7 +106,17 @@ class ParquetSink:
         THIS sink's schema — drain turns that into an error row before buffering (r6: the
         inferred-schema check alone missed declared-type mismatches like score='oops')."""
         if self._declared is None:
-            pa.array([record])
+            pa.array([record])  # every field must be Arrow-serializable
+            if self._schema is not None:  # dynamic mode, types pinned: the row must merge into them
+                # the same infer + strict-unify flush applies to the batch, applied to this one
+                # row over the fields it shares with the pinned schema (new fields may still
+                # grow the schema). A conflicting type (int pinned, float arriving) would
+                # otherwise raise at flush and discard the whole buffer — here it is an error row.
+                shared = [n for n in self._schema.names if n in record]
+                if shared:
+                    pinned = pa.schema([self._schema.field(n) for n in shared])
+                    row = pa.Table.from_pylist([{n: record[n] for n in shared}])
+                    pa.unify_schemas([pinned, row.schema])
             return
         extra = record.keys() - set(self._declared.names)
         if extra:

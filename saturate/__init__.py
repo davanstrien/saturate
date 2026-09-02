@@ -26,7 +26,7 @@ from saturate.signals import CEILING_FLAG
 from saturate.sink import FileSink, ParquetSink, as_sink, drain, read_output
 from saturate.source import content_id, shard_select, skip_done, stream
 from saturate.sources import bucket_rows, dataset_rows
-from saturate.telemetry import advise
+from saturate.telemetry import advise, cut_reasons
 from saturate.transport import FatalTransportError, Request, make_json_request, make_multipart_request
 
 __all__ = [
@@ -78,6 +78,7 @@ class Stats:
     input_bound: bool = False
     breaker_opens: int = 0
     hints: list = dataclasses.field(default_factory=list)
+    cut_reasons: dict = dataclasses.field(default_factory=dict)  # window reductions by controller reason
 
     @property
     def tokens_per_sec(self) -> float:
@@ -163,6 +164,7 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
     stats.elapsed_s = round(time.monotonic() - t0, 2)
     stats.final_limit = limiter.window.limit
     stats.input_bound = limiter.input_bound_ever
+    stats.cut_reasons = cut_reasons(limiter.ticks)
     if limiter.ticks and hasattr(sink, "write_telemetry"):
         try:
             sink.write_telemetry(shard, [json.dumps(x) for x in limiter.ticks])

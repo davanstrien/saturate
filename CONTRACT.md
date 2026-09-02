@@ -129,6 +129,8 @@ One `telemetry-…jsonl` per run; one object per controller tick (~2s):
 | `input_bound` | true when the source, not the endpoint, is the bottleneck |
 | `tok_s` | delivered tokens/sec this tick (the controller's plateau signal) |
 | `kv` / `hits` / `preempts` | KV-cache utilization · prefix-cache hit rate · scheduler preemptions (when exposed) |
+| `reason` | the controller's decision at the end of this tick: `hold`, `grow`, `probe`, `revert`, `cut:bp`, `cut:kv`, `cut:stall`, `cut:queue`, or `hold:<why>` (`hold` for `Fixed` and custom controllers) |
+| `latency_s` | p50 admission-to-completion time of recent requests (null before the first completes) |
 
 ## 7. Agent contract (stdout / stderr)
 
@@ -138,7 +140,8 @@ detection is truthiness of any of the three, so there is no off-switch once one 
 (progress, advisor hints, the resume hint) goes to stderr. Stats keys (frozen, same additive
 rule): `rows_total`, `rows_done_prior`, `rows_processed`, `rows_failed`, `rows_deduped`, `prompt_tokens`,
 `completion_tokens`, `elapsed_s`, `final_limit`, `input_bound`, `breaker_opens`, `hints`,
-`tokens_per_sec`.
+`tokens_per_sec`, `cut_reasons` (window reductions counted by telemetry `reason`, e.g.
+`{"cut:bp": 1, "cut:stall": 2}`; empty when the window never shrank).
 
 ## 8. Non-guarantees
 

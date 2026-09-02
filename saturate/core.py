@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import statistics
 import sys
 import time
+from collections import deque
 from collections.abc import AsyncIterator, Callable, Iterable
 
 import httpx2 as httpx
@@ -54,7 +56,8 @@ class _Slot:
         self._check()  # before queueing on the window...
         t = time.monotonic()
         await self._l.window.acquire()
-        self._l._wait["acquire"] += time.monotonic() - t
+        self._t_admitted = time.monotonic()
+        self._l._wait["acquire"] += self._t_admitted - t
         try:
             self._check()  # ...and after (r6): the controller may have died while we were queued
         except BaseException:
@@ -62,6 +65,7 @@ class _Slot:
             raise
 
     async def __aexit__(self, *exc):
+        self._l._latencies.append(time.monotonic() - self._t_admitted)
         await self._l.window.release()
 
 
@@ -83,6 +87,7 @@ class AdaptiveLimiter:
         self.ticks: list[dict] = []
         self.tokens_total = 0
         self._wait = {"source": 0.0, "acquire": 0.0}
+        self._latencies: deque[float] = deque(maxlen=64)  # admission-to-release, recent requests
         self.input_bound_ever = False
         self._task: asyncio.Task | None = None
         self._t0 = time.monotonic()
@@ -100,6 +105,11 @@ class AdaptiveLimiter:
 
     def note_source_wait(self, seconds: float) -> None:
         self._wait["source"] += seconds
+
+    @property
+    def latency_s(self) -> float | None:
+        """p50 admission-to-completion time of recent requests (None before the first)."""
+        return statistics.median(self._latencies) if self._latencies else None
 
     async def __aenter__(self):
         self._t0 = time.monotonic()
@@ -132,20 +142,26 @@ class AdaptiveLimiter:
                            and self.window.inflight < int(self.window.limit * 0.5))
             self.input_bound_ever = self.input_bound_ever or input_bound
             g = gauges or {}
+            # zero tokens with requests in flight is a reading (a stalled or slow engine);
+            # None means unobservable: nothing in flight, or an endpoint that never reports usage
+            observable = self.window.inflight > 0 and self.tokens_total > 0
+            latency_s = self.latency_s
             obs = Obs(waiting=g.get("waiting"), running=g.get("running"),
                       inflight=self.window.inflight, backpressure=self.events["backpressure"],
                       successes=self.events["successes"], input_bound=input_bound,
-                      kv=g.get("kv"), hits=g.get("hits"), tok_s=tok_s or None,
-                      preempts=g.get("preempts"))
+                      kv=g.get("kv"), hits=g.get("hits"), tok_s=tok_s or (0.0 if observable else None),
+                      preempts=g.get("preempts"), latency_s=latency_s)
+            new_limit = self.controller.decide(obs, self.window.limit)
             rec = tick_record(time.monotonic() - self._t0, self.window.limit,
                               self.window.inflight, gauges, self.events["backpressure"],
-                              self.events["successes"], input_bound, tok_s)
+                              self.events["successes"], input_bound, tok_s,
+                              reason=getattr(self.controller, "last_reason", "hold"), latency_s=latency_s)
             self.ticks.append(rec)
             if self.on_tick:
                 self.on_tick(rec)
             self.events["backpressure"] = self.events["successes"] = 0
             self._wait["source"] = self._wait["acquire"] = 0.0
-            await self.window.set_limit(self.controller.decide(obs, self.window.limit))
+            await self.window.set_limit(new_limit)
 
 
 class AdaptiveClient:

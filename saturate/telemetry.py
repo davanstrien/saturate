@@ -6,13 +6,20 @@ from collections import Counter
 
 
 def tick_record(t: float, limit: int, inflight: int, gauges: dict | None,
-                bp: int, ok: int, input_bound: bool, tok_s: float) -> dict:
+                bp: int, ok: int, input_bound: bool, tok_s: float,
+                reason: str = "hold", latency_s: float | None = None) -> dict:
     g = gauges or {}
     return {"t": round(t, 1), "limit": limit, "inflight": inflight,
             "waiting": g.get("waiting"), "running": g.get("running"),
             "bp": bp, "ok": ok, "input_bound": input_bound,
             "tok_s": round(tok_s, 1), "kv": g.get("kv"), "hits": g.get("hits"),
-            "preempts": g.get("preempts")}
+            "preempts": g.get("preempts"), "reason": reason,
+            "latency_s": None if latency_s is None else round(latency_s, 3)}
+
+
+def cut_reasons(telemetry: list[dict]) -> dict[str, int]:
+    """How many times the window was reduced, by the controller's stated reason (`cut:*`)."""
+    return dict(Counter(t["reason"] for t in telemetry if str(t.get("reason", "")).startswith("cut:")))
 
 
 def advise(telemetry: list[dict], dialect: str | None, final_limit: int,

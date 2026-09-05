@@ -544,18 +544,17 @@ async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
                     try:  # r5/r6 #6: validate against the sink's ACTUAL schema before buffering —
                         probe(rec)  # a bad value must become an error row, not a flush crash
                     except (TypeError, ValueError, OverflowError) as e:
-                        stats.rows_failed += 1
-                        stats.prompt_tokens += done.usage.get("prompt_tokens", 0)  # tokens were spent
-                        stats.completion_tokens += done.usage.get("completion_tokens", 0)
-                        sink.append(_error_row(done.id, e))
-                        continue
-                stats.rows_processed += 1
+                        rec = _error_row(done.id, e)
+                # Tokens were spent even when the sink rejects the output.
                 stats.prompt_tokens += done.usage.get("prompt_tokens", 0)
                 stats.completion_tokens += done.usage.get("completion_tokens", 0)
-                sink.append(rec)
+            else:
+                rec = {"id": done.id, "error": done.error}
+            if rec["error"] is None:
+                stats.rows_processed += 1
             else:
                 stats.rows_failed += 1
-                sink.append({"id": done.id, "error": done.error})
+            sink.append(rec)
     finally:
         sink.flush()  # a fatal abort must still land the rows already paid for
         # reconcile: rows flush demoted landed as error rows, not successes. Capped at what this
@@ -569,7 +568,7 @@ async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
 def read_output(out_uri: str) -> Iterator[tuple[str, dict]]:
     """Read a saturate output dir back as an (id, row) source, applying the
     CONTRACT §4.2 reader rule: the error-IS-NULL record wins; error-only ids
-    are skipped. Materializes the id->record map (fine to ~1M rows; document)."""
+    are skipped. Materializes the successful id->record map (fine to ~1M rows; document)."""
     import fsspec
 
     fs, root = fsspec.url_to_fs(out_uri)
@@ -582,8 +581,7 @@ def read_output(out_uri: str) -> Iterator[tuple[str, dict]]:
             _log(f"read_output: skipping unreadable {path}: {e}")
             continue
         for rec in rows:
-            if rec.get("error") is None or rec["id"] not in best:
+            if rec.get("error") is None:
                 best[rec["id"]] = rec
     for id_, rec in best.items():
-        if rec.get("error") is None:
-            yield id_, {k: v for k, v in rec.items() if k not in ("id", "error")}
+        yield id_, {k: v for k, v in rec.items() if k not in ("id", "error")}

@@ -136,7 +136,8 @@ def pump(
         `pump(prepare_ahead(rows, fn, executor=ProcessPoolExecutor()), ...)`.
     fail_fast: stop the run if the first N completed rows all fail (a wrong model name, a
         bad token, a parse bug), before any of them is stored, so a fixed re-run retries
-        them. 0 disables the check.
+        them. 0 disables the check. Off when retry_errors=True: that input is mostly rows that
+        already failed, and some rows fail for good.
 
     Warning: `shard=(rank, world)` labels output files and completion markers only. It does
     not select input rows — every shard given the same `rows` processes all of them. Pre-shard
@@ -190,7 +191,8 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
                               read_timeout=read_timeout,
                               signal_source=signal_source, on_tick=on_tick) as client:
         results = through(client, pending, to_request, parse, route=route,
-                          prepare_workers=prepare_workers, fail_fast=fail_fast)
+                          prepare_workers=prepare_workers,
+                          fail_fast=0 if retry_errors else fail_fast)
         await drain(results, sink, shard=shard, stats=stats)
         limiter = client.limiter
         dialect = client.dialect

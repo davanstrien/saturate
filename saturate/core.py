@@ -281,7 +281,11 @@ def adapt_parse(parse: Callable) -> Callable[[dict, dict], dict]:
     """parse(row, resp) with row passthrough; a parse with one REQUIRED positional parameter
     is parse(resp). Parameters with defaults do not count: `lambda body, model=M: ...` takes
     the response, not the row."""
-    params = [p for p in inspect.signature(parse).parameters.values()
+    try:
+        sig = inspect.signature(parse)
+    except (TypeError, ValueError):  # a callable with no introspectable signature: the documented form
+        return parse
+    params = [p for p in sig.parameters.values()
               if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) and p.default is p.empty]
     return parse if len(params) >= 2 else (lambda row, resp: parse(resp))
 
@@ -313,7 +317,8 @@ async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]],
     the first `fail_fast` rows all fail (a wrong model name, a bad token, a parse bug) the
     run raises FatalTransportError with the first error, and none of those rows is stored,
     so a plain re-run retries them. A stream that ends sooner yields its held errors. 0
-    disables the check.
+    disables the check. It cannot tell a config error from a dataset whose first
+    `fail_fast` rows are genuinely bad; the error message names the way out.
     """
     parse = adapt_parse(parse)
     queue: asyncio.Queue = asyncio.Queue()

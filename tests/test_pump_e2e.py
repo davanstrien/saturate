@@ -389,3 +389,13 @@ def test_a_parse_with_a_defaulted_second_parameter_takes_the_response(stub, tmp_
 
     stats = pump(rows(10), to_request, one_arg, endpoint=stub.endpoint, output=str(tmp_path), window=Fixed(2))
     assert (stats.rows_processed, stats.rows_failed) == (10, 0)
+
+
+def test_retry_errors_over_rows_that_still_fail_completes(stub, tmp_path):
+    """A retry run's input is mostly rows that failed before; some fail for good (a corrupt
+    image). The run must finish and re-store their errors, not stop on fail_fast."""
+    out = str(tmp_path)
+    pump(rows(50), to_request, bad_parse, endpoint=stub.endpoint, output=out, window=Fixed(4), fail_fast=0)
+    stats = pump(rows(50), to_request, bad_parse, endpoint=stub.endpoint, output=out, window=Fixed(4),
+                 retry_errors=True)
+    assert (stats.rows_processed, stats.rows_failed) == (0, 50)

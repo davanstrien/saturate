@@ -122,7 +122,9 @@ def pump(
     shard: (rank, world) label written into output file names and completion markers.
     flush_every: rows buffered before a parquet part is written. None (default) = 10 rows for
         a local output; a remote output (hf://, s3://...) flushes every 1000 rows or 60 s,
-        whichever comes first, because each flush blocks the run for a remote write.
+        whichever comes first, because each flush blocks the run for a remote write. The age
+        is checked as rows arrive. Rows are counted, not bytes: lower it if parse returns
+        large payloads.
     read_timeout: seconds to wait for a single response (long generations are legitimate).
     route: path appended to `endpoint` when to_request returns a plain dict.
     headers: extra HTTP headers merged over the default User-Agent.

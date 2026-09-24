@@ -111,7 +111,10 @@ class ParquetSink:
         local = "file" in protos
         # a flush writes two objects and blocks the event loop while it does: ~1 s per write on
         # hf:// capped a remote run at ~2.5 rows/s with 10-row flushes. Remote outputs flush by
-        # size or age instead, so a crash still loses at most about a minute of rows.
+        # size or age instead. The age is checked when a row is appended, so while rows keep
+        # arriving a crash loses at most about a minute of them; if the stream stalls, the
+        # buffer waits for the next row or the final flush. Rows are counted, not bytes: if
+        # parse returns large payloads (images), pass a smaller flush_every.
         self.flush_every = flush_every if flush_every is not None else (10 if local else 1000)
         self.flush_interval_s = flush_interval_s if flush_interval_s is not None else (
             None if local else 60.0)

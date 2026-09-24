@@ -3,7 +3,10 @@ on:
   push:
     tags: ["v*"]
 jobs:
+  test:
+    uses: ./.github/workflows/ci.yml  # a tag publishes only a commit that passes the full suite
   publish:
+    needs: test
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

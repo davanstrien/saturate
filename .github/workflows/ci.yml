@@ -1,5 +1,5 @@
 name: ci
-on: [push, pull_request]
+on: [push, pull_request, workflow_call]
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -18,3 +18,15 @@ jobs:
       - run: uv run --with blacken-docs blacken-docs -l 100 README.md CONTRACT.md docs/*.md && git diff --exit-code
       - run: uv run pytest tests/ -q
       - run: uv run --extra hf python -c "from huggingface_hub import HfFileSystem; HfFileSystem()"
+  lowest:
+    # the declared dependency floors: an unlocked sync only ever tests the newest releases
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.10"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.10
+      - run: uv sync --python 3.10 --resolution lowest-direct
+      - run: uv pip list | grep -iE "^(fsspec|httpx2|pyarrow|huggingface-hub|datasets) "
+      - run: uv run pytest tests/ -q

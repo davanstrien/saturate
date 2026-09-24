@@ -950,8 +950,10 @@ def test_buffer_flushes_by_age_before_it_fills(tmp_path, monkeypatch):
     assert len(list(tmp_path.glob("part-*.parquet"))) == 1
 
 
-def _flaky_open(sink, fail_times: int, match: str = "part-"):
-    """Make sink.fs.open raise on its first `fail_times` writes of paths containing `match`."""
+def _flaky_open(sink, fail_times: int, monkeypatch, match: str = "part-"):
+    """Make sink.fs.open raise on its first `fail_times` writes of paths containing `match`.
+    Patched through monkeypatch: fsspec caches filesystem instances, so a bare assignment
+    would leak the failures into every later test using the local filesystem."""
     real_open = sink.fs.open
     calls = {"failed": 0}
 
@@ -961,7 +963,7 @@ def _flaky_open(sink, fail_times: int, match: str = "part-"):
             raise OSError("503 Service Unavailable (transient)")
         return real_open(path, mode, *a, **k)
 
-    sink.fs.open = open_
+    monkeypatch.setattr(sink.fs, "open", open_)
     return calls
 
 
@@ -974,7 +976,7 @@ def test_a_transient_part_write_error_is_retried_under_the_same_name(tmp_path, m
 
     monkeypatch.setattr(sink_mod.time, "sleep", lambda s: None)
     sink = ParquetSink(str(tmp_path), flush_every=2)
-    calls = _flaky_open(sink, fail_times=2)
+    calls = _flaky_open(sink, fail_times=2, monkeypatch=monkeypatch)
     for i in range(4):
         sink.append({"id": str(i), "out": i, "error": None})
     assert calls["failed"] == 2
@@ -992,9 +994,80 @@ def test_a_persistent_part_write_error_still_raises_and_leaves_no_partial_part(t
 
     monkeypatch.setattr(sink_mod.time, "sleep", lambda s: None)
     sink = ParquetSink(str(tmp_path), flush_every=1)
-    calls = _flaky_open(sink, fail_times=99)
+    calls = _flaky_open(sink, fail_times=99, monkeypatch=monkeypatch)
     with pytest.raises(OSError, match="503"):
         sink.append({"id": "a", "error": None})
     assert calls["failed"] == 4  # the first try plus three retries
     assert list(tmp_path.glob("part-*.parquet")) == []
     assert sink.existing_ids() == set()  # nothing durable: the row is safely re-run
+
+
+
+def _pinned_with_null_leaf(tmp_path):
+    """A sink whose pin has meta: struct<a: null, b: int64> (a only ever seen as None)."""
+    from saturate.sink import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "r1", "meta": {"a": None, "b": 1}, "count": 1, "error": None})
+    assert pa.types.is_null(sink._pinned["meta"].field("a").type)
+    return sink
+
+
+def test_a_rejected_record_does_not_change_the_pin(tmp_path):
+    """probe() widened the null leaf from meta.a before a later field (count) failed; the
+    record was rejected but the widening stayed, so later valid rows were demoted."""
+    import pytest
+
+    sink = _pinned_with_null_leaf(tmp_path)
+    before = sink._pinned["meta"]
+    with pytest.raises(TypeError, match="count"):
+        sink.probe({"id": "r2", "meta": {"a": {"x": 5}, "b": 2}, "count": "not-a-number", "error": None})
+    assert sink._pinned["meta"] == before  # the rejected record left no trace
+    sink.probe({"id": "r3", "meta": {"a": 5, "b": 4}, "count": 4, "error": None})  # fits the real pin
+
+
+def test_a_row_demoted_at_flush_does_not_change_the_pin(tmp_path):
+    """The same, on the flush path: a buffered row that fails on a later column is demoted to
+    an error row, and must not leave its nested widening on the pin either."""
+    sink = _pinned_with_null_leaf(tmp_path)
+    before = sink._pinned["meta"]
+    sink.flush_every = 10
+    sink.append({"id": "r2", "meta": {"a": {"x": 5}, "b": 2}, "count": "not-a-number", "error": None})
+    sink.flush()
+    assert sink.rows_demoted == 1
+    assert sink._pinned["meta"] == before
+    sink.append({"id": "r3", "meta": {"a": 5, "b": 4}, "count": 4, "error": None})
+    sink.flush()
+    assert sink.rows_demoted == 1  # r3 stored, not demoted
+    assert "r3" in sink.existing_ids(retry_errors=True)
+
+
+def test_a_value_arrow_cannot_convert_is_an_error_row_not_a_crash(tmp_path):
+    """A uuid.UUID raised ArrowNotImplementedError, which is not a TypeError: it got past every
+    handler, aborted the run, and aborted every resume at the same row."""
+    import asyncio
+    import uuid
+
+    from saturate.core import Done
+    from saturate.sink import ParquetSink, drain
+
+    async def results():
+        yield Done("good", {}, {"v": "x"}, None, {})
+        yield Done("uuid", {}, {"v": uuid.uuid4()}, None, {})
+        yield Done("after", {}, {"v": "y"}, None, {})
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    stats = asyncio.run(drain(results(), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (2, 1)
+    assert sink.existing_ids(retry_errors=True) == {"good", "after"}
+
+
+def test_a_new_nested_key_error_names_the_way_out(tmp_path):
+    import pytest
+
+    from saturate.sink import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "a", "meta": {"lang": "en"}, "error": None})
+    with pytest.raises(TypeError, match="schema=.*JSON string"):
+        sink.probe({"id": "b", "meta": {"lang": "fr", "script": "Latn"}, "error": None})

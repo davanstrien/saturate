@@ -101,14 +101,26 @@ def _accepts(got: pa.DataType, pinned: pa.DataType) -> bool:
 
 
 class ParquetSink:
-    def __init__(self, out_uri: str, flush_every: int = 10, schema: pa.Schema | None = None,
-                 read_workers: int = 16):
+    def __init__(self, out_uri: str, flush_every: int | None = None, schema: pa.Schema | None = None,
+                 read_workers: int = 16, flush_interval_s: float | None = None):
         import fsspec
 
         self.fs, self.root = fsspec.url_to_fs(out_uri)
-        self.flush_every = flush_every
+        proto = getattr(self.fs, "protocol", ())  # fsspec: a str or a tuple of aliases — match exactly
+        protos = set(proto) if isinstance(proto, (tuple, list)) else {proto}
+        local = "file" in protos
+        # a flush writes two objects and blocks the event loop while it does: ~1 s per write on
+        # hf:// capped a remote run at ~2.5 rows/s with 10-row flushes. Remote outputs flush by
+        # size or age instead. The age is checked when a row is appended, so while rows keep
+        # arriving a crash loses at most about a minute of them; if the stream stalls, the
+        # buffer waits for the next row or the final flush. Rows are counted, not bytes: if
+        # parse returns large payloads (images), pass a smaller flush_every.
+        self.flush_every = flush_every if flush_every is not None else (10 if local else 1000)
+        self.flush_interval_s = flush_interval_s if flush_interval_s is not None else (
+            None if local else 60.0)
         self.read_workers = read_workers  # resume read concurrency; 1 = sequential
         self._buf: list[dict] = []
+        self._buf_since: float | None = None  # monotonic time of the oldest buffered row
         # declared mode (r5): an immutable schema every part is cast to — the only fully
         # schema-stable option for arbitrary parse output. Must carry contract-typed id + error.
         if schema is not None:
@@ -133,9 +145,6 @@ class ParquetSink:
         self._buf_schema: pa.Schema | None = None  # types of the rows buffered so far (dynamic mode)
         self._parts: list[str] | None = None  # part listing from existing_ids(), reused by the seed
         self._probe_cache: tuple[dict, pa.Schema] | None = None  # the record probe() last typed
-        proto = getattr(self.fs, "protocol", ())  # fsspec: a str or a tuple of aliases — match exactly
-        protos = set(proto) if isinstance(proto, (tuple, list)) else {proto}
-        local = "file" in protos
         # periodic telemetry cadence in controller ticks (~2 s each): about a minute locally;
         # on a remote store every rewrite is a commit, so about five minutes there
         self.telemetry_every_ticks = 30 if local else 150
@@ -333,8 +342,12 @@ class ParquetSink:
                 self._buf_schema = self._widen_buffer(got)
             except (TypeError, ValueError):
                 pass  # a direct append of a conflicting row: flush demotes it (the guarantee)
+        if not self._buf:
+            self._buf_since = time.monotonic()
         self._buf.append(record)
-        if len(self._buf) >= self.flush_every:
+        if len(self._buf) >= self.flush_every or (
+                self.flush_interval_s is not None
+                and time.monotonic() - self._buf_since >= self.flush_interval_s):
             self.flush()
 
     def flush(self) -> None:
@@ -380,24 +393,35 @@ class ParquetSink:
                 if f.name not in table.schema.names:
                     table = table.append_column(f, pa.nulls(len(table), type=f.type))
             table = table.select(self._schema.names).cast(self._schema)
-        try:
-            with self.fs.open(f"{self.root}/{name}", "wb") as f:
-                pq.write_table(table, f, compression="zstd")
-        except BaseException:  # never leave a partial part behind (it would cost a scan on every resume)
-            try:
-                self.fs.rm(f"{self.root}/{name}")
-            except Exception:
-                pass
-            raise
+        self._write(f"{self.root}/{name}", table)
         try:  # manifest second: a crash in between leaves an uncovered part -> scanned
             self.fs.makedirs(f"{self.root}/_manifest", exist_ok=True)
-            with self.fs.open(f"{self.root}/_manifest/ids-{name}", "wb") as f:
-                pq.write_table(table.select(["id", "error"]), f, compression="zstd")
+            self._write(f"{self.root}/_manifest/ids-{name}", table.select(["id", "error"]))
         except Exception as e:
             _log(f"manifest write failed (non-fatal, part covered by scan fallback): {e}")
         self.rows_written += len(self._buf)
         self._buf.clear()
         self._buf_schema = None
+        self._buf_since = None
+
+    def _write(self, path: str, table: pa.Table, attempts: int = 4) -> None:
+        """Write one parquet file. A remote write can fail transiently (a 503, a reset); failing
+        the run for it re-pays every request in flight, so I/O errors are retried under the
+        SAME name — a retry of a write that did land overwrites it, never duplicates it."""
+        for i in range(attempts):
+            try:
+                with self.fs.open(path, "wb") as f:
+                    pq.write_table(table, f, compression="zstd")
+                return
+            except BaseException as e:  # never leave a partial file behind (a scan on every resume)
+                try:
+                    self.fs.rm(path)
+                except Exception:
+                    pass
+                if not isinstance(e, Exception) or i + 1 == attempts:
+                    raise
+                _log(f"write failed, retrying ({i + 1}/{attempts - 1}): {path}: {e}")
+                time.sleep(2**i)
 
     @staticmethod
     def _batch(rows: list[dict]) -> pa.Table:
@@ -512,7 +536,7 @@ class FileSink:
         pass  # write-through
 
 
-def as_sink(output, flush_every: int = 10, schema: pa.Schema | None = None):
+def as_sink(output, flush_every: int | None = None, schema: pa.Schema | None = None):
     """A string or Path is a ParquetSink (the CONTRACT); anything with
     existing_ids/append/flush passes through."""
     if isinstance(output, (str, Path)):

@@ -102,7 +102,10 @@ class AdaptiveLimiter:
     def observe(self, ok: bool, tokens: int = 0, rate_limited: bool = False,
                 latency_s: float | None = None) -> None:
         """Outcome feedback for embedders driving their own transport. `latency_s` is the
-        duration of the successful attempt alone (no retries, backoff or breaker waits)."""
+        duration of the successful attempt alone (no retries, backoff or breaker waits).
+        Report `rate_limited` at most once per row, even across its retries: the controller
+        cuts on the share of rows under pressure, and per-attempt reports let one row that
+        always fails cut the window on every retry."""
         if ok:
             self.events["successes"] += 1
             self.tokens_total += tokens

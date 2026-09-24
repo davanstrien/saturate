@@ -66,8 +66,12 @@ class Auto:
        Nothing the old window does meanwhile is evidence: its completions do
        not re-arm the stall rule and its silence does not count towards one.
     2. cut:bp — backpressure (429/timeout/5xx) on at least `bp_frac` of this tick's
-       outcomes: halve. A share, not any event: one row that always fails (a 500 on one bad
-       image) is not overload, and at a large window it would otherwise halve it every tick.
+       outcomes (backpressure + successes, both counted per row): halve. A share, not any
+       event: one row that always fails (a 500 on one bad image) is not overload, and at a
+       large window it would otherwise halve it every tick. Overload keeps failing NEW rows,
+       so it keeps meeting the share; a fixed set of failing rows counts once and then only
+       retries. The share is of the tick's traffic, not of the window: with requests much
+       faster than a tick, set bp_frac lower (0 cuts on any event, the old behaviour).
     3. cut:kv — KV high with a low (or absent) prefix-hit rate: halve. High KV
        with a healthy hit rate is the cache doing its job.
     4. cut:stall — window full (inflight >= limit) and nothing completing for

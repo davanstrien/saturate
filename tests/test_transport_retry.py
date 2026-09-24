@@ -155,3 +155,26 @@ def test_redirect_is_poison_not_pressure():
     assert client.posts == 1
     assert events["backpressure"] == 0
     assert breaker.consecutive == 0
+
+
+def test_a_row_that_always_fails_counts_as_backpressure_once(monkeypatch):
+    """Every failed attempt used to add backpressure, so one row that always returns 500
+    (an image the model's processor rejects) cut the window on each of its retries and a 1%
+    poison rate held it at the floor. The row now counts once; the breaker sees every attempt."""
+    monkeypatch.setattr(transport, "RETRY_BUDGET_S", 30.0)
+
+    async def no_sleep(_):
+        return None
+
+    monkeypatch.setattr(transport.asyncio, "sleep", no_sleep)
+    fails = []
+    breaker = Breaker()
+    monkeypatch.setattr(breaker, "fail", lambda: fails.append(1))
+    events = {"backpressure": 0, "successes": 0}
+    client = _Client(_Resp(500))
+    body, err = asyncio.run(call_endpoint(
+        client, "http://x", make_json_request("/chat/completions", {}), events, breaker))
+    assert body is None and "500" in err
+    assert client.posts == 5  # it retried...
+    assert events["backpressure"] == 1  # ...but pressured the controller once
+    assert len(fails) == 5  # a dead server still trips the breaker attempt by attempt

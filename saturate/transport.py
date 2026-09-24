@@ -140,9 +140,19 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
     Budget semantics: the FIRST attempt gets the client's full read window (long generations
     are legitimate); retries get their timeout capped to the remaining budget. Time spent
     waiting on an open breaker deliberately does NOT consume row budgets — a paused pump
-    that recovers must resume its rows, not fail them all."""
+    that recovers must resume its rows, not fail them all.
+    Backpressure counts once per row, however many of its attempts fail: a row that always
+    fails (a 500 on one bad image) would otherwise cut the window on every retry and hold it
+    at the floor. Many rows failing still counts many times; the breaker sees every attempt."""
     url = f"{base.rstrip('/')}{req.route}"
     delay, t0 = 1.0, time.monotonic()
+    pressured = False
+
+    def pressure() -> None:
+        nonlocal pressured
+        if not pressured:
+            events["backpressure"] += 1
+            pressured = True
 
     def left() -> float:
         return RETRY_BUDGET_S - (time.monotonic() - t0)
@@ -169,7 +179,7 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
             else:
                 r = await client.post(url, json=req.json)
         except (httpx.TimeoutException, httpx.TransportError, asyncio.TimeoutError) as e:
-            events["backpressure"] += 1
+            pressure()
             breaker.fail()
             last_err = f"transport: {type(e).__name__}: {e}"
             if attempt == 4 or req.files is not None or not RETRY_ACTIVE:
@@ -186,13 +196,13 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
         retry_after = r.headers.get("retry-after")
         if r.status_code == 429:
             if retry_after is None:
-                events["backpressure"] += 1  # saturation-shaped; a paced quota is not
+                pressure()  # saturation-shaped; a paced quota is not
         elif 300 <= r.status_code < 400:  # redirects are not followed: a config error, not pressure
             return None, f"http {r.status_code}: endpoint redirects — use the final URL"
         elif 400 <= r.status_code < 500:
             return None, f"http {r.status_code}: {r.text[:300]}"  # poison, no retry, no breaker
         else:
-            events["backpressure"] += 1  # intermittent 5xx IS server pressure
+            pressure()  # intermittent 5xx IS server pressure
             breaker.fail()
         last_err = f"http {r.status_code} after retries"
         if attempt == 4 or req.files is not None or not RETRY_ACTIVE:

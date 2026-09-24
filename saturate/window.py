@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 
 
 class Window:
@@ -11,7 +10,6 @@ class Window:
         self.limit = limit
         self.inflight = 0
         self._cond = asyncio.Condition()
-        self.decisions: list[tuple[float, int]] = [(time.time(), limit)]
 
     async def acquire(self) -> None:
         async with self._cond:
@@ -29,5 +27,4 @@ class Window:
             return
         async with self._cond:
             self.limit = n
-            self.decisions.append((time.time(), n))
             self._cond.notify_all()

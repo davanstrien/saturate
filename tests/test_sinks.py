@@ -41,8 +41,13 @@ def test_read_output_healing_rule(tmp_path):
         {"id": "z", "out": "fine", "error": None},
     ]
     pq.write_table(pa.Table.from_pylist(rows), tmp_path / "part-1-abc.parquet")
+    later = [
+        {"id": "x", "out": None, "error": "later failure"},  # never replaces a success
+        {"id": "z", "out": "latest", "error": None},  # latest success still wins
+    ]
+    pq.write_table(pa.Table.from_pylist(later), tmp_path / "part-2-abc.parquet")
     got = dict(read_output(str(tmp_path)))
-    assert got == {"x": {"out": "good"}, "z": {"out": "fine"}}
+    assert got == {"x": {"out": "good"}, "z": {"out": "latest"}}
 
 
 def test_mixed_success_error_parts_union(tmp_path):
@@ -126,16 +131,19 @@ def test_declared_type_mismatch_becomes_error_row(tmp_path):
     from saturate.sink import drain
 
     schema = pa.schema([("id", pa.string()), ("error", pa.string()), ("score", pa.float64())])
+    usage = {"prompt_tokens": 2, "completion_tokens": 3}
 
     async def results():
-        yield Done("bad-type", {}, {"score": "not-a-number"}, None, {})
-        yield Done("bad-overflow", {}, {"score": 10**1000}, None, {})
-        yield Done("bad-extra", {}, {"score": 1.0, "surprise": 1}, None, {})
-        yield Done("good", {}, {"score": 1.5}, None, {})
+        yield Done("bad-type", {}, {"score": "not-a-number"}, None, usage)
+        yield Done("bad-overflow", {}, {"score": 10**1000}, None, usage)
+        yield Done("bad-extra", {}, {"score": 1.0, "surprise": 1}, None, usage)
+        yield Done("good", {}, {"score": 1.5}, None, usage)
+        yield Done("bad-request", {}, None, "http 400", {})
 
     sink = ParquetSink(str(tmp_path), flush_every=1, schema=schema)
     stats = asyncio.run(drain(results(), sink))
-    assert (stats.rows_processed, stats.rows_failed) == (1, 3)
+    assert (stats.rows_processed, stats.rows_failed) == (1, 4)
+    assert (stats.prompt_tokens, stats.completion_tokens) == (8, 12)
     assert sink.existing_ids(retry_errors=True) == {"good"}  # bad rows durable + healable
 
 

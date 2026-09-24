@@ -65,7 +65,9 @@ class Auto:
        flight predates the reduction, never longer than the stall patience.
        Nothing the old window does meanwhile is evidence: its completions do
        not re-arm the stall rule and its silence does not count towards one.
-    2. cut:bp — backpressure (429/timeout) this tick: halve.
+    2. cut:bp — backpressure (429/timeout/5xx) on at least `bp_frac` of this tick's
+       outcomes: halve. A share, not any event: one row that always fails (a 500 on one bad
+       image) is not overload, and at a large window it would otherwise halve it every tick.
     3. cut:kv — KV high with a low (or absent) prefix-hit rate: halve. High KV
        with a healthy hit rate is the cache doing its job.
     4. cut:stall — window full (inflight >= limit) and nothing completing for
@@ -108,15 +110,19 @@ class Auto:
 
     def __init__(self, target_waiting: int = 8, initial: int = 16, min_limit: int = 2,
                  max_limit: int = 512, step: int = 8, kv_hi: float = 0.9,
-                 hits_lo: float = 0.5, improve: float = 1.05, stall_ticks: int = 3):
+                 hits_lo: float = 0.5, improve: float = 1.05, stall_ticks: int = 3,
+                 bp_frac: float = 0.05):
         if min_limit < 1 or max_limit < min_limit or step < 1:
             raise ValueError("Auto requires 1 <= min_limit <= max_limit and step >= 1")  # 0 deadlocks
         if stall_ticks < 1:
             raise ValueError("Auto requires stall_ticks >= 1")
+        if not 0.0 <= bp_frac <= 1.0:
+            raise ValueError("Auto requires 0 <= bp_frac <= 1")
         self.lo, self.hi = max(1, target_waiting // 4), target_waiting * 2
         self.min, self.max, self.step = min_limit, max_limit, step
         self.initial = self._clamp(initial)
         self.kv_hi, self.hits_lo, self.improve, self.stall_ticks = kv_hi, hits_lo, improve, stall_ticks
+        self.bp_frac = bp_frac
         self.last_reason = "hold"
         self._slow_start = True
         self._acked_ever = False  # queue gauges mean nothing before the first completion ever
@@ -242,7 +248,7 @@ class Auto:
         self._hold_s = 0.0  # drained, or a wedged request that must not pin the window past the patience
 
     def _backpressure(self, obs: Obs, limit: int):
-        if obs.backpressure:
+        if obs.backpressure and obs.backpressure >= self.bp_frac * (obs.backpressure + obs.successes):
             return self._cut(obs, limit, "cut:bp")
 
     def _kv_pressure(self, obs: Obs, limit: int):

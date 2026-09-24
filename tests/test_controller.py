@@ -180,7 +180,7 @@ def test_cut_rescales_throughput_baseline():
     proportionally smaller baseline, so recovery is not read as a plateau."""
     ctrl = Auto(target_waiting=8, initial=64, step=STEP)
     limit = warm(ctrl, 64)  # baseline 6400 tok/s at 64
-    limit = ctrl.decide(healthy(limit, backpressure=1), limit)
+    limit = ctrl.decide(healthy(limit, backpressure=64), limit)  # a real burst: 20% of outcomes
     assert limit == 32
     traj, reasons = drive(ctrl, limit, [healthy(32, tok_s=3500.0)] * 6)  # 3500 > 3200 * 1.05
     assert "grow" in reasons and max(traj) > 32, (traj, reasons)
@@ -399,3 +399,27 @@ def test_decide_reports_a_reason_for_every_tick():
         assert ctrl.last_reason in {"hold", "grow", "probe", "revert", "cut:bp", "cut:kv", "cut:stall",
                                     "cut:queue", "hold:input_bound", "hold:cooldown", "hold:plateau",
                                     "hold:ack", "hold:floor", "hold:ceiling"}
+
+
+def test_backpressure_cuts_on_a_share_of_outcomes_not_on_any_event():
+    """One row that always 500s is one backpressure event among hundreds of successes at a
+    large window: not overload. It used to halve the window every tick it appeared."""
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    limit = warm(ctrl, 64)
+    assert ctrl.decide(healthy(limit, backpressure=1, successes=256), limit) == limit
+    assert ctrl.last_reason != "cut:bp"
+    assert ctrl.decide(healthy(limit, backpressure=14, successes=256), limit) == limit // 2  # 5.2%
+    assert ctrl.last_reason == "cut:bp"
+
+
+def test_backpressure_with_no_successes_always_cuts():
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    limit = warm(ctrl, 64)
+    assert ctrl.decide(healthy(limit, backpressure=1, successes=0), limit) == limit // 2
+    assert ctrl.last_reason == "cut:bp"
+
+
+def test_bp_frac_zero_restores_cut_on_any_event():
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP, bp_frac=0.0)
+    limit = warm(ctrl, 64)
+    assert ctrl.decide(healthy(limit, backpressure=1, successes=256), limit) == limit // 2

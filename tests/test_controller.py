@@ -443,3 +443,19 @@ def test_a_fixed_set_of_failing_rows_cuts_once_but_sustained_failures_keep_cutti
     overload = healthy(128, backpressure=16, successes=250)
     traj, reasons = run(0.05, overload, [overload] * 11)
     assert reasons.count("cut:bp") >= 2 and min(traj) < 64, (traj, reasons)
+
+
+@pytest.mark.parametrize("cap", [32, 64, 256])
+def test_blind_growth_reaches_the_engine_capacity(cap):
+    """No gauges: growth is judged on throughput alone. Creeping +1 could never show the
+    required 5% gain past a window of ~20, so every blind run stopped near 21. Growing by an
+    eighth reaches capacity and holds within one step of it."""
+    ctrl, limit, hist = Auto(initial=16, max_limit=512), 16, [16]
+    for _ in range(400):
+        served = min(hist[max(0, len(hist) - 2)], cap)  # throughput lags the window by a tick
+        obs = dict(waiting=None, running=None, inflight=limit, backpressure=0, successes=served,
+                   input_bound=False, kv=None, hits=None, tok_s=served * 100.0)
+        limit = ctrl.decide(obs, limit)
+        hist.append(limit)
+    assert cap <= limit <= cap + cap // 8 + 1, hist[-20:]
+    assert hist[-100:] == [limit] * 100  # settled, not oscillating

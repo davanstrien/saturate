@@ -180,7 +180,7 @@ def test_cut_rescales_throughput_baseline():
     proportionally smaller baseline, so recovery is not read as a plateau."""
     ctrl = Auto(target_waiting=8, initial=64, step=STEP)
     limit = warm(ctrl, 64)  # baseline 6400 tok/s at 64
-    limit = ctrl.decide(healthy(limit, backpressure=1), limit)
+    limit = ctrl.decide(healthy(limit, backpressure=64), limit)  # a real burst: 20% of outcomes
     assert limit == 32
     traj, reasons = drive(ctrl, limit, [healthy(32, tok_s=3500.0)] * 6)  # 3500 > 3200 * 1.05
     assert "grow" in reasons and max(traj) > 32, (traj, reasons)
@@ -399,3 +399,47 @@ def test_decide_reports_a_reason_for_every_tick():
         assert ctrl.last_reason in {"hold", "grow", "probe", "revert", "cut:bp", "cut:kv", "cut:stall",
                                     "cut:queue", "hold:input_bound", "hold:cooldown", "hold:plateau",
                                     "hold:ack", "hold:floor", "hold:ceiling"}
+
+
+def test_backpressure_cuts_on_a_share_of_outcomes_not_on_any_event():
+    """One row that always 500s is one backpressure event among hundreds of successes at a
+    large window: not overload. It used to halve the window every tick it appeared."""
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    limit = warm(ctrl, 64)
+    assert ctrl.decide(healthy(limit, backpressure=1, successes=256), limit) == limit
+    assert ctrl.last_reason != "cut:bp"
+    assert ctrl.decide(healthy(limit, backpressure=14, successes=256), limit) == limit // 2  # 5.2%
+    assert ctrl.last_reason == "cut:bp"
+
+
+def test_backpressure_with_no_successes_always_cuts():
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    limit = warm(ctrl, 64)
+    assert ctrl.decide(healthy(limit, backpressure=1, successes=0), limit) == limit // 2
+    assert ctrl.last_reason == "cut:bp"
+
+
+def test_bp_frac_zero_restores_cut_on_any_event():
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP, bp_frac=0.0)
+    limit = warm(ctrl, 64)
+    assert ctrl.decide(healthy(limit, backpressure=1, successes=256), limit) == limit // 2
+
+
+def test_a_fixed_set_of_failing_rows_cuts_once_but_sustained_failures_keep_cutting():
+    """Across ticks. Rows that fail and then only retry count once (poison-shaped): 13 of 269
+    outcomes is under bp_frac, so no cut; with a lower bp_frac they cut once, not again on
+    every retry. Failures on 6% of NEW rows every tick (overload-shaped) keep cutting."""
+    def run(bp_frac, first, rest):
+        ctrl = Auto(target_waiting=8, initial=128, max_limit=128, step=STEP, bp_frac=bp_frac)
+        limit = warm(ctrl, 128)
+        return drive(ctrl, limit, [first] + rest)
+
+    stuck, clean = healthy(128, backpressure=13, successes=256), [healthy(128)] * 8
+    _, reasons = run(0.05, stuck, clean)
+    assert "cut:bp" not in reasons, reasons
+    _, reasons = run(0.04, stuck, clean)
+    assert reasons.count("cut:bp") == 1, reasons
+
+    overload = healthy(128, backpressure=16, successes=250)
+    traj, reasons = run(0.05, overload, [overload] * 11)
+    assert reasons.count("cut:bp") >= 2 and min(traj) < 64, (traj, reasons)

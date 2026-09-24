@@ -913,3 +913,88 @@ def test_salvage_demotes_a_value_that_does_not_fit_the_widened_type(tmp_path):
     sink.flush()
     assert sink.rows_demoted == 1 and sink.existing_ids() == {"big", "half"}
     assert sink.existing_ids(retry_errors=True) == {"half"}  # widened to double: 2**60 does not fit
+
+
+def test_flush_defaults_are_small_locally_and_large_on_remote_stores(tmp_path):
+    """A flush blocks the run for two writes; on a remote store that is ~1 s each, so the
+    local 10-row default capped hf:// runs at a few rows/s. Remote outputs flush by size or age."""
+    from saturate.sink import ParquetSink
+
+    local = ParquetSink(str(tmp_path))
+    assert (local.flush_every, local.flush_interval_s) == (10, None)
+    remote = ParquetSink(f"memory://{tmp_path.name}/remote")  # any non-local fsspec store
+    assert (remote.flush_every, remote.flush_interval_s) == (1000, 60.0)
+    explicit = ParquetSink(f"memory://{tmp_path.name}/explicit", flush_every=5, flush_interval_s=2.0)
+    assert (explicit.flush_every, explicit.flush_interval_s) == (5, 2.0)
+
+
+def test_buffer_flushes_by_age_before_it_fills(tmp_path, monkeypatch):
+    """A slow remote run must not hold rows in memory for hours waiting for 1000 of them:
+    the append that finds the oldest buffered row older than flush_interval_s flushes."""
+    import saturate.sink as sink_mod
+    from saturate.sink import ParquetSink
+
+    now = [100.0]
+    monkeypatch.setattr(sink_mod.time, "monotonic", lambda: now[0])
+    sink = ParquetSink(str(tmp_path), flush_every=1000, flush_interval_s=60.0)
+    sink.append({"id": "a", "error": None})
+    now[0] += 59.0
+    sink.append({"id": "b", "error": None})
+    assert list(tmp_path.glob("part-*.parquet")) == []  # neither full nor old yet
+    now[0] += 1.0
+    sink.append({"id": "c", "error": None})  # the oldest row is now 60 s old
+    parts = list(tmp_path.glob("part-*.parquet"))
+    assert len(parts) == 1 and pq.read_table(parts[0]).num_rows == 3
+    now[0] += 59.0
+    sink.append({"id": "d", "error": None})  # the clock restarts at the next buffered row
+    assert len(list(tmp_path.glob("part-*.parquet"))) == 1
+
+
+def _flaky_open(sink, fail_times: int, match: str = "part-"):
+    """Make sink.fs.open raise on its first `fail_times` writes of paths containing `match`."""
+    real_open = sink.fs.open
+    calls = {"failed": 0}
+
+    def open_(path, mode="rb", *a, **k):
+        if "w" in mode and match in path.rsplit("/", 1)[-1] and calls["failed"] < fail_times:
+            calls["failed"] += 1
+            raise OSError("503 Service Unavailable (transient)")
+        return real_open(path, mode, *a, **k)
+
+    sink.fs.open = open_
+    return calls
+
+
+def test_a_transient_part_write_error_is_retried_under_the_same_name(tmp_path, monkeypatch):
+    """One 503 on a part upload used to abort the whole run (re-paying every request in
+    flight). Retrying under the same name also means a write that landed despite the error
+    is overwritten, not duplicated."""
+    import saturate.sink as sink_mod
+    from saturate.sink import ParquetSink
+
+    monkeypatch.setattr(sink_mod.time, "sleep", lambda s: None)
+    sink = ParquetSink(str(tmp_path), flush_every=2)
+    calls = _flaky_open(sink, fail_times=2)
+    for i in range(4):
+        sink.append({"id": str(i), "out": i, "error": None})
+    assert calls["failed"] == 2
+    parts = sorted(tmp_path.glob("part-*.parquet"))
+    assert len(parts) == 2  # one part per flush — the retries left no extra files
+    assert sink.existing_ids() == {"0", "1", "2", "3"}
+    assert dict(read_output(str(tmp_path))) == {str(i): {"out": i} for i in range(4)}
+
+
+def test_a_persistent_part_write_error_still_raises_and_leaves_no_partial_part(tmp_path, monkeypatch):
+    import pytest
+
+    import saturate.sink as sink_mod
+    from saturate.sink import ParquetSink
+
+    monkeypatch.setattr(sink_mod.time, "sleep", lambda s: None)
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    calls = _flaky_open(sink, fail_times=99)
+    with pytest.raises(OSError, match="503"):
+        sink.append({"id": "a", "error": None})
+    assert calls["failed"] == 4  # the first try plus three retries
+    assert list(tmp_path.glob("part-*.parquet")) == []
+    assert sink.existing_ids() == set()  # nothing durable: the row is safely re-run

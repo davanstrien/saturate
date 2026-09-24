@@ -100,7 +100,7 @@ def pump(
     output,
     window: Fixed | Auto | None = None,
     shard: tuple[int, int] = (0, 1),
-    flush_every: int = 10,
+    flush_every: int | None = None,
     read_timeout: float = 1800.0,
     route: str = "/chat/completions",
     headers: dict | None = None,
@@ -120,7 +120,9 @@ def pump(
     output: output directory or URI (local, hf://, s3://...) or a sink object.
     window: Auto (default) adapts concurrency to the engine; Fixed(n) pins it.
     shard: (rank, world) label written into output file names and completion markers.
-    flush_every: rows buffered before a parquet part is written.
+    flush_every: rows buffered before a parquet part is written. None (default) = 10 rows for
+        a local output; a remote output (hf://, s3://...) flushes every 1000 rows or 60 s,
+        whichever comes first, because each flush blocks the run for a remote write.
     read_timeout: seconds to wait for a single response (long generations are legitimate).
     route: path appended to `endpoint` when to_request returns a plain dict.
     headers: extra HTTP headers merged over the default User-Agent.

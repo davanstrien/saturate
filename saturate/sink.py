@@ -306,7 +306,8 @@ class ParquetSink:
         """Widening the pin (a struct field first seen as None, typed later) happens field by
         field while a record or batch is checked; if a later field then fails, the record is
         rejected, and the widening it caused must be undone with it — or a row that was never
-        stored changes what every later row may hold."""
+        stored changes what every later row may hold. `_accepted` needs no rollback: it only
+        caches verdicts for pins with no untyped leaf, and those never widen."""
         saved = (dict(self._pinned), self._schema)
         try:
             yield
@@ -370,11 +371,12 @@ class ParquetSink:
     def append(self, record: dict) -> None:
         if self._declared is None:  # track the buffer's types so probe() can see the whole batch
             cached = self._probe_cache
-            got = cached[1] if cached and cached[0] is record else pa.schema(list(pa.array([record]).type))
             try:
+                got = (cached[1] if cached and cached[0] is record
+                       else pa.schema(list(pa.array([record]).type)))
                 self._buf_schema = self._widen_buffer(got)
-            except (TypeError, ValueError):
-                pass  # a direct append of a conflicting row: flush demotes it (the guarantee)
+            except UNSTORABLE:
+                pass  # a direct append of a row that does not fit: flush demotes it (the guarantee)
         if not self._buf:
             self._buf_since = time.monotonic()
         self._buf.append(record)

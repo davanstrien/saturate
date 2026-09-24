@@ -1071,3 +1071,30 @@ def test_a_new_nested_key_error_names_the_way_out(tmp_path):
     sink.append({"id": "a", "meta": {"lang": "en"}, "error": None})
     with pytest.raises(TypeError, match="schema=.*JSON string"):
         sink.probe({"id": "b", "meta": {"lang": "fr", "script": "Latn"}, "error": None})
+
+
+
+def test_salvage_keeps_an_accepted_widening_and_undoes_only_the_rejected_row(tmp_path):
+    """One batch: r2 legitimately types meta.a (the pin widens and stays), r3 would widen it
+    differently and fails on another column (demoted, its widening undone)."""
+    sink = _pinned_with_null_leaf(tmp_path)
+    sink.flush_every = 10
+    sink.append({"id": "r2", "meta": {"a": "en", "b": 2}, "count": 2, "error": None})
+    sink.append({"id": "r3", "meta": {"a": {"x": 5}, "b": 3}, "count": "not-a-number", "error": None})
+    sink.flush()
+    assert sink.rows_demoted == 1
+    assert pa.types.is_string(sink._pinned["meta"].field("a").type)  # r2's widening kept
+    assert sink.existing_ids(retry_errors=True) == {"r1", "r2"}
+
+
+def test_a_direct_append_of_an_unconvertible_value_is_demoted_at_flush(tmp_path):
+    """append() without probe(): a value Arrow cannot convert must not crash the append."""
+    import uuid
+
+    from saturate.sink import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=2)
+    sink.append({"id": "a", "v": "x", "error": None})
+    sink.append({"id": "b", "v": uuid.uuid4(), "error": None})
+    assert sink.rows_demoted == 1
+    assert sink.existing_ids(retry_errors=True) == {"a"}

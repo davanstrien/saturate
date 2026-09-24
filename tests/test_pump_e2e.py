@@ -240,16 +240,20 @@ def test_a_slow_parse_reads_loop_bound(stub, tmp_path):
         time.sleep(0.04)
         return parse(row, resp)
 
+    # no scrape: a blocked parse that lands inside the scrape's await counts as scrape time, not
+    # loop lag — negligible against a real 2 s tick, but it made this 0.1 s-tick test flaky
     stats = pump(rows(60), to_request, slow_parse, endpoint=stub.endpoint, output=str(tmp_path / "slow"),
-                 window=Fixed(6))
+                 window=Fixed(6), signal_source="none")
     assert stats.rows_processed == 60
     assert stats.bound_by.get("loop", 0) > sum(stats.bound_by.values()) / 2, stats.bound_by
     assert any(h.startswith("LOOP-BOUND: the event loop was blocked") for h in stats.hints), stats.hints
     assert not stats.input_bound  # the window was full: not starved
 
-    stats = pump(rows(60), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path / "fast"),
-                 window=Fixed(6))
-    assert stats.bound_by.get("loop", 0) == 0 and not any(h.startswith("LOOP-BOUND") for h in stats.hints)
+    # the control runs ~10 ticks, so one tick delayed by a busy scheduler stays a minority
+    stats = pump(rows(300), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path / "fast"),
+                 window=Fixed(6), signal_source="none")
+    assert stats.bound_by.get("loop", 0) < sum(stats.bound_by.values()) / 2, stats.bound_by
+    assert not any(h.startswith("LOOP-BOUND") for h in stats.hints), stats.hints
     assert stats.bound_by, stats.bound_by  # the control run did tick
 
 

@@ -277,9 +277,23 @@ class AdaptiveClient:
         return body, err
 
 
+def adapt_parse(parse: Callable) -> Callable[[dict, dict], dict]:
+    """parse(row, resp) with row passthrough; a parse with one REQUIRED positional parameter
+    is parse(resp). Parameters with defaults do not count: `lambda body, model=M: ...` takes
+    the response, not the row."""
+    try:
+        sig = inspect.signature(parse)
+    except (TypeError, ValueError):  # a callable with no introspectable signature: the documented form
+        return parse
+    params = [p for p in sig.parameters.values()
+              if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) and p.default is p.empty]
+    return parse if len(params) >= 2 else (lambda row, resp: parse(resp))
+
+
 async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]],
-                  to_request: Callable, parse: Callable[[dict, dict], dict],
-                  route: str = "/chat/completions", prepare_workers: int = 0) -> AsyncIterator[Done]:
+                  to_request: Callable, parse: Callable,
+                  route: str = "/chat/completions", prepare_workers: int = 0,
+                  fail_fast: int = 32) -> AsyncIterator[Done]:
     """(id, row) stream -> Done stream, in completion order, adaptively concurrent.
 
     Row PAYLOADS never materialize beyond two bounds: request bodies in flight are
@@ -298,7 +312,15 @@ async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]],
     the pump aborts cannot be interrupted: the pool is shut down without waiting,
     but the interpreter waits for those calls at exit — so `to_request` must bound
     its own I/O with timeouts.
+
+    `fail_fast`: until the first row succeeds, error results are held back, not yielded. If
+    the first `fail_fast` rows all fail (a wrong model name, a bad token, a parse bug) the
+    run raises FatalTransportError with the first error, and none of those rows is stored,
+    so a plain re-run retries them. A stream that ends sooner yields its held errors. 0
+    disables the check. It cannot tell a config error from a dataset whose first
+    `fail_fast` rows are genuinely bad; the error message names the way out.
     """
+    parse = adapt_parse(parse)
     queue: asyncio.Queue = asyncio.Queue()
     tasks: set[asyncio.Task] = set()  # strong refs: asyncio only weak-refs tasks
     fed = 0
@@ -374,6 +396,8 @@ async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]],
 
     feeder = asyncio.create_task(feed())
     served = 0
+    ok_seen = fail_fast <= 0
+    held: list[Done] = []  # error results before the first success (fail_fast)
     try:
         while not (feeding_done.is_set() and served >= fed):
             try:
@@ -383,7 +407,22 @@ async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]],
             served += 1
             if isinstance(item, BaseException):
                 raise item  # fatal transport: abort the pump, no durable error rows
+            if not ok_seen:
+                if item.error is not None:
+                    held.append(item)
+                    if len(held) >= fail_fast:
+                        raise FatalTransportError(
+                            f"the first {fail_fast} rows all failed, so the run stopped without "
+                            f"storing them. First error: {held[0].error}. Fix the cause and re-run "
+                            "(these rows will be retried), or pass fail_fast=0 to disable this check")
+                    continue
+                ok_seen = True
+                for h in held:
+                    yield h
+                held.clear()
             yield item
+        for h in held:  # the stream ended before fail_fast rows: they are this run's results
+            yield h
         if feed_error:
             raise feed_error[0]
     finally:

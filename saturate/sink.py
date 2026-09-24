@@ -236,6 +236,7 @@ class ParquetSink:
             failed |= f
         if self._declared is None and not self._seeded:
             self._seed_schema()  # now, before any request is in flight, not at the first probe
+        self.error_only_ids = failed - done  # skipped unless retry_errors: resume says how many
         return done if retry_errors else done | failed
 
     def _pin(self, schema: pa.Schema) -> None:

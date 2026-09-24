@@ -63,13 +63,16 @@ def skip_done(rows: Iterable[tuple[str, dict]], done, retry_errors: bool = False
 
     `done` may be: a set of ids, a sink/object with existing_ids(), or an
     output-dir string (resolved via the CONTRACT ParquetSink). Counts land on
-    `stats` when given (rows_total / rows_done_prior / rows_deduped)."""
+    `stats` when given (rows_total / rows_done_prior / rows_errored_prior / rows_deduped);
+    rows_errored_prior counts the skipped rows whose only record is an error."""
     if isinstance(done, str):
         from saturate.sink import ParquetSink
 
-        done = ParquetSink(done).existing_ids(retry_errors=retry_errors)
-    elif hasattr(done, "existing_ids"):
-        done = done.existing_ids(retry_errors=retry_errors)
+        done = ParquetSink(done)
+    error_only: set[str] = set()
+    if hasattr(done, "existing_ids"):
+        sink, done = done, done.existing_ids(retry_errors=retry_errors)
+        error_only = getattr(sink, "error_only_ids", set()) if not retry_errors else set()
     seen: set[str] = set()
     for id_, row in rows:
         if stats is not None:
@@ -77,6 +80,8 @@ def skip_done(rows: Iterable[tuple[str, dict]], done, retry_errors: bool = False
         if id_ in done:
             if stats is not None:
                 stats.rows_done_prior += 1
+                if id_ in error_only:
+                    stats.rows_errored_prior += 1
             continue
         if id_ in seen:
             if stats is not None:

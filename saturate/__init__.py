@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import importlib.metadata
-import inspect
 import json
 import os
 import sys
@@ -57,17 +56,11 @@ def existing_ids(out_uri: str, retry_errors: bool = False) -> set[str]:
     return ParquetSink(out_uri).existing_ids(retry_errors=retry_errors)
 
 
-def _adapt_parse(parse: Callable) -> Callable[[dict, dict], dict]:
-    """parse(row, resp) with row passthrough; single-arg parse(resp) accepted."""
-    params = [p for p in inspect.signature(parse).parameters.values()
-              if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
-    return parse if len(params) >= 2 else (lambda row, resp: parse(resp))
-
-
 @dataclasses.dataclass
 class Stats:
     rows_total: int = 0
     rows_done_prior: int = 0
+    rows_errored_prior: int = 0  # of rows_done_prior: skipped rows whose only record is an error
     rows_processed: int = 0
     rows_failed: int = 0
     rows_deduped: int = 0
@@ -110,6 +103,7 @@ def pump(
     signal_source: str = "auto",  # "auto" (scrape, blind fallback) | "none"
     schema=None,  # pa.Schema: declared immutable output schema (CONTRACT §8) — else dynamic/sparse
     prepare_workers: int = 0,
+    fail_fast: int = 32,
 ) -> Stats:
     """Run every row through the endpoint and land the results; safe to re-run (resumes).
 
@@ -140,6 +134,10 @@ def pump(
         if the work releases the GIL (PIL, numpy, IO); `parse` always stays on the loop.
         For pure-Python CPU work, or to own the pool, prepare rows before the pump instead:
         `pump(prepare_ahead(rows, fn, executor=ProcessPoolExecutor()), ...)`.
+    fail_fast: stop the run if the first N completed rows all fail (a wrong model name, a
+        bad token, a parse bug), before any of them is stored, so a fixed re-run retries
+        them. 0 disables the check. Off when retry_errors=True: that input is mostly rows that
+        already failed, and some rows fail for good.
 
     Warning: `shard=(rank, world)` labels output files and completion markers only. It does
     not select input rows — every shard given the same `rows` processes all of them. Pre-shard
@@ -147,12 +145,13 @@ def pump(
     """
     return asyncio.run(_pump(rows, to_request, parse, endpoint, output, window, shard,
                              flush_every, read_timeout, route, headers, retry_errors,
-                             id_key, id_fn, signal_source, schema, prepare_workers))
+                             id_key, id_fn, signal_source, schema, prepare_workers,
+                             fail_fast))
 
 
 async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_every,
                 read_timeout, route, extra_headers, retry_errors, id_key, id_fn,
-                signal_source, schema=None, prepare_workers=0) -> Stats:
+                signal_source, schema=None, prepare_workers=0, fail_fast=32) -> Stats:
     stats = Stats()
     if shard[1] > 1:
         _log(f"shard={tuple(shard)}: labels output only — input must be pre-sharded with "
@@ -191,8 +190,9 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
     async with AdaptiveClient(endpoint, window=window, headers=hdrs,
                               read_timeout=read_timeout,
                               signal_source=signal_source, on_tick=on_tick) as client:
-        results = through(client, pending, to_request, _adapt_parse(parse), route=route,
-                          prepare_workers=prepare_workers)
+        results = through(client, pending, to_request, parse, route=route,
+                          prepare_workers=prepare_workers,
+                          fail_fast=0 if retry_errors else fail_fast)
         await drain(results, sink, shard=shard, stats=stats)
         limiter = client.limiter
         dialect = client.dialect
@@ -209,6 +209,10 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
         await write_telemetry(lines)  # final: the complete trajectory
     stats.hints = advise(limiter.ticks, dialect, stats.final_limit, CEILING_FLAG)
     stats.hints += advise_input(limiter.ticks, prepare_workers)
+    if stats.rows_errored_prior:
+        stats.hints.append(f"RETRY-ERRORS: {stats.rows_errored_prior} rows were skipped because their "
+                           "only record is an error; once the cause is fixed, re-run with "
+                           "retry_errors=True to retry them")
     for h in stats.hints:
         _log(f"advisor: {h}")
     if hasattr(sink, "write_stats"):  # console-facing exact summary (CONTRACT §5)
@@ -218,6 +222,9 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
             _log(f"stats write failed (non-fatal): {e}")
     if hasattr(sink, "write_marker"):  # last: the marker certifies stats/telemetry landed
         sink.write_marker(shard)
+    if stats.rows_done_prior:
+        _log(f"resume: skipped {stats.rows_done_prior} rows already in the output "
+             f"({stats.rows_errored_prior} of them only as errors)")
     _log(f"done: {stats.rows_processed} ok, {stats.rows_failed} failed, "
          f"{stats.tokens_per_sec} tok/s, window settled at {stats.final_limit}")
     if agent_mode():

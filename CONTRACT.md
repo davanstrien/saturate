@@ -154,7 +154,7 @@ In agent mode (env `CLAUDECODE`, `CODEX_SANDBOX`, or `AI_AGENT` — set `AI_AGEN
 detection is truthiness of any of the three, so there is no off-switch once one is set),
 **stdout carries exactly one line**: the run's Stats JSON. Everything human-facing
 (progress, advisor hints, the resume hint) goes to stderr. Stats keys (frozen, same additive
-rule): `rows_total`, `rows_done_prior`, `rows_processed`, `rows_failed`, `rows_deduped`, `prompt_tokens`,
+rule): `rows_total`, `rows_done_prior`, `rows_errored_prior`, `rows_processed`, `rows_failed`, `rows_deduped`, `prompt_tokens`,
 `completion_tokens`, `elapsed_s`, `final_limit`, `input_bound`, `breaker_opens`, `hints`,
 `tokens_per_sec`, `cut_reasons` (window reductions counted by telemetry `reason`, e.g.
 `{"cut:bp": 1, "cut:stall": 2}`; empty when the window never shrank), `bound_by` (ticks per

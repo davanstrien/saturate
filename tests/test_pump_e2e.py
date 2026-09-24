@@ -19,7 +19,8 @@ from saturate.transport import Breaker
 TELEMETRY_KEYS = {"t", "limit", "inflight", "waiting", "running", "bp", "ok", "input_bound",
                   "tok_s", "kv", "hits", "preempts", "reason", "latency_s", "bound_by", "source_s",
                   "prep_s", "prep_n", "prep_workers", "loop_lag_s"}  # CONTRACT §6
-STATS_KEYS = {"rows_total", "rows_done_prior", "rows_processed", "rows_failed", "rows_deduped",
+STATS_KEYS = {"rows_total", "rows_done_prior", "rows_errored_prior", "rows_processed", "rows_failed",
+              "rows_deduped",
               "prompt_tokens", "completion_tokens", "elapsed_s", "final_limit", "input_bound",
               "breaker_opens", "hints", "tokens_per_sec", "cut_reasons", "bound_by"}  # CONTRACT §7
 
@@ -326,3 +327,75 @@ def test_window_ramps_and_endpoint_sees_concurrency(stub, tmp_path):
     assert (stats.rows_processed, stats.rows_failed) == (300, 0)
     assert stub.peak_inflight > 4  # the window widened and the endpoint actually saw it
     assert stats.final_limit > 4
+
+
+def bad_parse(row, resp):
+    return {"text": resp["choices"][0]["text"]}  # a completions-API key on a chat response
+
+
+def test_a_run_where_every_row_fails_stops_early_and_stores_nothing(stub, tmp_path):
+    """A parse bug (or a wrong model name, a bad token) fails every row. The run used to pay
+    for all of them and store them as error rows, which a fixed re-run then skipped."""
+    out = str(tmp_path)
+    with pytest.raises(FatalTransportError, match=r"first 32 rows all failed.*KeyError"):
+        pump(rows(300), to_request, bad_parse, endpoint=stub.endpoint, output=out, window=Fixed(4))
+    assert stub.requests < 300  # stopped early, not a full paid run
+    assert existing_ids(out) == set()  # nothing stored...
+    stats = pump(rows(300), to_request, parse, endpoint=stub.endpoint, output=out, window=Fixed(8))
+    assert (stats.rows_done_prior, stats.rows_processed) == (0, 300)  # ...so the fixed re-run does it all
+
+
+def test_an_endpoint_wide_4xx_stops_early(stub, tmp_path):
+    stub.status_for = lambda request: 404  # "the model does not exist"
+    with pytest.raises(FatalTransportError, match="http 404"):
+        pump(rows(300), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path), window=Fixed(4))
+    assert existing_ids(str(tmp_path)) == set()
+
+
+def test_failures_after_a_success_are_ordinary_error_rows(stub, tmp_path):
+    """Only an all-failing start is a config error: once a row succeeds, held errors land."""
+    stub.status_for = lambda request: 200 if request["messages"][0]["content"] == "row 0" else 400
+    stats = pump(rows(100), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path), window=Fixed(1))
+    assert (stats.rows_processed, stats.rows_failed) == (1, 99)
+
+
+def test_fail_fast_zero_restores_storing_every_failure(stub, tmp_path):
+    stats = pump(rows(100), to_request, bad_parse, endpoint=stub.endpoint, output=str(tmp_path),
+                 window=Fixed(4), fail_fast=0)
+    assert (stats.rows_processed, stats.rows_failed) == (0, 100)
+
+
+def test_resume_says_how_many_skipped_rows_are_errors(stub, tmp_path):
+    """Error-only rows are skipped on resume by design; the run now says so and names
+    retry_errors instead of reporting a silent 0 ok, 0 failed."""
+    stub.status_for = lambda request: 400 if request["messages"][0]["content"] in {"row 3", "row 7"} else 200
+    out = str(tmp_path)
+    pump(rows(20), to_request, parse, endpoint=stub.endpoint, output=out, window=Fixed(2))
+    stub.status_for = lambda request: 200
+    stats = pump(rows(20), to_request, parse, endpoint=stub.endpoint, output=out, window=Fixed(2))
+    assert (stats.rows_done_prior, stats.rows_errored_prior, stats.rows_processed) == (20, 2, 0)
+    assert any(h.startswith("RETRY-ERRORS: 2 rows") and "retry_errors=True" in h for h in stats.hints)
+    stats = pump(rows(20), to_request, parse, endpoint=stub.endpoint, output=out, window=Fixed(2),
+                 retry_errors=True)
+    assert (stats.rows_errored_prior, stats.rows_processed) == (0, 2)
+    assert not any(h.startswith("RETRY-ERRORS") for h in stats.hints)
+
+
+def test_a_parse_with_a_defaulted_second_parameter_takes_the_response(stub, tmp_path):
+    """`lambda body, model="m": ...` has two parameters but one required: it is parse(resp).
+    It used to be called as parse(row, body), failing every row with KeyError 'choices'."""
+    def one_arg(body, model="m"):
+        return {"text": body["choices"][0]["message"]["content"], "model": model}
+
+    stats = pump(rows(10), to_request, one_arg, endpoint=stub.endpoint, output=str(tmp_path), window=Fixed(2))
+    assert (stats.rows_processed, stats.rows_failed) == (10, 0)
+
+
+def test_retry_errors_over_rows_that_still_fail_completes(stub, tmp_path):
+    """A retry run's input is mostly rows that failed before; some fail for good (a corrupt
+    image). The run must finish and re-store their errors, not stop on fail_fast."""
+    out = str(tmp_path)
+    pump(rows(50), to_request, bad_parse, endpoint=stub.endpoint, output=out, window=Fixed(4), fail_fast=0)
+    stats = pump(rows(50), to_request, bad_parse, endpoint=stub.endpoint, output=out, window=Fixed(4),
+                 retry_errors=True)
+    assert (stats.rows_processed, stats.rows_failed) == (0, 50)

@@ -138,6 +138,7 @@ interval is a quarter of the run so far) and finalised at exit; readers may see 
 | `waiting` / `running` | engine queue gauges (null when blind) |
 | `bp` | backpressure events this tick (saturation-shaped 429/timeout/5xx) |
 | `ok` | requests that succeeded this tick (failures surface in `bp`) |
+| `retries` | retry attempts started this tick (`bp` counts each row once; this counts every re-send) |
 | `input_bound` | true when the client side (the source iterator or `to_request`), not the endpoint, starved admission this tick: `bound_by` is `source` or `prep` with the window under half used |
 | `tok_s` | delivered tokens/sec this tick (the controller's plateau signal) |
 | `kv` / `hits` / `preempts` | KV-cache utilization · prefix-cache hit rate · scheduler preemptions (when exposed) |
@@ -155,7 +156,7 @@ detection is truthiness of any of the three, so there is no off-switch once one 
 **stdout carries exactly one line**: the run's Stats JSON. Everything human-facing
 (progress, advisor hints, the resume hint) goes to stderr. Stats keys (frozen, same additive
 rule): `rows_total`, `rows_done_prior`, `rows_errored_prior`, `rows_processed`, `rows_failed`, `rows_deduped`, `prompt_tokens`,
-`completion_tokens`, `elapsed_s`, `final_limit`, `input_bound`, `breaker_opens`, `hints`,
+`completion_tokens`, `elapsed_s`, `final_limit`, `input_bound`, `breaker_opens`, `retries`, `hints`,
 `tokens_per_sec`, `cut_reasons` (window reductions counted by telemetry `reason`, e.g.
 `{"cut:bp": 1, "cut:stall": 2}`; empty when the window never shrank), `bound_by` (ticks per
 telemetry `bound_by` verdict, e.g. `{"engine": 40, "prep": 3}`; inconclusive ticks are not

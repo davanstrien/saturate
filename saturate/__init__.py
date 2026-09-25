@@ -70,6 +70,7 @@ class Stats:
     final_limit: int = 0
     input_bound: bool = False
     breaker_opens: int = 0
+    retries: int = 0  # retry attempts over the run (a row that failed three times and then succeeded: 3)
     hints: list = dataclasses.field(default_factory=list)
     cut_reasons: dict = dataclasses.field(default_factory=dict)  # window reductions by controller reason
     bound_by: dict = dataclasses.field(default_factory=dict)  # ticks per bottleneck verdict (CONTRACT §6)
@@ -202,6 +203,9 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
         await writer  # never two writers on one file
     stats.elapsed_s = round(time.monotonic() - t0, 2)
     stats.final_limit = limiter.window.limit
+    # retries since the last tick have not been folded into the total yet; an embedder's own
+    # limiter may count none of this
+    stats.retries = getattr(limiter, "retries_total", 0) + getattr(limiter, "events", {}).get("retries", 0)
     stats.bound_by = bound_by_counts(limiter.ticks)
     stats.input_bound = stats.bound_by.get("source", 0) + stats.bound_by.get("prep", 0) > 0
     stats.cut_reasons = cut_reasons(limiter.ticks)

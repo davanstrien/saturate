@@ -16,11 +16,11 @@ from saturate import Auto, FatalTransportError, Fixed, existing_ids, pump, read_
 from saturate.source import content_id
 from saturate.transport import Breaker
 
-TELEMETRY_KEYS = {"t", "limit", "inflight", "waiting", "running", "bp", "ok", "input_bound",
+TELEMETRY_KEYS = {"t", "limit", "inflight", "waiting", "running", "bp", "ok", "retries", "input_bound",
                   "tok_s", "kv", "hits", "preempts", "reason", "latency_s", "bound_by", "source_s",
                   "prep_s", "prep_n", "prep_workers", "loop_lag_s"}  # CONTRACT §6
 STATS_KEYS = {"rows_total", "rows_done_prior", "rows_errored_prior", "rows_processed", "rows_failed",
-              "rows_deduped",
+              "rows_deduped", "retries",
               "prompt_tokens", "completion_tokens", "elapsed_s", "final_limit", "input_bound",
               "breaker_opens", "hints", "tokens_per_sec", "cut_reasons", "bound_by"}  # CONTRACT §7
 
@@ -36,6 +36,12 @@ def parse(row, resp):
 
 def rows(n, start=0):
     return [{"text": f"row {i}"} for i in range(start, start + n)]
+
+
+def read_ticks(out):
+    """The run's telemetry: one dict per controller tick (CONTRACT §6)."""
+    (telemetry,) = list(out.glob("telemetry-shard0-*.jsonl"))
+    return [json.loads(line) for line in telemetry.read_text().splitlines()]
 
 
 @pytest.fixture
@@ -72,8 +78,7 @@ def test_pump_happy_path(stub, tmp_path):
     assert len(out) == 200
     assert out[content_id({"text": "row 7"})] == {"text": "echo: row 7", "prompt_tokens": len("row 7")}
 
-    (telemetry,) = list(tmp_path.glob("telemetry-shard0-*.jsonl"))
-    ticks = [json.loads(line) for line in telemetry.read_text().splitlines()]
+    ticks = read_ticks(tmp_path)
     assert ticks
     assert all(TELEMETRY_KEYS <= t.keys() for t in ticks)  # frozen keys; additive keys allowed
     assert all(t["running"] is not None for t in ticks)  # the /metrics scrape fed the controller
@@ -303,8 +308,7 @@ def test_prepare_stage_offloads_to_request_and_the_verdict_names_it(stub, tmp_pa
                      window=Fixed(14), prepare_workers=workers)
         timings[workers] = time.monotonic() - t
         assert (stats.rows_processed, stats.rows_failed) == (60, 0)
-        (telemetry,) = list(out.glob("telemetry-shard0-*.jsonl"))
-        ticks = [json.loads(line) for line in telemetry.read_text().splitlines()]
+        ticks = read_ticks(out)
         prep_ticks = sum(t["bound_by"] == "prep" for t in ticks)
         assert sum(t["prep_s"] for t in ticks) >= 60 * 0.05 * 0.8  # the measurement itself (tail excluded)
         assert all(t["prep_workers"] == workers for t in ticks)
@@ -399,3 +403,22 @@ def test_retry_errors_over_rows_that_still_fail_completes(stub, tmp_path):
     stats = pump(rows(50), to_request, bad_parse, endpoint=stub.endpoint, output=out, window=Fixed(4),
                  retry_errors=True)
     assert (stats.rows_processed, stats.rows_failed) == (0, 50)
+
+
+def test_retries_are_counted_per_attempt_in_stats_and_telemetry(stub, tmp_path, monkeypatch):
+    """Backpressure counts a failing row once; retries count every re-send, so a run dominated
+    by retries is visible. Every 3rd row returns 503 twice, then succeeds."""
+    monkeypatch.setattr(saturate.transport, "BACKOFF_BASE_S", 0.0)  # retry at once
+    failures_left = {f"row {i}": 2 for i in range(0, 30, 3)}
+
+    def flaky(request):
+        text = request["messages"][0]["content"]
+        if failures_left.get(text):
+            failures_left[text] -= 1
+            return 503
+        return 200
+
+    stub.status_for = flaky
+    stats = pump(rows(30), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path), window=Fixed(4))
+    assert (stats.rows_processed, stats.rows_failed) == (30, 0)
+    assert stats.retries == 20  # 10 rows x 2 re-sends

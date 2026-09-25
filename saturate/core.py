@@ -84,7 +84,8 @@ class AdaptiveLimiter:
         self.signals = signals or Null()
         self.on_tick = on_tick
         self.window = Window(getattr(self.controller, "initial", 16))
-        self.events = {"backpressure": 0, "successes": 0, "latencies": []}
+        self.events = {"backpressure": 0, "successes": 0, "retries": 0, "latencies": []}
+        self.retries_total = 0  # retry attempts over the run (backpressure counts rows, not attempts)
         self.ticks: list[dict] = []
         self.tokens_total = 0
         self._wait = {"source": 0.0, "acquire": 0.0, "prep": 0.0}  # seconds since the last tick
@@ -211,11 +212,13 @@ class AdaptiveLimiter:
                           self.events["backpressure"], self.events["successes"], input_bound, tok_s,
                           self.controller.last_reason, latency_s, bound_by=bound_by,
                           source_s=self._wait["source"], prep_s=self._wait["prep"],
-                          prep_n=self._prep_n, prep_workers=self.prep_workers, loop_lag_s=loop_lag_s)
+                          prep_n=self._prep_n, prep_workers=self.prep_workers, loop_lag_s=loop_lag_s,
+                          retries=self.events["retries"])
         self.ticks.append(rec)
         if self.on_tick:
             self.on_tick(rec)
-        self.events["backpressure"] = self.events["successes"] = 0
+        self.retries_total += self.events["retries"]
+        self.events["backpressure"] = self.events["successes"] = self.events["retries"] = 0
         self._wait["source"] = self._wait["acquire"] = self._wait["prep"] = 0.0
         self._prep_n = 0
         await self.window.set_limit(new_limit)

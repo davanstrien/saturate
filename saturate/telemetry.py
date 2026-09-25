@@ -9,11 +9,11 @@ def tick_record(t: float, limit: int, inflight: int, gauges: dict | None,
                 bp: int, ok: int, input_bound: bool, tok_s: float, reason: str,
                 latency_s: float | None = None, bound_by: str | None = None,
                 source_s: float = 0.0, prep_s: float = 0.0, prep_n: int = 0, prep_workers: int = 0,
-                loop_lag_s: float = 0.0) -> dict:
+                loop_lag_s: float = 0.0, retries: int = 0) -> dict:
     g = gauges or {}
     return {"t": round(t, 1), "limit": limit, "inflight": inflight,
             "waiting": g.get("waiting"), "running": g.get("running"),
-            "bp": bp, "ok": ok, "input_bound": input_bound,
+            "bp": bp, "ok": ok, "retries": retries, "input_bound": input_bound,
             "tok_s": round(tok_s, 1), "kv": g.get("kv"), "hits": g.get("hits"),
             "preempts": g.get("preempts"), "reason": reason,
             "latency_s": None if latency_s is None else round(latency_s, 3),

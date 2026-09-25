@@ -422,3 +422,12 @@ def test_retries_are_counted_per_attempt_in_stats_and_telemetry(stub, tmp_path, 
     stats = pump(rows(30), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path), window=Fixed(4))
     assert (stats.rows_processed, stats.rows_failed) == (30, 0)
     assert stats.retries == 20  # 10 rows x 2 re-sends
+
+
+def test_duplicate_rows_are_named_in_the_log(stub, tmp_path, capsys):
+    """Identical rows share the default content-hash id, so a synth run repeating a prompt N
+    times got one sample; the count was only in the JSON stats."""
+    stats = pump([{"text": "same"}] * 5, to_request, parse, endpoint=stub.endpoint,
+                 output=str(tmp_path), window=Fixed(2))
+    assert (stats.rows_processed, stats.rows_deduped) == (1, 4)
+    assert "dedup: 4 rows had the id of an earlier row" in capsys.readouterr().err

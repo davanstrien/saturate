@@ -25,7 +25,7 @@ The most common shape — boot the model and pump a dataset through it, all in o
 (e.g. a single GPU Job on HF Jobs):
 
 ```python
-from saturate import pump, Engine
+from saturate import Auto, Engine, pump
 
 with Engine("lightonai/LightOnOCR-2-1B", engine="vllm") as endpoint:  # vllm | sglang | llamacpp
     stats = pump(
@@ -34,6 +34,7 @@ with Engine("lightonai/LightOnOCR-2-1B", engine="vllm") as endpoint:  # vllm | s
         parse=lambda row, resp: {...},  # response -> your output columns
         endpoint=endpoint,
         output="hf://datasets/you/results/data",  # or a local path, or hf://buckets/...
+        window=Auto(max_limit=48),  # image rows: cap the window (see "Want control anyway?")
     )
 print(stats.rows_processed, stats.tokens_per_sec)
 ```
@@ -249,11 +250,13 @@ options, by what the work is:
   or when you want the pool's lifetime and size under your control:
 
 ```python
+import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 
 from saturate import prepare_ahead, pump, stream
 
-with ProcessPoolExecutor(8) as pool:
+# spawn: pump runs threads, and forking a threaded process (Linux's default) can deadlock
+with ProcessPoolExecutor(8, mp_context=multiprocessing.get_context("spawn")) as pool:
     ready = prepare_ahead(stream(rows), render_page, workers=8, executor=pool)  # order kept
     stats = pump(ready, to_request, parse, endpoint, output)
 ```

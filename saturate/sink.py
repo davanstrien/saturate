@@ -119,6 +119,7 @@ class ParquetSink:
         proto = getattr(self.fs, "protocol", ())  # fsspec: a str or a tuple of aliases — match exactly
         protos = set(proto) if isinstance(proto, (tuple, list)) else {proto}
         local = "file" in protos
+        self._local = local
         # a flush writes two objects and blocks the event loop while it does: ~1 s per write on
         # hf:// capped a remote run at ~2.5 rows/s with 10-row flushes. Remote outputs flush by
         # size or age instead. The age is checked when a row is appended, so while rows keep
@@ -445,8 +446,18 @@ class ParquetSink:
         SAME name — a retry of a write that did land overwrites it, never duplicates it."""
         for i in range(attempts):
             try:
-                with self.fs.open(path, "wb") as f:
-                    pq.write_table(table, f, compression="zstd")
+                if self._local:  # a kill mid-write must not leave a truncated part under its real
+                    tmp = f"{path.rsplit('/', 1)[0]}/.{path.rsplit('/', 1)[1]}.{uuid.uuid4().hex[:8]}.tmp"
+                    try:  # name (dot-prefixed temp names match no reader's glob)
+                        with self.fs.open(tmp, "wb") as f:
+                            pq.write_table(table, f, compression="zstd")
+                        self.fs.mv(tmp, path)
+                    finally:
+                        if self.fs.exists(tmp):
+                            self.fs.rm(tmp)
+                else:  # remote object stores publish a file only when it is closed
+                    with self.fs.open(path, "wb") as f:
+                        pq.write_table(table, f, compression="zstd")
                 return
             except BaseException as e:  # never leave a partial file behind (a scan on every resume)
                 try:
@@ -546,6 +557,9 @@ class FileSink:
     def __init__(self, outdir: str, ext: str = ".txt", key: str = "text"):
         if not ext.startswith(".") or "/" in ext or ".." in ext:  # ext lands in filenames + globs
             raise ValueError(f"FileSink: unsafe ext {ext!r}")
+        if "://" in str(outdir):  # Path() would quietly make a local "hf:/..." directory
+            raise ValueError(f"FileSink writes to a local directory, not {outdir!r}: pass the URI "
+                             "as pump(output=...) for a ParquetSink, or write locally and upload")
         self.dir = Path(outdir)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.ext, self.key = ext, key
@@ -621,6 +635,9 @@ async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
         demoted = min(getattr(sink, "rows_demoted", 0) - demoted0, stats.rows_processed)
         stats.rows_processed -= demoted
         stats.rows_failed += demoted
+        aclose = getattr(results, "aclose", None)  # a sink error must stop the pipeline feeding it:
+        if aclose is not None:  # its requests would keep running with no consumer
+            await aclose()
     return stats
 
 

@@ -151,9 +151,9 @@ def classify(status: int, retry_after: str | None = None, text: str = "") -> Out
     quota, not saturation). 5xx is intermittent server pressure: retry and tell the breaker."""
     if 300 <= status < 400:  # redirects are not followed: a config error, not pressure
         return Outcome(False, False, False, f"http {status}: endpoint redirects — use the final URL")
-    if status == 429:
-        wait = _parse_retry_after(retry_after)
-        return Outcome(True, wait is None, False, f"http 429 after retries: {text[:300]}", wait)
+    if status == 429:  # any Retry-After header marks a paced quota, even one we cannot parse
+        return Outcome(True, retry_after is None, False, f"http 429 after retries: {text[:300]}",
+                       _parse_retry_after(retry_after))
     if 400 <= status < 500:
         return Outcome(False, False, False, f"http {status}: {text[:300]}")
     return Outcome(True, True, True, f"http {status} after retries: {text[:300]}")

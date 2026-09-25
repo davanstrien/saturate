@@ -238,7 +238,9 @@ def test_classify_keeps_the_server_message_and_parses_retry_after():
     assert classify(503, None, "CUDA out of memory").error == "http 503 after retries: CUDA out of memory"
     assert classify(400, None, "x" * 1000).error == "http 400: " + "x" * 300
     assert classify(429, "7").retry_after == 7.0
-    assert classify(429, "not a date").retry_after is None  # unparseable: treated as no header
+    garbled = classify(429, "not a date")
+    assert garbled.retry_after is None  # the wait falls back to jittered backoff...
+    assert not garbled.pressure  # ...but a quota header, even unparseable, is not saturation
 
 
 def test_transport_failure_is_pressure_and_a_breaker_event():

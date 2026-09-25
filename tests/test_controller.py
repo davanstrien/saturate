@@ -443,3 +443,38 @@ def test_a_fixed_set_of_failing_rows_cuts_once_but_sustained_failures_keep_cutti
     overload = healthy(128, backpressure=16, successes=250)
     traj, reasons = run(0.05, overload, [overload] * 11)
     assert reasons.count("cut:bp") >= 2 and min(traj) < 64, (traj, reasons)
+
+
+@pytest.mark.parametrize("cap", [32, 64, 256])
+def test_blind_growth_reaches_the_engine_capacity(cap):
+    """No gauges: growth is judged on throughput alone. Creeping +1 could never show the
+    required 5% gain past a window of ~20, so every blind run stopped near 21. Growing by an
+    eighth reaches capacity and holds within one step of it."""
+    ctrl, limit, hist = Auto(initial=16, max_limit=512), 16, [16]
+    for _ in range(400):
+        served = min(hist[max(0, len(hist) - 2)], cap)  # throughput lags the window by a tick
+        obs = dict(waiting=None, running=None, inflight=limit, backpressure=0, successes=served,
+                   input_bound=False, kv=None, hits=None, tok_s=served * 100.0)
+        limit = ctrl.decide(obs, limit)
+        hist.append(limit)
+    assert cap <= limit <= cap + cap // 8 + 1, hist[-20:]
+    assert hist[-100:] == [limit] * 100  # settled, not oscillating
+
+
+@pytest.mark.parametrize("cap", [64, 256])
+def test_blind_growth_against_a_hard_429_wall_stays_bounded(cap):
+    """An API that 429s as soon as concurrency passes its limit: blind growth reaches the
+    wall, cuts, and grows back (grow-then-halve). It must never run away past the wall, and on
+    average use a good share of it; the old +1 creep sat at ~21 whatever the capacity."""
+    ctrl, limit, hist = Auto(initial=16, max_limit=512), 16, [16]
+    for _ in range(3000):
+        seen = hist[max(0, len(hist) - 2)]
+        served = min(seen, cap)
+        bp = max(1, served // 12) if seen > cap else 0  # ~8% of outcomes rejected above the wall
+        obs = dict(waiting=None, running=None, inflight=limit, backpressure=bp, successes=served,
+                   input_bound=False, kv=None, hits=None, tok_s=served * 100.0)
+        limit = ctrl.decide(obs, limit)
+        hist.append(limit)
+    tail = hist[500:]
+    assert max(tail) <= cap + 2 * (cap // 8 + 1), max(tail)
+    assert sum(min(h, cap) for h in tail) / len(tail) >= 0.6 * cap, sum(tail) / len(tail)

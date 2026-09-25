@@ -106,8 +106,11 @@ class Auto:
     proportional to a smaller window is a plateau and throughput above it is
     growth. A reduction that cannot go below `min_limit` reports `hold:floor`
     and arms nothing; a widening that cannot go above `max_limit` reports
-    `hold:ceiling` and opens no probe. Blind mode (no gauges) creeps +1 at each
-    evidence window instead of doubling, and cannot hold a probe. Durations are
+    `hold:ceiling` and opens no probe. Blind mode (no gauges) grows by an eighth of the
+    window (at least 1) at each evidence window instead of doubling, and cannot hold a
+    probe. The step must be big enough to measure: growth needs throughput `improve` times
+    the best so far, and a +1 step from a window of L gains at most 1/L, so creeping by 1
+    stopped every blind run near 21 whatever the engine's capacity. Durations are
     integrated in seconds from the observed `tick_s` (TICK_S when absent), so
     one slow tick neither shortens nor recomputes a wait.
     """
@@ -287,8 +290,8 @@ class Auto:
         if not due:
             return limit, "hold:ack"
         if grew is not False:
-            if obs.waiting is None:
-                new = self._clamp(limit + 1)  # blind floor: creep
+            if obs.waiting is None:  # blind: no queue to see, so grow in steps big enough to measure
+                new = self._clamp(limit + max(1, limit // 8))
             else:
                 new = self._clamp(limit * 2 if self._slow_start else limit + self.step)
             return (new, "grow") if new > limit else (limit, "hold:ceiling")

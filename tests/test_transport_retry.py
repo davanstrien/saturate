@@ -46,6 +46,9 @@ def test_retry_attempts_get_budget_capped_timeouts(monkeypatch):
     remaining budget. The first attempt keeps the full window (long generations
     are legitimate, the budget governs retrying)."""
     monkeypatch.setattr(transport, "RETRY_BUDGET_S", 1.0)
+    # backoff draws up to BACKOFF_BASE_S; at the default 1 s a single draw could spend the whole
+    # 1 s budget and leave no retry to inspect (it did, on a slow CI runner)
+    monkeypatch.setattr(transport, "BACKOFF_BASE_S", 0.01)
     client = _Client(_Resp(500))
     body, err = asyncio.run(call_endpoint(
         client, "http://x", make_json_request("/chat/completions", {}),
@@ -209,3 +212,95 @@ def test_a_5xx_error_row_keeps_the_server_message():
     finally:
         transport.RETRY_ACTIVE = transport_active
     assert body is None and err == "http 500 after retries: CUDA out of memory"
+
+
+
+# --- the pure units: what a failed attempt means, and how long to wait --------------------
+
+import pytest  # noqa: E402
+
+from saturate.transport import classify, next_wait, transport_failure  # noqa: E402
+
+
+@pytest.mark.parametrize("status, retry_after, retry, pressure, breaker_fail", [
+    (301, None, False, False, False),  # redirect: a config error
+    (400, None, False, False, False),  # poison row
+    (404, None, False, False, False),  # e.g. unknown model: poison, fail_fast catches a run of them
+    (429, None, True, True, False),  # saturation-shaped
+    (429, "5", True, False, False),  # a paced quota: wait, don't cut
+    (500, None, True, True, True),
+    (503, "2", True, True, True),  # 5xx is pressure even with a Retry-After
+])
+def test_classify(status, retry_after, retry, pressure, breaker_fail):
+    out = classify(status, retry_after, "the server said why")
+    assert (out.retry, out.pressure, out.breaker_fail) == (retry, pressure, breaker_fail)
+    assert str(status) in out.error
+
+
+def test_classify_keeps_the_server_message_and_parses_retry_after():
+    assert classify(503, None, "CUDA out of memory").error == "http 503 after retries: CUDA out of memory"
+    assert classify(400, None, "x" * 1000).error == "http 400: " + "x" * 300
+    assert classify(429, "7").retry_after == 7.0
+    garbled = classify(429, "not a date")
+    assert garbled.retry_after is None  # the wait falls back to jittered backoff...
+    assert not garbled.pressure  # ...but a quota header, even unparseable, is not saturation
+
+
+def test_transport_failure_is_pressure_and_a_breaker_event():
+    out = transport_failure(TimeoutError("read timed out"))
+    assert (out.retry, out.pressure, out.breaker_fail) == (True, True, True)
+    assert out.error == "transport: TimeoutError: read timed out"
+
+
+def test_next_wait_is_full_jitter_up_to_a_doubling_ceiling():
+    top = lambda a, b: b  # noqa: E731 (the largest draw uniform could make)
+    delays = [1.0]
+    for _ in range(8):
+        wait, nxt = next_wait(delays[-1], uniform=top)
+        assert wait == delays[-1]
+        delays.append(nxt)
+    assert delays == [1, 2, 4, 8, 16, 32, 60, 60, 60]
+
+
+def test_next_wait_jitters_a_server_given_wait_upwards_only():
+    assert next_wait(1.0, retry_after=10.0, uniform=lambda a, b: a)[0] == 10.0
+    assert next_wait(1.0, retry_after=10.0, uniform=lambda a, b: b)[0] == 12.0
+
+
+# --- properties: must hold for every input, not just the listed cases ---------------------
+
+from hypothesis import given  # noqa: E402
+from hypothesis import strategies as st  # noqa: E402
+
+delays = st.floats(min_value=0.0, max_value=60.0, allow_nan=False)
+draws = st.floats(min_value=0.0, max_value=1.0, allow_nan=False)  # where uniform lands in its range
+
+
+def at(fraction):
+    """A deterministic stand-in for random.uniform: the point `fraction` of the way from a to b."""
+    return lambda a, b: a + (b - a) * fraction
+
+
+@given(delays, draws)
+def test_next_wait_stays_within_the_jitter_ceiling(delay, fraction):
+    wait, nxt = next_wait(delay, uniform=at(fraction))
+    assert 0.0 <= wait <= delay
+    assert nxt == min(delay * 2, 60.0) and nxt <= 60.0
+
+
+@given(delays, st.floats(min_value=0.0, max_value=3600.0, allow_nan=False), draws)
+def test_next_wait_never_undercuts_a_server_given_wait(delay, retry_after, fraction):
+    wait, _ = next_wait(delay, retry_after, uniform=at(fraction))
+    assert retry_after <= wait <= retry_after * 1.2 + 1e-9
+
+
+@given(st.integers(min_value=300, max_value=599), st.one_of(st.none(), st.text(max_size=8)),
+       st.text(max_size=2000))
+def test_classify_rules_hold_for_every_status(status, retry_after, text):
+    out = classify(status, retry_after, text)
+    poison = status < 500 and status != 429
+    assert out.retry is not poison  # 3xx/4xx never retry; 429 and 5xx always do
+    assert out.breaker_fail is (status >= 500)  # only a server-side failure counts against the server
+    if status >= 500:
+        assert out.pressure
+    assert str(status) in out.error and len(out.error) <= 400  # the server's text is capped

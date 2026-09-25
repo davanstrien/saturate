@@ -134,39 +134,67 @@ class Breaker:
               file=sys.stderr, flush=True)
 
 
+@dataclasses.dataclass(frozen=True)
+class Outcome:
+    """What one failed attempt means for its row. Pure data: `classify` decides it,
+    `call_endpoint` acts on it."""
+    retry: bool  # worth another attempt (budget, attempt count and request kind permitting)
+    pressure: bool  # saturation-shaped: the controller should hear it (once per row)
+    breaker_fail: bool  # evidence the server may be down: the breaker counts it
+    error: str  # the row's error if this attempt is the last one
+    retry_after: float | None = None  # a server-given wait, seconds
+
+
+def classify(status: int, retry_after: str | None = None, text: str = "") -> Outcome:
+    """Classify a non-200 response. 3xx/4xx are poison: this row, not the server, is wrong,
+    so no retry and no breaker event. 429 is pressure unless it names its own wait (a paced
+    quota, not saturation). 5xx is intermittent server pressure: retry and tell the breaker."""
+    if 300 <= status < 400:  # redirects are not followed: a config error, not pressure
+        return Outcome(False, False, False, f"http {status}: endpoint redirects — use the final URL")
+    if status == 429:  # any Retry-After header marks a paced quota, even one we cannot parse
+        return Outcome(True, retry_after is None, False, f"http 429 after retries: {text[:300]}",
+                       _parse_retry_after(retry_after))
+    if 400 <= status < 500:
+        return Outcome(False, False, False, f"http {status}: {text[:300]}")
+    return Outcome(True, True, True, f"http {status} after retries: {text[:300]}")
+
+
+def transport_failure(exc: BaseException) -> Outcome:
+    """A timeout, reset or refused connection: pressure, and evidence the server may be down."""
+    return Outcome(True, True, True, f"transport: {type(exc).__name__}: {exc}")
+
+
+def next_wait(delay: float, retry_after: float | None = None,
+              uniform=random.uniform) -> tuple[float, float]:
+    """(seconds to wait now, the next attempt's delay ceiling). Full jitter up to `delay`, which
+    doubles per retry up to 60 s. A server-given Retry-After is jittered upwards too: rows told
+    the same wait would otherwise all wake at the same instant and hit the server together."""
+    wait = retry_after * uniform(1.0, 1.2) if retry_after is not None else uniform(0, delay)
+    return wait, min(delay * 2, 60.0)
+
+
 async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
                         events: dict, breaker: Breaker) -> tuple[dict | None, str | None]:
-    """Returns (response_json, error). Poison rows (3xx/4xx) never retry; multipart is
-    single-attempt (file objects are consumed by the wire — a re-send posts empty bodies).
-    Budget semantics: the FIRST attempt gets the client's full read window (long generations
-    are legitimate); retries get their timeout capped to the remaining budget. Time spent
-    waiting on an open breaker deliberately does NOT consume row budgets — a paused pump
-    that recovers must resume its rows, not fail them all.
-    Backpressure counts once per row, however many of its attempts fail: a row that always
-    fails (a 500 on one bad image) would otherwise cut the window on every retry and hold it
-    at the floor. Many rows failing still counts many times; the breaker sees every attempt."""
+    """Returns (response_json, error). `classify` decides what a failed attempt means and
+    `next_wait` how long to back off; this loop owns the I/O and the budget.
+
+    Poison rows (3xx/4xx) never retry; multipart is single-attempt (file objects are consumed
+    by the wire — a re-send posts empty bodies). Budget semantics: the FIRST attempt gets the
+    client's full read window (long generations are legitimate); retries get their timeout
+    capped to the remaining budget. Time spent waiting on an open breaker deliberately does
+    NOT consume row budgets — a paused pump that recovers must resume its rows, not fail them
+    all. Backpressure counts once per row, however many of its attempts fail: a row that
+    always fails (a 500 on one bad image) would otherwise cut the window on every retry and
+    hold it at the floor. Many rows failing still counts many times; the breaker sees every
+    attempt."""
     url = f"{base.rstrip('/')}{req.route}"
     delay, t0 = BACKOFF_BASE_S, time.monotonic()
     pressured = False
-
-    def pressure() -> None:
-        nonlocal pressured
-        if not pressured:
-            events["backpressure"] += 1
-            pressured = True
+    last_err = "retry budget exhausted"
 
     def left() -> float:
         return RETRY_BUDGET_S - (time.monotonic() - t0)
 
-    async def backoff(retry_after: float | None = None) -> None:
-        nonlocal delay
-        # jitter a server-given Retry-After too: rows told the same delay would otherwise all
-        # wake at the same instant and hit the server together, again and again
-        wait = retry_after * random.uniform(1.0, 1.2) if retry_after is not None else random.uniform(0, delay)
-        await asyncio.sleep(min(wait, max(0.0, left())))
-        delay = min(delay * 2, 60.0)
-
-    last_err = "retry budget exhausted"
     for attempt in range(5):
         if attempt and (not RETRY_ACTIVE or left() <= 0):
             return None, last_err  # hard wall-clock deadline: no attempt starts past it (r6)
@@ -184,36 +212,27 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
             else:
                 r = await client.post(url, json=req.json)
         except (httpx.TimeoutException, httpx.TransportError, asyncio.TimeoutError) as e:
-            pressure()
-            breaker.fail()
-            last_err = f"transport: {type(e).__name__}: {e}"
-            if attempt == 4 or req.files is not None or not RETRY_ACTIVE:
-                return None, last_err
-            await backoff()
-            continue
-        if r.status_code == 200:
-            events["successes"] += 1
-            # the successful attempt alone: retries, backoff, breaker waits and poison rows are not
-            # what a request costs the engine, and the controller's waits are scaled to that
-            events.setdefault("latencies", []).append(time.monotonic() - a0)
-            breaker.ok()
-            return r.json(), None
-        retry_after = r.headers.get("retry-after")
-        if r.status_code == 429:
-            if retry_after is None:
-                pressure()  # saturation-shaped; a paced quota is not
-        elif 300 <= r.status_code < 400:  # redirects are not followed: a config error, not pressure
-            return None, f"http {r.status_code}: endpoint redirects — use the final URL"
-        elif 400 <= r.status_code < 500:
-            return None, f"http {r.status_code}: {r.text[:300]}"  # poison, no retry, no breaker
+            outcome = transport_failure(e)
         else:
-            pressure()  # intermittent 5xx IS server pressure
+            if r.status_code == 200:
+                events["successes"] += 1
+                # the successful attempt alone: retries, backoff, breaker waits and poison rows are
+                # not what a request costs the engine, and the controller's waits are scaled to that
+                events.setdefault("latencies", []).append(time.monotonic() - a0)
+                breaker.ok()
+                return r.json(), None
+            outcome = classify(r.status_code, r.headers.get("retry-after"), r.text)
+        if outcome.pressure and not pressured:
+            events["backpressure"] += 1
+            pressured = True
+        if outcome.breaker_fail:
             breaker.fail()
-        last_err = f"http {r.status_code} after retries: {r.text[:300]}"
-        if attempt == 4 or req.files is not None or not RETRY_ACTIVE:
+        last_err = outcome.error
+        if not outcome.retry or attempt == 4 or req.files is not None or not RETRY_ACTIVE:
             return None, last_err
-        await backoff(_parse_retry_after(retry_after))
-    return None, "unreachable"
+        wait, delay = next_wait(delay, outcome.retry_after)
+        await asyncio.sleep(min(wait, max(0.0, left())))
+    return None, last_err
 
 
 def _parse_retry_after(value: str | None) -> float | None:

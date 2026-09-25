@@ -166,14 +166,14 @@ def test_breaker_aborts_run_when_server_dies(stub, tmp_path, monkeypatch):
 @pytest.fixture
 def quick_breaker(monkeypatch):
     """threshold=2 trips the circuit on a row's own second failure; the probe retries fast;
-    the retry ladder's jitter is pinned so the test's cost is fixed."""
+    the retry ladder's backoff is kept short so the test's cost stays small."""
 
     class QuickBreaker(Breaker):
         def __init__(self):
             super().__init__(threshold=2, probe_interval=0.05, max_open_s=1.5)
 
     monkeypatch.setattr(saturate.core, "Breaker", QuickBreaker)
-    monkeypatch.setattr(saturate.transport.random, "uniform", lambda a, b: 0.05)
+    monkeypatch.setattr(saturate.transport, "BACKOFF_BASE_S", 0.05)
 
 
 def down_then_up(n):

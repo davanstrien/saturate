@@ -34,5 +34,5 @@ jobs:
       # (keep in sync with pyproject.toml); the hf-extra tests need huggingface_hub and are skipped
       - run: >-
           uv run --isolated --no-project --python 3.10 --with pyarrow==19.0.0 --with "numpy<2.3"
-          --with fsspec==2024.3.0 --with httpx2==2.9.0 --with pytest --with-editable .
+          --with fsspec==2024.3.0 --with httpx2==2.9.0 --with pytest --with "hypothesis>=6.100" --with-editable .
           pytest tests -q --ignore=tests/test_sources.py --ignore=tests/test_bucket_rows.py -k "not test_hf_"

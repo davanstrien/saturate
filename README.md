@@ -25,7 +25,7 @@ The most common shape — boot the model and pump a dataset through it, all in o
 (e.g. a single GPU Job on HF Jobs):
 
 ```python
-from saturate import pump, Engine
+from saturate import Auto, Engine, pump
 
 with Engine("lightonai/LightOnOCR-2-1B", engine="vllm") as endpoint:  # vllm | sglang | llamacpp
     stats = pump(
@@ -34,6 +34,7 @@ with Engine("lightonai/LightOnOCR-2-1B", engine="vllm") as endpoint:  # vllm | s
         parse=lambda row, resp: {...},  # response -> your output columns
         endpoint=endpoint,
         output="hf://datasets/you/results/data",  # or a local path, or hf://buckets/...
+        window=Auto(max_limit=48),  # image rows: cap the window (see "Want control anyway?")
     )
 print(stats.rows_processed, stats.tokens_per_sec)
 ```

@@ -1098,3 +1098,75 @@ def test_a_direct_append_of_an_unconvertible_value_is_demoted_at_flush(tmp_path)
     sink.append({"id": "b", "v": uuid.uuid4(), "error": None})
     assert sink.rows_demoted == 1
     assert sink.existing_ids(retry_errors=True) == {"a"}
+
+
+def test_filesink_refuses_a_uri():
+    """FileSink('hf://...') used to write to a local directory literally named 'hf:', lost when
+    a Job ends while the run reported success."""
+    import pytest
+
+    with pytest.raises(ValueError, match="local directory"):
+        FileSink("hf://datasets/me/out")
+
+
+def test_a_local_part_write_leaves_no_truncated_part_or_temp_file(tmp_path, monkeypatch):
+    """A kill mid-write used to leave a truncated part-*.parquet that broke every whole-dir
+    reader until deleted. Local parts are now written to a dot-prefixed temp name and moved."""
+    import pytest
+
+    import saturate.sink as sink_mod
+    from saturate.sink import ParquetSink
+
+    class Killed(BaseException):  # a SIGKILL: no handler runs, nothing is cleaned up
+        pass
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+
+    def half_write(table, f, **kw):
+        f.write(b"PAR1 truncated")
+        raise Killed()
+
+    monkeypatch.setattr(sink_mod.pq, "write_table", half_write)
+    monkeypatch.setattr(sink.fs, "rm", lambda *a, **k: None)  # the process is gone: no cleanup
+    with pytest.raises(Killed):
+        sink.append({"id": "a", "error": None})
+    assert list(tmp_path.glob("part-*.parquet")) == []  # at most a dot-prefixed temp no reader globs
+    monkeypatch.undo()
+    sink.append({"id": "b", "error": None})
+    assert len(list(tmp_path.glob("part-*.parquet"))) == 1  # "a" was still buffered: it lands too
+    assert sink.existing_ids() == {"a", "b"}
+
+
+def test_drain_closes_the_results_stream_when_the_sink_fails(tmp_path):
+    """A sink error used to leave the upstream generator suspended: its requests kept running
+    with nothing consuming them (for an embedder on a long-lived loop)."""
+    import asyncio
+
+    import pytest
+
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    closed = []
+
+    async def results():
+        try:
+            for i in range(10):
+                yield Done(str(i), {}, {"v": i}, None, {})
+        finally:
+            closed.append(True)
+
+    class Broken:
+        def append(self, rec):
+            raise OSError("disk full")
+
+        def flush(self):
+            pass
+
+    async def run():
+        gen = results()
+        with pytest.raises(OSError):
+            await drain(gen, Broken())
+        assert closed == [True]  # closed by drain itself, not later by the loop's shutdown
+
+    asyncio.run(run())

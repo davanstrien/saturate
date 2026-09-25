@@ -229,6 +229,10 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
     if stats.rows_done_prior:
         _log(f"resume: skipped {stats.rows_done_prior} rows already in the output "
              f"({stats.rows_errored_prior} of them only as errors)")
+    if stats.rows_deduped:
+        _log(f"dedup: {stats.rows_deduped} rows had the id of an earlier row in this input and were "
+             "skipped (the default id is a content hash: identical rows share it; to keep repeats, "
+             "give each its own id, e.g. id_fn=lambda row: f\"{row['prompt_id']}-{row['sample']}\")")
     _log(f"done: {stats.rows_processed} ok, {stats.rows_failed} failed, "
          f"{stats.tokens_per_sec} tok/s, window settled at {stats.final_limit}")
     if agent_mode():

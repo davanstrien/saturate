@@ -529,9 +529,9 @@ any sink satisfying it gets resume. `FileSink` is the second blessed implementat
 row named by id, the filesystem is the manifest, overwrites are idempotent. Non-resumable IO is
 the same protocol with an empty `existing_ids()`.
 
-> Receipt: [history/functional-core-proposal.md](history/functional-core-proposal.md) open choice #0 (settled); `saturate/sink.py:105`
-> (`FileSink`), `:53` and `:116` (the two `existing_ids` implementations), `:156`
-> (`read_output`).
+> Receipt: [history/functional-core-proposal.md](history/functional-core-proposal.md) open choice #0 (settled); in `saturate/sink.py`:
+> `FileSink`, the two `existing_ids` implementations (`ParquetSink.existing_ids`,
+> `FileSink.existing_ids`), and `read_output`.
 
 **Honest trade, stated in the code's own docs.** `FileSink` writes no file for a failed row, so
 there is no error record and failures simply retry next run. That is a real loss of the

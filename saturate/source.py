@@ -42,12 +42,17 @@ def normalize(rows: Iterable, id_key: str | None = None, id_keys: list[str] | No
     from `id_fn(row)`, else `id_key`, else a content hash (over `id_keys`)."""
     for item in rows:
         if isinstance(item, tuple) and len(item) == 2:
+            if id_fn is not None or id_key is not None:
+                raise TypeError("id_key/id_fn apply to dict rows, but this source yields (id, row) "
+                                "pairs that already carry an id; drop id_key/id_fn or pass dicts")
             yield str(item[0]), item[1]
         elif isinstance(item, dict):
-            if id_fn is not None:
-                yield str(id_fn(item)), item
-            elif id_key is not None:
-                yield str(item[id_key]), item
+            if id_fn is not None or id_key is not None:
+                id_ = id_fn(item) if id_fn is not None else item[id_key]
+                if id_ is None or str(id_) == "":  # "None" for every such row would collapse them into one
+                    source = "id_fn" if id_fn is not None else f"id_key={id_key!r}"
+                    raise ValueError(f"row id is {id_!r} (from {source}): every row needs a non-empty id")
+                yield str(id_), item
             else:
                 yield content_id(item, id_keys), item
         else:
@@ -97,6 +102,7 @@ def rolling_map(items: Iterable, fn: Callable, executor: Executor, window: int) 
     consumer never accumulates results in RAM. The first exception from `fn` is raised
     at the consumer and the calls still queued are cancelled."""
     window = max(1, window)
+    end = object()  # not None: an item may legitimately be None
     pending: deque = deque()
     it = iter(items)
     try:
@@ -106,8 +112,8 @@ def rolling_map(items: Iterable, fn: Callable, executor: Executor, window: int) 
                 break
         while pending:  # rolling: one out, one in — never more than `window` in flight
             fut = pending.popleft()
-            nxt = next(it, None)
-            if nxt is not None:
+            nxt = next(it, end)
+            if nxt is not end:
                 pending.append(executor.submit(fn, nxt))
             yield fut.result()
     finally:

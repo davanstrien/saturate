@@ -15,6 +15,7 @@ manifest, overwrites are idempotent; failed rows leave no record (they retry).
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import time
@@ -47,6 +48,11 @@ def _list_parts(fs, root: str) -> list[str]:
     return sorted(fs.glob(f"{root}/part-*.parquet"))
 
 
+# what a value that cannot be stored raises: Python's conversion errors, and Arrow's own (an
+# ArrowNotImplementedError, e.g. for a uuid.UUID, is a RuntimeError, not a TypeError)
+UNSTORABLE = (TypeError, ValueError, OverflowError, pa.ArrowException)
+
+
 def _error_row(id_, exc: BaseException) -> dict:
     """The record a row that cannot be stored leaves behind (CONTRACT §4)."""
     return {"id": str(id_), "error": f"parse output not storable: {exc}"}
@@ -61,6 +67,10 @@ def _has_untyped_leaf(t: pa.DataType) -> bool:
     if pa.types.is_struct(t):
         return any(_has_untyped_leaf(f.type) for f in t)
     return False
+
+
+def _nested(t: pa.DataType) -> bool:
+    return pa.types.is_struct(t) or pa.types.is_list(t) or pa.types.is_large_list(t)
 
 
 def _storable(t: pa.DataType, top: bool = True) -> bool:
@@ -286,13 +296,34 @@ class ParquetSink:
         if ok is None:
             ok = self._accepted[key] = _accepts(got, pinned)
         if not ok:
-            raise TypeError(f"{name}: {got} does not widen into the pinned type {pinned}")
+            hint = ("; nested fields are fixed by the first rows written: declare them with "
+                    "schema=, or store this object as a JSON string") if _nested(pinned) else ""
+            raise TypeError(f"{name}: {got} does not widen into the pinned type {pinned}{hint}")
         return pinned  # the caller's safe cast refuses values that do not fit (0.5 -> int64, overflow)
+
+    @contextlib.contextmanager
+    def _pin_rollback(self):
+        """Widening the pin (a struct field first seen as None, typed later) happens field by
+        field while a record or batch is checked; if a later field then fails, the record is
+        rejected, and the widening it caused must be undone with it — or a row that was never
+        stored changes what every later row may hold. `_accepted` needs no rollback: it only
+        caches verdicts for pins with no untyped leaf, and those never widen."""
+        saved = (dict(self._pinned), self._schema)
+        try:
+            yield
+        except BaseException:
+            self._pinned, self._schema = saved
+            raise
 
     def _conform(self, table: pa.Table) -> pa.Table:
         """Cast the columns the table shares with the pin to their pinned types; raise
         TypeError/ValueError when a column does not widen into its pin (or the cast refuses,
-        e.g. an int64 beyond 2**53 into a double column)."""
+        e.g. an int64 beyond 2**53 into a double column). All or nothing: a raise leaves the
+        pin as it was."""
+        with self._pin_rollback():
+            return self._conform_columns(table)
+
+    def _conform_columns(self, table: pa.Table) -> pa.Table:
         for i, f in enumerate(table.schema):
             if f.name in self._pinned:
                 to = self._conform_type(f.name, f.type)
@@ -311,17 +342,19 @@ class ParquetSink:
             if not self._seeded:
                 self._seed_schema()
             arr = pa.array([record])  # one serialisation: a struct typed per field
-            for i, f in enumerate(arr.type):  # equal types (the common case) cost a dict lookup
-                if f.name in self._pinned and not pa.types.is_null(f.type):  # a null fits any pin
-                    to = self._conform_type(f.name, f.type)
-                    if to is not None:
-                        arr.field(i).cast(to)
-                elif not _storable(f.type):
-                    raise TypeError(f"{f.name}: {f.type} has a nested empty object: parquet cannot store it")
-            # and against the rows already buffered: two types for one not-yet-pinned column
-            # inside one batch cannot both be stored — the newcomer is the row that does not fit
-            got = pa.schema(list(arr.type))
-            self._widen_buffer(got)
+            with self._pin_rollback():  # a rejected record leaves the pin as it found it
+                for i, f in enumerate(arr.type):  # equal types (the common case) cost a dict lookup
+                    if f.name in self._pinned and not pa.types.is_null(f.type):  # a null fits any pin
+                        to = self._conform_type(f.name, f.type)
+                        if to is not None:
+                            arr.field(i).cast(to)
+                    elif not _storable(f.type):
+                        raise TypeError(f"{f.name}: {f.type} has a nested empty object: "
+                                        "parquet cannot store it")
+                # and against the rows already buffered: two types for one not-yet-pinned column
+                # inside one batch cannot both be stored — the newcomer is the row that does not fit
+                got = pa.schema(list(arr.type))
+                self._widen_buffer(got)
             self._probe_cache = (record, got)  # append() reuses the types without re-serialising
             return
         extra = record.keys() - set(self._declared.names)
@@ -338,11 +371,12 @@ class ParquetSink:
     def append(self, record: dict) -> None:
         if self._declared is None:  # track the buffer's types so probe() can see the whole batch
             cached = self._probe_cache
-            got = cached[1] if cached and cached[0] is record else pa.schema(list(pa.array([record]).type))
             try:
+                got = (cached[1] if cached and cached[0] is record
+                       else pa.schema(list(pa.array([record]).type)))
                 self._buf_schema = self._widen_buffer(got)
-            except (TypeError, ValueError):
-                pass  # a direct append of a conflicting row: flush demotes it (the guarantee)
+            except UNSTORABLE:
+                pass  # a direct append of a row that does not fit: flush demotes it (the guarantee)
         if not self._buf:
             self._buf_since = time.monotonic()
         self._buf.append(record)
@@ -367,7 +401,7 @@ class ParquetSink:
                 self._seed_schema()
             try:  # the batch as a whole: infer over the union of keys, conform pinned columns
                 table = self._conform(self._batch(self._buf))
-            except (TypeError, ValueError, OverflowError):  # some row does not fit: find it
+            except UNSTORABLE:  # some row does not fit: find it
                 table = self._salvage()
             # an all-null user column with no pinned type yet is unknowable — drop it rather
             # than guess a type a later real value (float, list) would conflict with on disk.
@@ -445,7 +479,7 @@ class ParquetSink:
                 # TypeError) when this row's type clashes with an earlier row's in the batch
                 running = (t.schema if running is None else
                            pa.unify_schemas([running, t.schema], promote_options="permissive"))
-            except (TypeError, ValueError, OverflowError) as e:
+            except UNSTORABLE as e:
                 self._buf[i] = _error_row(rec.get("id"), e)
                 t = None
                 bad += 1
@@ -459,7 +493,7 @@ class ParquetSink:
                     if to != f.type:
                         t = t.set_column(j, pa.field(f.name, to), t.column(j).cast(to))
                 tables[i] = t
-            except (TypeError, ValueError, OverflowError) as e:
+            except UNSTORABLE as e:
                 self._buf[i] = _error_row(self._buf[i].get("id"), e)
                 tables[i] = None
                 bad += 1
@@ -568,7 +602,7 @@ async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
                 if probe is not None:
                     try:  # r5/r6 #6: validate against the sink's ACTUAL schema before buffering —
                         probe(rec)  # a bad value must become an error row, not a flush crash
-                    except (TypeError, ValueError, OverflowError) as e:
+                    except UNSTORABLE as e:
                         rec = _error_row(done.id, e)
                 # Tokens were spent even when the sink rejects the output.
                 stats.prompt_tokens += done.usage.get("prompt_tokens", 0)

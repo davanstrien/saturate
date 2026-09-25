@@ -159,7 +159,9 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
 
     async def backoff(retry_after: float | None = None) -> None:
         nonlocal delay
-        wait = retry_after if retry_after is not None else random.uniform(0, delay)
+        # jitter a server-given Retry-After too: rows told the same delay would otherwise all
+        # wake at the same instant and hit the server together, again and again
+        wait = retry_after * random.uniform(1.0, 1.2) if retry_after is not None else random.uniform(0, delay)
         await asyncio.sleep(min(wait, max(0.0, left())))
         delay = min(delay * 2, 60.0)
 
@@ -167,6 +169,8 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
     for attempt in range(5):
         if attempt and (not RETRY_ACTIVE or left() <= 0):
             return None, last_err  # hard wall-clock deadline: no attempt starts past it (r6)
+        if attempt:
+            events["retries"] = events.get("retries", 0) + 1
         g0 = time.monotonic()
         await breaker.gate(client, url, (req.json or {}).get("model"))  # an open breaker pauses retries too
         t0 += time.monotonic() - g0  # r6: breaker-open time never consumes the row budget (docstring)
@@ -204,7 +208,7 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
         else:
             pressure()  # intermittent 5xx IS server pressure
             breaker.fail()
-        last_err = f"http {r.status_code} after retries"
+        last_err = f"http {r.status_code} after retries: {r.text[:300]}"
         if attempt == 4 or req.files is not None or not RETRY_ACTIVE:
             return None, last_err
         await backoff(_parse_retry_after(retry_after))

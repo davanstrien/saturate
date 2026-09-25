@@ -16,11 +16,11 @@ from saturate import Auto, FatalTransportError, Fixed, existing_ids, pump, read_
 from saturate.source import content_id
 from saturate.transport import Breaker
 
-TELEMETRY_KEYS = {"t", "limit", "inflight", "waiting", "running", "bp", "ok", "input_bound",
+TELEMETRY_KEYS = {"t", "limit", "inflight", "waiting", "running", "bp", "ok", "retries", "input_bound",
                   "tok_s", "kv", "hits", "preempts", "reason", "latency_s", "bound_by", "source_s",
                   "prep_s", "prep_n", "prep_workers", "loop_lag_s"}  # CONTRACT §6
 STATS_KEYS = {"rows_total", "rows_done_prior", "rows_errored_prior", "rows_processed", "rows_failed",
-              "rows_deduped",
+              "rows_deduped", "retries",
               "prompt_tokens", "completion_tokens", "elapsed_s", "final_limit", "input_bound",
               "breaker_opens", "hints", "tokens_per_sec", "cut_reasons", "bound_by"}  # CONTRACT §7
 
@@ -399,3 +399,26 @@ def test_retry_errors_over_rows_that_still_fail_completes(stub, tmp_path):
     stats = pump(rows(50), to_request, bad_parse, endpoint=stub.endpoint, output=out, window=Fixed(4),
                  retry_errors=True)
     assert (stats.rows_processed, stats.rows_failed) == (0, 50)
+
+
+
+def test_retries_are_counted_per_attempt_in_stats_and_telemetry(stub, tmp_path, monkeypatch):
+    """Backpressure counts a failing row once; retries count every re-send, so a run dominated
+    by retries is visible. Every 3rd row returns 503 twice, then succeeds."""
+    monkeypatch.setattr(saturate.transport.random, "uniform", lambda a, b: 0.0)  # no backoff wait
+    seen: dict[str, int] = {}
+
+    def flaky(request):
+        text = request["messages"][0]["content"]
+        if int(text.split()[1]) % 3:
+            return 200
+        seen[text] = seen.get(text, 0) + 1
+        return 503 if seen[text] <= 2 else 200
+
+    stub.status_for = flaky
+    stats = pump(rows(30), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path), window=Fixed(4))
+    assert (stats.rows_processed, stats.rows_failed) == (30, 0)
+    assert stats.retries == 20  # 10 rows x 2 re-sends
+    ticks = [json.loads(line) for f in tmp_path.glob("telemetry-*.jsonl")
+             for line in f.read_text().splitlines()]
+    assert sum(t["retries"] for t in ticks) <= 20

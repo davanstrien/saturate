@@ -97,7 +97,7 @@ def test_multipart_never_retries():
     body, err = asyncio.run(call_endpoint(
         client, "http://x", make_multipart_request("/upload", {"a": "1"}, {"file": b"x"}),
         {"backpressure": 0, "successes": 0}, Breaker()))
-    assert body is None and err == "http 500 after retries"
+    assert body is None and err == "http 500 after retries: nope"  # the server message is kept
     assert client.posts == 1  # single attempt: the file stream is already consumed
 
 
@@ -178,3 +178,34 @@ def test_a_row_that_always_fails_counts_as_backpressure_once(monkeypatch):
     assert client.posts == 5  # it retried...
     assert events["backpressure"] == 1  # ...but pressured the controller once
     assert len(fails) == 5  # a dead server still trips the breaker attempt by attempt
+
+
+
+def test_retry_after_is_jittered_so_rows_do_not_wake_together(monkeypatch):
+    """Rows told the same Retry-After used to sleep exactly that long and hit the server in
+    one burst. The wait is now the header's value times uniform(1, 1.2)."""
+    monkeypatch.setattr(transport, "RETRY_BUDGET_S", 30.0)
+    waits = []
+
+    async def record(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(transport.asyncio, "sleep", record)
+    client = _Client(_Resp(429, {"retry-after": "10"}))
+    asyncio.run(call_endpoint(client, "http://x", make_json_request("/chat/completions", {}),
+                              {"backpressure": 0, "successes": 0}, Breaker()))
+    assert len(waits) == 4 and all(10.0 <= w <= 12.0 for w in waits), waits
+    assert len(set(waits)) > 1  # jittered, not identical
+
+
+def test_a_5xx_error_row_keeps_the_server_message():
+    client = _Client(_Resp(500))
+    client.resp.text = "CUDA out of memory"
+    transport_active = transport.RETRY_ACTIVE
+    transport.RETRY_ACTIVE = False
+    try:
+        body, err = asyncio.run(call_endpoint(client, "http://x", make_json_request("/chat/completions", {}),
+                                              {"backpressure": 0, "successes": 0}, Breaker()))
+    finally:
+        transport.RETRY_ACTIVE = transport_active
+    assert body is None and err == "http 500 after retries: CUDA out of memory"

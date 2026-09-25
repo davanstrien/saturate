@@ -23,6 +23,7 @@ import httpx2 as httpx
 
 RETRY_ACTIVE = True  # kill-switch: flip off in tests for determinism
 RETRY_BUDGET_S = 300.0  # total retry wall-clock per row
+BACKOFF_BASE_S = 1.0  # first jittered backoff ceiling; doubles per retry up to 60 s
 PROBE_HEADERS = {"x-saturate-probe": "breaker"}  # lets a server (or a stub) tell probes from rows
 PROBE_TIMEOUT_S = 30.0
 
@@ -145,7 +146,7 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
     fails (a 500 on one bad image) would otherwise cut the window on every retry and hold it
     at the floor. Many rows failing still counts many times; the breaker sees every attempt."""
     url = f"{base.rstrip('/')}{req.route}"
-    delay, t0 = 1.0, time.monotonic()
+    delay, t0 = BACKOFF_BASE_S, time.monotonic()
     pressured = False
 
     def pressure() -> None:

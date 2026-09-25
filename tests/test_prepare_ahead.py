@@ -1,6 +1,7 @@
 """prepare_ahead: a bounded, order-preserving look-ahead over an (id, row) stream that runs
 `fn` on an executor of the caller's choosing (threads by default, processes on request)."""
 
+import multiprocessing
 import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -28,7 +29,9 @@ def test_order_is_preserved_with_a_thread_pool():
 
 
 def test_works_with_a_process_pool():
-    with ProcessPoolExecutor(2) as pool:
+    # spawn, not Linux's default fork: forking a process that already runs threads (earlier
+    # tests' stub servers and pools) can deadlock the child — one CI run hung here for 12 min
+    with ProcessPoolExecutor(2, mp_context=multiprocessing.get_context("spawn")) as pool:
         out = list(prepare_ahead(rows(10), double, workers=2, executor=pool))
     assert out == [(str(i), {"n": i * 2}) for i in range(10)]
 

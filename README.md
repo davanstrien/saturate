@@ -250,11 +250,13 @@ options, by what the work is:
   or when you want the pool's lifetime and size under your control:
 
 ```python
+import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 
 from saturate import prepare_ahead, pump, stream
 
-with ProcessPoolExecutor(8) as pool:
+# spawn: pump runs threads, and forking a threaded process (Linux's default) can deadlock
+with ProcessPoolExecutor(8, mp_context=multiprocessing.get_context("spawn")) as pool:
     ready = prepare_ahead(stream(rows), render_page, workers=8, executor=pool)  # order kept
     stats = pump(ready, to_request, parse, endpoint, output)
 ```

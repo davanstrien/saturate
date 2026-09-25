@@ -46,6 +46,9 @@ def test_retry_attempts_get_budget_capped_timeouts(monkeypatch):
     remaining budget. The first attempt keeps the full window (long generations
     are legitimate, the budget governs retrying)."""
     monkeypatch.setattr(transport, "RETRY_BUDGET_S", 1.0)
+    # backoff draws up to BACKOFF_BASE_S; at the default 1 s a single draw could spend the whole
+    # 1 s budget and leave no retry to inspect (it did, on a slow CI runner)
+    monkeypatch.setattr(transport, "BACKOFF_BASE_S", 0.01)
     client = _Client(_Resp(500))
     body, err = asyncio.run(call_endpoint(
         client, "http://x", make_json_request("/chat/completions", {}),

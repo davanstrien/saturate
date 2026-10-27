@@ -71,6 +71,21 @@ Two baseline facts from the same run, worth knowing before the rewrite:
 - `default-flush-w64` against `overhead-w64`: the default local flush (10 rows) costs ~40% of
   zero-latency throughput (546 vs 928 rows/s) and ~50% more CPU per row.
 
-A real-engine floor (vLLM, Qwen2.5-0.5B, a10g-large, both arms main) is being taken with
-`jobs_ab.sh`; it goes in `results/` when it lands. Until then there is no measured detection limit
-for a Job run.
+### On a real engine
+
+`results/aa-noise-floor-jobs-vllm-a10g-20261027.json`: Job `6ae0905741e90535df76060a`, vLLM
+(`vllm/vllm-openai:latest`) serving Qwen2.5-0.5B-Instruct on a10g-large, both arms main
+(`932e8f9`), `vllm` suite, 3 reps, taken before the warmup and the metric renames. Per-rep paired
+head/base ratios, min–max across reps and scenarios:
+
+| metric | paired range | read |
+|---|---|---|
+| `tokens_per_s` | 0.989–1.011 | a ~3% change is detectable |
+| `rows_per_s` | 0.983–1.026 | a ~3–5% change is detectable |
+| `cpu_ms_per_row` | 0.856–1.059 | ~10–15%; long generations are the noisiest |
+| `peak_rss_mb` (MiB) | 0.988–1.012 | small changes are detectable |
+| `first_durable_s` | 0.822–1.077 | only large changes |
+
+The engine, not the laptop's single-thread stub, sets the pace here, so a Job run detects
+throughput changes several times smaller than a local run. Cost: about $0.12 (a10g-large,
+~5 min of running time, model load included).

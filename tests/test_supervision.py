@@ -27,6 +27,7 @@ def test_crashed_tick_loop_surfaces(monkeypatch):
         asyncio.run(go())
 
 
+@pytest.mark.internals
 def test_client_closed_when_tick_loop_crashed(monkeypatch):
     """Codex r4 blocker #6: surfacing a crashed tick loop at limiter exit must
     not leak the HTTP client."""

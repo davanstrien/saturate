@@ -1,13 +1,16 @@
 """The behaviour contract the 0.3 refactor must keep: what each kind of failure does to the run,
 and what the concurrency primitives guarantee under cancellation and resizing.
 
-These tests use public entry points only (pump, AdaptiveClient, AdaptiveLimiter, through,
-drain, ParquetSink, Breaker) so they survive the rewrite of the plumbing underneath. The one
-seam the rewrite changes on purpose is the shape of through(); every pipeline test goes
-through `pipeline()` below, so that change touches one helper, not the tests.
+The tests drive public entry points (pump, AdaptiveClient, AdaptiveLimiter, through, drain,
+ParquetSink, Breaker) and observe public outputs (Stats, on_tick records, the output on disk, the
+stub server's counters). Everything below the public API that they still need sits in the
+"transitional seams" section, so a rewrite of the plumbing changes those lines, not the tests.
 
 Pipeline tests run on a loop that outlives the coroutine (`run_checked`): asyncio.run cancels
 stray tasks at shutdown, which would hide exactly the leaks these tests look for.
+
+Preconditions are established by events (a request reached the server, a row was parsed), not by
+sleeps; the remaining sleeps are deadlock guards or negative checks ("nothing else happened").
 
 Failure policy (one test per row):
 
@@ -19,11 +22,15 @@ Failure policy (one test per row):
 | the sink raises                 | everything stops, the sink's own error raises                |
 | the caller cancels              | everything stops, completed rows land                        |
 
-xfail(strict=True) marks a known gap: the test flips to a pass when the fix lands, and
-strict makes that flip fail loudly until the marker is removed.
+Known gaps: where today's code breaks the contract, the test checks the contract with `gap()`,
+which raises KnownGap, and is marked `known_gap(...)` = xfail(raises=KnownGap, strict=True). Only
+that exception counts as the expected failure: a harness error, a leak or a timeout still fails
+the test. When the fix lands the test passes, strict turns that into a failure, and the marker
+comes off.
 """
 
 import asyncio
+import gc
 import random
 import threading
 import time
@@ -51,23 +58,84 @@ from saturate.transport import Breaker
 TICK = 0.02
 
 
+class KnownGap(Exception):
+    """Raised by gap() only: the contract and today's code disagree here."""
+
+
+def gap(ok: bool, message: str) -> None:
+    if not ok:
+        raise KnownGap(message)
+
+
+def known_gap(reason: str):
+    return pytest.mark.xfail(raises=KnownGap, strict=True, reason=reason)
+
+
+# --- transitional seams ----------------------------------------------------------------------
+# The only places these tests reach below the public API. A refactor that moves them changes
+# these lines; the tests stay as they are.
+
+@pytest.fixture(autouse=True)
+def fast_ticks(monkeypatch):
+    monkeypatch.setattr(saturate.core, "TICK_S", TICK)  # controller ticks fast enough to observe
+
+
+@pytest.fixture
+def no_retries(monkeypatch):
+    monkeypatch.setattr(saturate.transport, "RETRY_ACTIVE", False)
+
+
+def http_client_closed(client: AdaptiveClient) -> bool:
+    return client._client.is_closed
+
+
+async def _gated(results, gate: asyncio.Event):
+    """Pass results on, but after the first one wait for `gate`: a consumer that is busy while
+    the pipeline keeps completing rows behind it."""
+    try:
+        first = True
+        async for done in results:
+            yield done
+            if first:
+                first = False
+                await gate.wait()
+    finally:
+        await results.aclose()
+
+
+async def pipeline(endpoint, data, sink, *, window=None, to_request=None, parse=None, clients=None,
+                   gate: asyncio.Event | None = None, **kw):
+    """The functional layer end to end: AdaptiveClient -> through -> drain. With `gate`, the
+    consumer stalls after the first result until the gate opens."""
+    async with AdaptiveClient(endpoint, window=window or Fixed(4), signal_source="none") as client:
+        if clients is not None:
+            clients.append(client)
+        results = through(client, stream(data), to_request or default_to_request, parse or default_parse,
+                          **kw)
+        if gate is not None:
+            results = _gated(results, gate)
+        return await drain(results, sink)
+
+
+# --- helpers ---------------------------------------------------------------------------------
+
 @pytest.fixture
 def stub():
     with StubServer() as server:
         yield server
 
 
-@pytest.fixture(autouse=True)
-def fast_ticks(monkeypatch):
-    monkeypatch.setattr(saturate.core, "TICK_S", TICK)
-
-
-def to_request(row):
+def default_to_request(row):
     return {"model": "stub", "messages": [{"role": "user", "content": row["text"]}]}
 
 
-def parse(row, resp):
+def default_parse(row, resp):
     return {"reply": resp["choices"][0]["message"]["content"]}
+
+
+def content(request: dict) -> str:
+    """The row text a request carries (stub-side)."""
+    return str((request.get("messages") or [{}])[-1].get("content", ""))
 
 
 def rows(n, start=0):
@@ -78,50 +146,75 @@ def on_disk(path) -> set[str]:
     return ParquetSink(str(path)).existing_ids()
 
 
-# --- harness --------------------------------------------------------------------------------
+async def until(condition, what: str, timeout: float = 10.0) -> None:
+    """Wait for `condition()`; the timeout is a deadlock guard, not part of the scenario."""
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"timed out waiting for {what}")
+        await asyncio.sleep(0.005)
 
-def _new_non_daemon_threads(before: set[int]) -> list[threading.Thread]:
-    return [t for t in threading.enumerate() if t.ident not in before and not t.daemon and t.is_alive()]
+
+def _new_threads(before: set[int], include_runtime: bool) -> list[threading.Thread]:
+    """Non-daemon threads started since `before`. The loop's own executor workers (asyncio_N)
+    belong to the runtime until the loop shuts its executor down."""
+    return [t for t in threading.enumerate()
+            if t.ident not in before and not t.daemon and t.is_alive()
+            and (include_runtime or not t.name.startswith("asyncio_"))]
 
 
-def run_checked(make_coro, timeout: float = 30.0):
-    """Run `make_coro()` on a fresh loop that stays open afterwards, then assert nothing outlived
-    it: no unfinished task, and (within 2 s) no new non-daemon thread. Re-raises the
-    coroutine's own exception after the checks, so a test can both expect an error and
-    require a clean teardown."""
+def _wait_for_threads(before: set[int], include_runtime: bool, timeout: float = 2.0) -> list:
+    deadline = time.monotonic() + timeout
+    while _new_threads(before, include_runtime) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return _new_threads(before, include_runtime)
+
+
+def run_checked(make_coro, timeout: float = 30.0, *, leak_is_known_gap: bool = False):
+    """Run `make_coro()` on a fresh loop that stays open afterwards, then check that nothing
+    outlived it, before any cleanup of ours could hide it: no unfinished task, no library thread
+    still alive (within 2 s), no error the loop was left to handle (a crashed task nobody
+    awaited), and after the loop's executor shuts down, no thread at all. Then re-raise the
+    coroutine's own exception, so a test can expect an error and still require a clean teardown.
+    A leak raises AssertionError, or KnownGap when the leak is the gap the test documents."""
     before = {t.ident for t in threading.enumerate()}
     loop = asyncio.new_event_loop()
+    loop_errors: list[dict] = []
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    error: BaseException | None = None
+    result = None
+    leaks: list[str] = []
     try:
-        error: BaseException | None = None
-        result = None
         try:
             result = loop.run_until_complete(asyncio.wait_for(make_coro(), timeout))
         except BaseException as e:  # noqa: BLE001 — re-raised below, after the leak checks
             error = e
         loop.run_until_complete(asyncio.sleep(0.05))  # let done-callbacks and closes settle
         stray = [t for t in asyncio.all_tasks(loop) if not t.done()]
-        assert not stray, f"tasks outlived the run: {stray}"
+        if stray:
+            leaks.append(f"tasks outlived the run: {stray}")
+        threads = _wait_for_threads(before, include_runtime=False)
+        if threads:
+            leaks.append(f"threads outlived the run: {threads}")
+        gc.collect()  # a crashed task nobody awaited reports itself when it is collected
+        if loop_errors:
+            leaks.append(f"errors left to the loop: {[c.get('message') for c in loop_errors]}")
     finally:
         for t in asyncio.all_tasks(loop):
             t.cancel()
         loop.run_until_complete(asyncio.sleep(0))
+        loop.run_until_complete(loop.shutdown_default_executor())
         loop.close()
-    deadline = time.monotonic() + 2.0
-    while _new_non_daemon_threads(before) and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert not _new_non_daemon_threads(before), f"threads outlived the run: {_new_non_daemon_threads(before)}"
+    threads = _wait_for_threads(before, include_runtime=True)
+    if threads:
+        leaks.append(f"threads outlived the loop: {threads}")
+    if leaks:
+        if leak_is_known_gap:
+            raise KnownGap("; ".join(leaks))
+        raise AssertionError("; ".join(leaks))
     if error is not None:
         raise error
     return result
-
-
-async def pipeline(endpoint, data, sink, *, window=None, to_request=to_request, parse=parse,
-                   clients=None, **kw):
-    """The functional layer end to end: AdaptiveClient -> through -> drain."""
-    async with AdaptiveClient(endpoint, window=window or Fixed(4), signal_source="none") as client:
-        if clients is not None:
-            clients.append(client)
-        return await drain(through(client, stream(data), to_request, parse, **kw), sink)
 
 
 class RecordingSink:
@@ -169,57 +262,72 @@ def test_source_failure_lands_the_submitted_rows_then_raises(stub, tmp_path):
 
 
 def test_fatal_cancels_in_flight_rows_instead_of_waiting_for_them(stub, tmp_path):
-    """A fatal error ends the run now: a row still generating (5 s here) is not waited for."""
-    stub.latency_s = 5.0
+    """r0 is generating (5 s) when r1's to_request raises the fatal: the run ends now."""
+    r0_arrived = threading.Event()
+
+    def latency(request):
+        if content(request) == "row 0":
+            r0_arrived.set()
+            return 5.0
+        return 0.0
+
+    stub.latency_for = latency
 
     def to_request_fatal_on_r1(row):
         if row["text"] == "row 1":
-            time.sleep(0.05)  # in the prepare thread: r0 is already in flight
+            r0_arrived.wait(10)  # in the prepare thread: r0 is in flight before the fatal
             raise FatalTransportError("breaker gave up")
-        return to_request(row)
+        return default_to_request(row)
 
     t = time.monotonic()
     with pytest.raises(FatalTransportError):
         run_checked(lambda: pipeline(stub.endpoint, rows(2), ParquetSink(str(tmp_path)),
                                      to_request=to_request_fatal_on_r1, prepare_workers=1))
-    assert time.monotonic() - t < 2.0
+    assert r0_arrived.is_set()
+    assert time.monotonic() - t < 3.0  # not the 5 s r0 would have taken
     assert on_disk(tmp_path) == set()  # r0 was cancelled, never completed
 
 
-@pytest.mark.xfail(strict=True, reason="#35: results already queued behind a fatal error are discarded")
-def test_fatal_lands_every_row_that_completed_before_it(stub):
-    """r2's to_request raises the fatal at ~50 ms; r1 completes at ~100 ms, behind the fatal in
-    the results queue; the consumer is busy until ~300 ms. r1 was paid for, so it must land."""
-    stub.latency_for = lambda request: 0.1 if "row 1" in str(request) else 0.0
-    parsed: list[str] = []
-    yielded: list[str] = []
+@known_gap("#35: results already queued behind a fatal error are discarded")
+def test_fatal_lands_every_row_that_completed_before_it(stub, tmp_path):
+    """r2's to_request raises the fatal once r1 has reached the server; r1 answers 1 s later,
+    so it completes behind the fatal. The consumer is busy until r1 is parsed. r1 was paid for,
+    so it must land."""
+    r1_arrived = threading.Event()
+
+    def latency(request):
+        if content(request) == "row 1":
+            r1_arrived.set()
+            return 1.0
+        return 0.0
+
+    stub.latency_for = latency
 
     def to_request_fatal_on_r2(row):
         if row["text"] == "row 2":
-            time.sleep(0.05)
+            r1_arrived.wait(10)
             raise FatalTransportError("breaker gave up")
-        return to_request(row)
+        return default_to_request(row)
 
-    def recording_parse(row, resp):
-        parsed.append(row["text"])
-        return parse(row, resp)
+    parsed: list[str] = []
 
-    async def consume():
-        async with AdaptiveClient(stub.endpoint, window=Fixed(4), signal_source="none") as client:
-            results = through(client, stream(rows(3)), to_request_fatal_on_r2, recording_parse,
-                              prepare_workers=1)
-            try:
-                async for done in results:
-                    yielded.append(done.row["text"])
-                    if len(yielded) == 1:
-                        await asyncio.sleep(0.3)  # a slow consumer: r1 completes meanwhile
-            finally:
-                await results.aclose()
+    async def go():
+        r1_parsed = asyncio.Event()
+
+        def recording_parse(row, resp):
+            parsed.append(f"r{row['text'].split()[-1]}")
+            if row["text"] == "row 1":
+                r1_parsed.set()
+            return default_parse(row, resp)
+
+        await pipeline(stub.endpoint, rows(3), ParquetSink(str(tmp_path), flush_every=1000),
+                       to_request=to_request_fatal_on_r2, parse=recording_parse, prepare_workers=1,
+                       gate=r1_parsed)
 
     with pytest.raises(FatalTransportError):
-        run_checked(consume)
-    assert "row 1" in parsed
-    assert set(parsed) <= set(yielded)
+        run_checked(go)
+    assert "r1" in parsed  # the scenario happened: r1 completed
+    gap(set(parsed) <= on_disk(tmp_path), f"parsed {sorted(parsed)}, on disk {sorted(on_disk(tmp_path))}")
 
 
 def test_fail_fast_stores_nothing_when_every_early_row_fails(stub, tmp_path):
@@ -234,7 +342,7 @@ def test_fail_fast_releases_the_held_errors_once_a_row_succeeds(stub, tmp_path):
     """Errors before the first success are held, not dropped: when a success arrives they all
     land as ordinary error rows."""
     early = {"row 0", "row 1", "row 2"}
-    stub.status_for = lambda request: 400 if request["messages"][0]["content"] in early else 200
+    stub.status_for = lambda request: 400 if content(request) in early else 200
     stats = run_checked(lambda: pipeline(stub.endpoint, rows(10), ParquetSink(str(tmp_path)),
                                          window=Fixed(1), fail_fast=8))
     assert (stats.rows_processed, stats.rows_failed) == (7, 3)
@@ -249,53 +357,64 @@ def test_a_sink_failure_raises_its_own_error_and_stops_the_requests(stub):
     with pytest.raises(SinkBoom):
         run_checked(lambda: pipeline(stub.endpoint, rows(500), sink))
     seen = stub.requests
-    time.sleep(0.2)
-    assert stub.requests == seen < 500  # nothing kept feeding the endpoint after the failure
+    time.sleep(0.2)  # negative check: nothing keeps feeding the endpoint
+    assert stub.requests == seen < 500
     assert sink.flushed == 1
 
 
-@pytest.mark.xfail(strict=True, reason="finding 1: drain's finally flush masks the error, skips aclose")
+@known_gap("finding 1: drain's finally flush masks the sink error and skips aclose")
 def test_a_sink_failure_is_not_masked_by_a_failing_flush(stub):
     stub.latency_s = 0.01
     sink = RecordingSink(fail_append_at=3, fail_flush=True)
-    with pytest.raises(SinkBoom):
-        run_checked(lambda: pipeline(stub.endpoint, rows(500), sink))
+    try:
+        # today the skipped aclose also leaks the workers: that leak is part of this gap
+        run_checked(lambda: pipeline(stub.endpoint, rows(500), sink), leak_is_known_gap=True)
+    except SinkBoom:
+        pass
+    except OSError as e:
+        raise KnownGap(f"the flush's {e!r} replaced the sink error") from e
+    else:
+        pytest.fail("the run did not raise")
 
 
+@known_gap("#35: on cancel, results already completed but not yet consumed are discarded")
 def test_caller_cancellation_lands_the_completed_rows_and_cleans_up(stub, tmp_path):
-    stub.latency_s = 0.05
+    """The consumer stalls after the first row while five more complete behind it; then the
+    caller cancels. Every completed row was paid for, so every one must land; and the
+    cancellation must leave nothing running and the HTTP client closed."""
     clients: list[AdaptiveClient] = []
-    appended: list[str] = []
-
-    class Recording(ParquetSink):
-        def append(self, record):
-            appended.append(record["id"])
-            super().append(record)
+    parsed: list[str] = []
 
     async def go():
-        sink = Recording(str(tmp_path), flush_every=1000)
-        task = asyncio.ensure_future(pipeline(stub.endpoint, rows(200), sink, clients=clients))
-        await asyncio.sleep(0.4)
+        never = asyncio.Event()
+
+        def recording_parse(row, resp):
+            parsed.append(f"r{row['text'].split()[-1]}")
+            return default_parse(row, resp)
+
+        sink = ParquetSink(str(tmp_path), flush_every=1000)
+        task = asyncio.ensure_future(pipeline(stub.endpoint, rows(200), sink, parse=recording_parse,
+                                              clients=clients, gate=never))
+        await until(lambda: len(parsed) >= 6, "six rows parsed")
         task.cancel()
         await task
 
     with pytest.raises(asyncio.CancelledError):
         run_checked(go)
-    assert appended and on_disk(tmp_path) == set(appended)
-    assert clients[0]._client.is_closed
+    assert http_client_closed(clients[0])
+    gap(set(parsed) <= on_disk(tmp_path), f"{len(parsed)} parsed, {len(on_disk(tmp_path))} on disk")
 
 
 # --- known gaps in the transport and the sink ------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="finding 2: a 2xx other than 200 is classified as a 5xx")
-def test_any_2xx_is_a_success(stub, tmp_path, monkeypatch):
-    monkeypatch.setattr(saturate.transport, "RETRY_ACTIVE", False)
+@known_gap("finding 2: a 2xx other than 200 is classified as a 5xx")
+def test_any_2xx_is_a_success(stub, tmp_path, no_retries):
     stub.status_for = lambda request: 201
     stats = run_checked(lambda: pipeline(stub.endpoint, rows(3), ParquetSink(str(tmp_path)), fail_fast=0))
-    assert (stats.rows_processed, stats.rows_failed) == (3, 0)
+    gap((stats.rows_processed, stats.rows_failed) == (3, 0), f"{stats.rows_failed} of 3 rows failed")
 
 
-@pytest.mark.xfail(strict=True, reason="finding 3: a 200 whose body is not JSON counts as a success")
+@known_gap("finding 3: a 200 whose body is not JSON counts as a success")
 def test_a_200_that_is_not_json_is_a_server_error_not_a_success(stub):
     stub.raw_for = lambda request: b"<html>down for maintenance</html>"
     ticks: list[dict] = []
@@ -303,31 +422,39 @@ def test_a_200_that_is_not_json_is_a_server_error_not_a_success(stub):
     async def go():
         async with AdaptiveClient(stub.endpoint, window=Fixed(1), signal_source="none",
                                   on_tick=ticks.append) as client:
-            got = await client.post(to_request({"text": "hi"}))
-            await asyncio.sleep(5 * TICK)
+            try:
+                got = await client.post(default_to_request({"text": "hi"}))
+            except ValueError as e:
+                raise KnownGap(f"post raised {e!r} instead of returning the row's error") from e
+            await until(lambda: len(ticks) >= 3, "three ticks")
             return got
 
     body, err = run_checked(go)
-    assert body is None and err is not None and not err.startswith("client:")
-    assert sum(t["ok"] for t in ticks) == 0  # the controller never heard a success
+    gap(body is None and err is not None and not err.startswith("client:"), f"got error {err!r}")
+    gap(sum(t["ok"] for t in ticks) == 0, "the controller counted a success")
 
 
-@pytest.mark.xfail(strict=True, reason="#29: the age flush runs only when another row arrives")
+@known_gap("#29: the age flush runs only when another row arrives")
 def test_a_buffered_row_is_flushed_by_age_without_new_arrivals(tmp_path):
-    async def one_row_then_quiet():
-        yield Done("r0", {"text": "row 0"}, {"reply": "x"}, None)
-        await asyncio.sleep(1.0)
-
     async def go():
-        sink = ParquetSink(str(tmp_path), flush_every=1000, flush_interval_s=0.2)
+        appended = asyncio.Event()
+
+        async def one_row_then_quiet():
+            yield Done("r0", {"text": "row 0"}, {"reply": "x"}, None)
+            appended.set()  # drain asks for the next row only after appending this one
+            await asyncio.sleep(3.0)
+
+        sink = ParquetSink(str(tmp_path), flush_every=1000, flush_interval_s=0.1)
         task = asyncio.ensure_future(drain(one_row_then_quiet(), sink))
-        await asyncio.sleep(0.6)
+        await until(appended.is_set, "the row appended")
+        await asyncio.sleep(1.0)  # ten flush intervals with no new row
         landed = list(tmp_path.glob("part-*.parquet"))
         await task
         return landed
 
     landed = run_checked(go)
-    assert landed and pq.read_table(landed[0])["id"].to_pylist() == ["r0"]
+    gap(bool(landed), "no part written while the stream was quiet")
+    assert pq.read_table(landed[0])["id"].to_pylist() == ["r0"]
 
 
 # --- concurrency primitives ------------------------------------------------------------------
@@ -344,25 +471,44 @@ class ShrinkTo:
         return self.n
 
 
-def test_shrinking_the_window_holds_new_admissions_until_inflight_drops_below_it():
-    admitted_at: list[int] = []
-    inflight = 0
-
-    async def holder(limiter):
-        nonlocal inflight
-        async with limiter.slot():
-            inflight += 1
-            admitted_at.append(inflight)
-            await asyncio.sleep(0.1)  # longer than a tick: the shrink lands while all four hold
-            inflight -= 1
+def test_shrinking_the_window_holds_admissions_until_inflight_drops_below_it():
+    """Four holders at once under limit 4; the limit drops to 2 while they hold; releasing them
+    one by one admits a waiter only once fewer than 2 are in flight."""
+    ticks: list[dict] = []
 
     async def go():
-        async with AdaptiveLimiter(ShrinkTo(4, 2)) as limiter:
-            await asyncio.gather(*(holder(limiter) for _ in range(10)))
+        holding: list[int] = []
+        releases = {i: asyncio.Event() for i in range(6)}
+
+        async def holder(limiter, i):
+            async with limiter.slot():
+                holding.append(i)
+                await releases[i].wait()
+                holding.remove(i)
+
+        async with AdaptiveLimiter(ShrinkTo(4, 2), on_tick=ticks.append) as limiter:
+            tasks = [asyncio.ensure_future(holder(limiter, i)) for i in range(6)]
+            await until(lambda: len(holding) == 4, "four holders at once")
+            first_four = list(holding)
+            await until(lambda: any(t["limit"] == 2 for t in ticks), "the shrink to 2")
+            await asyncio.sleep(0.05)
+            assert len(holding) == 4  # a shrink never evicts a holder
+
+            waiting = [i for i in range(6) if i not in first_four]
+            for released, i in enumerate(first_four[:3], start=1):
+                releases[i].set()
+                if released < 3:  # 3, then 2 in flight: not below the limit, nobody admitted
+                    await asyncio.sleep(0.05)
+                    assert not any(w in holding for w in waiting), (released, holding)
+            await until(lambda: any(w in holding for w in waiting), "one waiter admitted")
+            await asyncio.sleep(0.05)
+            assert len(holding) == 2  # 1 left of the first four + exactly one waiter
+
+            for e in releases.values():
+                e.set()
+            await asyncio.gather(*tasks)
 
     run_checked(go)
-    assert max(admitted_at[:4]) <= 4
-    assert max(admitted_at[4:]) <= 2, admitted_at
 
 
 def test_cancellation_churn_never_leaks_a_slot():
@@ -382,22 +528,18 @@ def test_cancellation_churn_never_leaks_a_slot():
                 rng.choice(tasks).cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-            entered = asyncio.Event()
-            count = 0
+            inside: list[int] = []
             release = asyncio.Event()
 
-            async def occupy():
-                nonlocal count
+            async def occupy(i):
                 async with limiter.slot():
-                    count += 1
-                    if count == 3:
-                        entered.set()
+                    inside.append(i)
                     await release.wait()
 
-            occupants = [asyncio.ensure_future(occupy()) for _ in range(4)]
-            await asyncio.wait_for(entered.wait(), 1.0)  # all three slots came back
+            occupants = [asyncio.ensure_future(occupy(i)) for i in range(4)]
+            await until(lambda: len(inside) == 3, "all three slots back")
             await asyncio.sleep(0.05)
-            assert count == 3  # and the fourth waits
+            assert len(inside) == 3  # and the fourth waits
             release.set()
             await asyncio.gather(*occupants)
 
@@ -413,17 +555,14 @@ def test_the_controller_hears_backpressure_while_the_row_is_still_retrying(stub)
     async def go():
         async with AdaptiveClient(stub.endpoint, window=Fixed(2), signal_source="none",
                                   on_tick=ticks.append) as client:
-            post = asyncio.ensure_future(client.post(to_request({"text": "hi"})))
-            deadline = time.monotonic() + 3.0
-            while not any(t["bp"] for t in ticks) and time.monotonic() < deadline:
-                await asyncio.sleep(TICK)
+            post = asyncio.ensure_future(client.post(default_to_request({"text": "hi"})))
+            await until(lambda: any(t["bp"] for t in ticks), "a tick with backpressure")
             still_retrying = not post.done()
             post.cancel()
             await asyncio.gather(post, return_exceptions=True)
             return still_retrying
 
     assert run_checked(go)
-    assert any(t["bp"] for t in ticks)
 
 
 class CountingClient(httpx.AsyncClient):
@@ -444,23 +583,21 @@ class CountingClient(httpx.AsyncClient):
             self.inflight -= 1
 
 
-def test_concurrent_callers_elect_one_prober_and_all_pass_when_it_closes(stub):
-    probes = 0
-
-    def recovering(request):
-        nonlocal probes
-        probes += 1
-        return 503 if probes <= 3 else 200
-
-    stub.status_for = recovering
-    stub.latency_s = 0.02
+def test_concurrent_callers_elect_one_prober_and_pass_only_when_it_closes(stub):
+    healthy = threading.Event()
+    stub.status_for = lambda request: 200 if healthy.is_set() else 503
+    stub.latency_s = 0.01
 
     async def go():
         breaker = Breaker(threshold=1, probe_interval=0.01)
         breaker.fail()
         async with CountingClient() as client:
             url = f"{stub.endpoint}/chat/completions"
-            await asyncio.gather(*(breaker.gate(client, url, "stub") for _ in range(10)))
+            gates = [asyncio.ensure_future(breaker.gate(client, url, "stub")) for _ in range(10)]
+            await until(lambda: stub.probes >= 3, "three failed probes")
+            assert not any(g.done() for g in gates)  # nobody passes an open circuit
+            healthy.set()
+            await asyncio.wait_for(asyncio.gather(*gates), 5.0)
         return breaker, client.peak
 
     breaker, peak = run_checked(go)
@@ -468,9 +605,10 @@ def test_concurrent_callers_elect_one_prober_and_all_pass_when_it_closes(stub):
     assert peak == 1  # one probe at a time, never ten
 
 
-def test_a_cancelled_prober_hands_over_and_the_waiters_still_pass(stub):
-    stub.status_for = lambda request: 503
-    stub.latency_s = 0.02
+def test_a_cancelled_prober_hands_over_and_the_waiters_pass_only_when_it_closes(stub):
+    healthy = threading.Event()
+    stub.status_for = lambda request: 200 if healthy.is_set() else 503
+    stub.latency_s = 0.01
 
     async def go():
         breaker = Breaker(threshold=1, probe_interval=0.01)
@@ -478,16 +616,18 @@ def test_a_cancelled_prober_hands_over_and_the_waiters_still_pass(stub):
         async with CountingClient() as client:
             url = f"{stub.endpoint}/chat/completions"
             prober = asyncio.ensure_future(breaker.gate(client, url, "stub"))
-            await asyncio.sleep(0.05)  # the first caller is probing
+            await until(lambda: stub.probes >= 1, "the first caller probing")
             waiters = [asyncio.ensure_future(breaker.gate(client, url, "stub")) for _ in range(2)]
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.02)
             prober.cancel()
             await asyncio.gather(prober, return_exceptions=True)
-            await asyncio.sleep(0.1)  # a waiter takes over the probing
-            stub.status_for = lambda request: 200
-            await asyncio.wait_for(asyncio.gather(*waiters), 2.0)
+            at_cancel = stub.probes
+            await until(lambda: stub.probes >= at_cancel + 2, "a waiter probing in its place")
+            assert not any(w.done() for w in waiters)  # still open: nobody passes
+            healthy.set()
+            await asyncio.wait_for(asyncio.gather(*waiters), 5.0)
         return breaker, client.peak
 
     breaker, peak = run_checked(go)
-    assert breaker.opens >= 2  # the circuit was re-opened by a waiter, not left unattended
+    assert breaker.opens == 2  # re-opened by a waiter, not left unattended
     assert peak == 1

@@ -327,7 +327,7 @@ async def _row(run: _Run, id_: str, row: dict) -> None:
     """One row: build the request, wait for a slot, send it, parse the reply, publish."""
     holding_prepare = True
 
-    def admitted() -> None:  # the body is in flight now, no longer waiting: free the prepare limit
+    def admitted() -> None:  # the body is in flight: free its place in the prepare limit
         nonlocal holding_prepare
         if holding_prepare:
             run.prepare.release()

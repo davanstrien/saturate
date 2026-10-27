@@ -95,7 +95,8 @@ class Breaker:
         pauses the whole pump, not just new rows. One caller probes; the rest
         wait on the close event (no double-counted opens). The probe is
         `probe_body(model)` posted to the caller's own route: any response below
-        500, a 4xx included, proves the server is up."""
+        500, a 4xx included, proves the server is up — except a 2xx that is not
+        a JSON object, which is something answering in the server's place."""
         while True:
             if self.dead:
                 raise FatalTransportError(
@@ -121,7 +122,7 @@ class Breaker:
                 try:
                     r = await client.post(probe_url, json=probe_body(model), timeout=PROBE_TIMEOUT_S,
                                           headers=PROBE_HEADERS)
-                    if r.status_code < 500:
+                    if _server_answered(r):
                         break
                 except (httpx.TimeoutException, httpx.TransportError):
                     pass
@@ -244,6 +245,15 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
         wait, delay = next_wait(delay, outcome.retry_after)
         await asyncio.sleep(min(wait, max(0.0, left())))
     return None, last_err
+
+
+def _server_answered(r: httpx.Response) -> bool:
+    """Whether a probe's response came from the inference server: any status below 500, except
+    a 2xx without a JSON object (a proxy or maintenance page answering in the server's place,
+    which would close the circuit only for it to open again on the next rows)."""
+    if 200 <= r.status_code < 300:
+        return _json_object(r) is not None
+    return r.status_code < 500
 
 
 def _json_object(r: httpx.Response) -> dict | None:

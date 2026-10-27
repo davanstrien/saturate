@@ -14,16 +14,18 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
 import statistics
 import sys
 import time
 from collections import deque
 from collections.abc import Callable
+from typing import cast
 
 import anyio
 import httpx2 as httpx
 
-from saturate import transport
+from saturate import aiohttp_client, transport
 from saturate.controller import TICK_S, Auto, Fixed, Obs
 from saturate.signals import HttpScrape, Null
 from saturate.telemetry import tick_record
@@ -321,9 +323,14 @@ class AdaptiveClient:
     def _build(self) -> tuple[httpx.AsyncClient, AdaptiveLimiter]:
         """A fresh HTTP client and limiter. Built at construction, so neither is ever None; the
         client opens no connection and the limiter starts no tick loop until `async with`."""
-        client = httpx.AsyncClient(
-            limits=httpx.Limits(max_connections=1024, max_keepalive_connections=1024),
-            timeout=self._timeout, headers=self._headers)
+        if os.environ.get("SATURATE_HTTP_CLIENT", "aiohttp") == "aiohttp":  # transport A/B (#55)
+            # prototype: same surface as httpx's client for the A/B; a real swap would type it
+            client = cast(httpx.AsyncClient,
+                          aiohttp_client.AsyncClient(1024, timeout=self._timeout, headers=self._headers))
+        else:
+            client = httpx.AsyncClient(
+                limits=httpx.Limits(max_connections=1024, max_keepalive_connections=1024),
+                timeout=self._timeout, headers=self._headers)
         signals = Null() if self._signal_source == "none" else HttpScrape(client, self.base)
         return client, AdaptiveLimiter(self._window, signals=signals, on_tick=self._on_tick)
 

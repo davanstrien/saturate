@@ -260,9 +260,10 @@ class ParquetSink:
         self.error_only_ids = failed - done  # skipped unless retry_errors: resume says how many
         return done if retry_errors else done | failed
 
-    def _pin(self, schema: pa.Schema) -> None:
+    def _pin(self, schema: pa.Schema) -> pa.Schema:
         self._schema = schema
         self._pinned = {f.name: f.type for f in schema if not _untyped(f.type)}  # untyped never pins
+        return schema
 
     def _seed_schema(self) -> None:
         """Dynamic mode, once per sink, before the first probe/flush: read the pin back from
@@ -299,8 +300,10 @@ class ParquetSink:
             widened = pa.unify_schemas([pa.schema([pa.field(name, pinned)]),
                                         pa.schema([pa.field(name, got)])]).field(0).type  # raises on a clash
             if widened != pinned:
+                schema = self._schema
+                assert schema is not None  # a pinned column implies a pinned schema (_pin sets both)
                 self._pinned[name] = widened
-                self._schema = self._schema.set(self._schema.get_field_index(name), pa.field(name, widened))
+                self._schema = schema.set(schema.get_field_index(name), pa.field(name, widened))
             return widened
         key = (name, got)
         ok = self._accepted.get(key)
@@ -391,10 +394,16 @@ class ParquetSink:
         if not self._buf:
             self._buf_since = time.monotonic()
         self._buf.append(record)
-        if len(self._buf) >= self.flush_every or (
-                self.flush_interval_s is not None
-                and time.monotonic() - self._buf_since >= self.flush_interval_s):
+        if self._flush_due():
             self.flush()
+
+    def _flush_due(self) -> bool:
+        """Enough rows buffered, or the oldest buffered row older than the flush interval."""
+        if len(self._buf) >= self.flush_every:
+            return True
+        if self.flush_interval_s is None or self._buf_since is None:
+            return False
+        return time.monotonic() - self._buf_since >= self.flush_interval_s
 
     def flush(self) -> None:
         if not self._buf:
@@ -429,16 +438,16 @@ class ParquetSink:
             # pin seen columns at first sight; pinned columns already conform, so the unify
             # only ever appends new columns — a pinned type never moves, since widening only
             # the NEW part would break multi-part reads
-            self._pin(table.schema if self._schema is None else
-                      pa.unify_schemas([self._schema, table.schema]))
+            schema = self._pin(table.schema if self._schema is None else
+                               pa.unify_schemas([self._schema, table.schema]))
             # every part carries the FULL pinned schema — absent or all-null columns become
             # typed all-null arrays (#12): pyarrow.dataset takes the FIRST fragment's schema
             # by default, so any part missing a pinned column loses that column for the
             # whole cross-part read whenever it sorts first
-            for f in self._schema:
+            for f in schema:
                 if f.name not in table.schema.names:
                     table = table.append_column(f, pa.nulls(len(table), type=f.type))
-            table = table.select(self._schema.names).cast(self._schema)
+            table = table.select(schema.names).cast(schema)
         self._write(f"{self.root}/{name}", table)
         try:  # manifest second: a crash in between leaves an uncovered part -> scanned
             self.fs.makedirs(f"{self.root}/_manifest", exist_ok=True)
@@ -506,8 +515,8 @@ class ParquetSink:
                 bad += 1
             tables.append(t)
         for i, t in enumerate(tables):  # the VALUES must fit the widened types too: a row accepted
-            if t is None:  # before a later row widened its column (2**60, then 0.5) may not
-                continue
+            if t is None or running is None:  # before a later row widened its column (2**60, then
+                continue  # 0.5) may not; no accepted row at all leaves running unset
             try:
                 for j, f in enumerate(t.schema):
                     to = running.field(f.name).type

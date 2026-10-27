@@ -231,7 +231,15 @@ def test_a_5xx_error_row_keeps_the_server_message():
 
 import pytest  # noqa: E402
 
-from saturate.transport import classify, next_wait, transport_failure  # noqa: E402
+from saturate.transport import Outcome, classify, next_wait, transport_failure, unreadable_body  # noqa: E402
+
+
+@pytest.mark.internals
+def test_a_2xx_without_a_json_object_retries_and_tells_the_breaker_but_is_not_pressure():
+    outcome = unreadable_body(200, "<html>maintenance</html>")
+    assert (outcome.retry, outcome.pressure, outcome.breaker_fail) == (True, False, True)
+    assert outcome.error.startswith("http 200: response is not a JSON object: <html>")
+    assert isinstance(outcome, Outcome)
 
 
 @pytest.mark.parametrize("status, retry_after, retry, pressure, breaker_fail", [

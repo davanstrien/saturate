@@ -95,7 +95,8 @@ class Breaker:
         pauses the whole pump, not just new rows. One caller probes; the rest
         wait on the close event (no double-counted opens). The probe is
         `probe_body(model)` posted to the caller's own route: any response below
-        500, a 4xx included, proves the server is up."""
+        500, a 4xx included, proves the server is up — except a 2xx that is not
+        a JSON object, which is something answering in the server's place."""
         while True:
             if self.dead:
                 raise FatalTransportError(
@@ -121,7 +122,7 @@ class Breaker:
                 try:
                     r = await client.post(probe_url, json=probe_body(model), timeout=PROBE_TIMEOUT_S,
                                           headers=PROBE_HEADERS)
-                    if r.status_code < 500:
+                    if _server_answered(r):
                         break
                 except (httpx.TimeoutException, httpx.TransportError):
                     pass
@@ -146,7 +147,7 @@ class Outcome:
 
 
 def classify(status: int, retry_after: str | None = None, text: str = "") -> Outcome:
-    """Classify a non-200 response. 3xx/4xx are poison: this row, not the server, is wrong,
+    """Classify a non-2xx response. 3xx/4xx are poison: this row, not the server, is wrong,
     so no retry and no breaker event. 429 is pressure unless it names its own wait (a paced
     quota, not saturation). 5xx is intermittent server pressure: retry and tell the breaker."""
     if 300 <= status < 400:  # redirects are not followed: a config error, not pressure
@@ -157,6 +158,12 @@ def classify(status: int, retry_after: str | None = None, text: str = "") -> Out
     if 400 <= status < 500:
         return Outcome(False, False, False, f"http {status}: {text[:300]}")
     return Outcome(True, True, True, f"http {status} after retries: {text[:300]}")
+
+
+def unreadable_body(status: int, text: str) -> Outcome:
+    """A 2xx whose body is not a JSON object: a proxy or a maintenance page answering for the
+    server, not a result. Retry it and tell the breaker; it is not saturation."""
+    return Outcome(True, False, True, f"http {status}: response is not a JSON object: {text[:300]}")
 
 
 def transport_failure(exc: BaseException) -> Outcome:
@@ -214,14 +221,19 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
         except (httpx.TimeoutException, httpx.TransportError, asyncio.TimeoutError) as e:
             outcome = transport_failure(e)
         else:
-            if r.status_code == 200:
-                events["successes"] += 1
-                # the successful attempt alone: retries, backoff, breaker waits and poison rows are
-                # not what a request costs the engine, and the controller's waits are scaled to that
-                events.setdefault("latencies", []).append(time.monotonic() - a0)
-                breaker.ok()
-                return r.json(), None
-            outcome = classify(r.status_code, r.headers.get("retry-after"), r.text)
+            if 200 <= r.status_code < 300:
+                body = _json_object(r)
+                if body is not None:  # a success only once there is a result to hand on
+                    events["successes"] += 1
+                    # the successful attempt alone: retries, backoff, breaker waits and poison rows
+                    # are not what a request costs the engine, and the controller's waits are
+                    # scaled to that
+                    events.setdefault("latencies", []).append(time.monotonic() - a0)
+                    breaker.ok()
+                    return body, None
+                outcome = unreadable_body(r.status_code, r.text)
+            else:
+                outcome = classify(r.status_code, r.headers.get("retry-after"), r.text)
         if outcome.pressure and not pressured:
             events["backpressure"] += 1
             pressured = True
@@ -233,6 +245,24 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
         wait, delay = next_wait(delay, outcome.retry_after)
         await asyncio.sleep(min(wait, max(0.0, left())))
     return None, last_err
+
+
+def _server_answered(r: httpx.Response) -> bool:
+    """Whether a probe's response came from the inference server: any status below 500, except
+    a 2xx without a JSON object (a proxy or maintenance page answering in the server's place,
+    which would close the circuit only for it to open again on the next rows)."""
+    if 200 <= r.status_code < 300:
+        return _json_object(r) is not None
+    return r.status_code < 500
+
+
+def _json_object(r: httpx.Response) -> dict | None:
+    """The response body as a dict, or None when it is not a JSON object."""
+    try:
+        body = r.json()
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) else None
 
 
 def _parse_retry_after(value: str | None) -> float | None:

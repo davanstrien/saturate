@@ -54,14 +54,14 @@ These are informational, not a CI gate: shared CI runners vary by 20–30%.
 
 `results/aa-noise-floor-20261027.json`: main against main, `quick` suite, 5 reps, M1 Pro. It was
 taken before the paired ratios, the warmup and the metric renames (its `loop_lag_p99_s` is in
-effect the max, its `peak_rss_mb` is MiB on macOS), so it is the first-cut floor; the per-run JSON
+effect the max, its `peak_rss_mb` is decimal MB on macOS), so it is the first-cut floor; the per-run JSON
 lets the paired ratios be recomputed. The 95% bootstrap intervals of the head/base ratio:
 
 | metric | interval width across scenarios | read |
 |---|---|---|
 | `rows_per_s` | about ±5–15% | a ~10% change is detectable |
 | `cpu_ms_per_row` | about ±5–13% | a ~10% change is detectable |
-| `peak_rss_mb` (MiB) | under ±1% (±9% on overhead-w64) | small changes are detectable |
+| `peak_rss_mb` (MB) | under ±1% (±9% on overhead-w64) | small changes are detectable |
 | `first_durable_s` | ±5% to ±70% | only large changes |
 | `loop_lag_p99_s` (≈ max) | up to −80% / +50% | too noisy for a verdict; use it to spot large blocks |
 
@@ -83,7 +83,7 @@ head/base ratios, min–max across reps and scenarios:
 | `tokens_per_s` | 0.989–1.011 | a ~3% change is detectable |
 | `rows_per_s` | 0.983–1.026 | a ~3–5% change is detectable |
 | `cpu_ms_per_row` | 0.856–1.059 | ~10–15%; long generations are the noisiest |
-| `peak_rss_mb` (MiB) | 0.988–1.012 | small changes are detectable |
+| `peak_rss_mb` (≈MB: KiB/1000 on Linux) | 0.988–1.012 | small changes are detectable |
 | `first_durable_s` | 0.822–1.077 | only large changes |
 
 The engine, not the laptop's single-thread stub, sets the pace here, so a Job run detects

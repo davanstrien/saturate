@@ -27,7 +27,7 @@ RESULTS_URI="${RESULTS_URI:-hf://buckets/davanstrien/saturate-bench}"
 
 command -v git >/dev/null || { apt-get update -qq && apt-get install -y -qq git >/dev/null; }  # not in the vllm image
 curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="${HOME:-/root}/.local/bin:$PATH"
 git clone -q "$REPO_URL" /work/saturate
 cd /work/saturate
 git fetch -q origin '+refs/heads/*:refs/remotes/origin/*'

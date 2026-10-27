@@ -753,6 +753,59 @@ def test_a_second_cancel_stops_the_waiting_while_a_write_is_stuck(tmp_path):
     assert task.cancelled() and waited < 1.0
 
 
+def test_a_second_cancel_during_the_hand_over_detaches_and_the_rows_still_land(monkeypatch):
+    """Ten finished rows wait while the writer is stuck on a write and its queue holds one. A
+    first cancel starts the hand-over; a second ends drain at once. The writing goes on by
+    itself: once unstuck, every row is written, in order, before the writer stops."""
+    monkeypatch.setattr(saturate.writer, "WRITER_QUEUE", 1)
+    unstuck = threading.Event()
+
+    class Stuck(RecordingSink):
+        def append(self, record):
+            unstuck.wait(10)
+            super().append(record)
+
+    class TenWaiting:
+        """One row, then nothing more arrives; ten more already finished and waiting."""
+
+        def __init__(self):
+            self.first = True
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.first:
+                self.first = False
+                return Done("r0", {}, {"reply": "x"}, None)
+            await asyncio.sleep(30)
+
+        async def stop(self):
+            pass
+
+        def take_waiting(self):
+            return [Done(f"r{i}", {}, {"reply": "x"}, None) for i in range(1, 11)]
+
+    sink = Stuck()
+
+    async def go():
+        task = asyncio.ensure_future(drain(TenWaiting(), sink))
+        await asyncio.sleep(0.1)
+        task.cancel()  # first: hand over the ten, which waits on the full queue
+        await asyncio.sleep(0.1)
+        task.cancel()  # second: stop waiting
+        t = time.monotonic()
+        await asyncio.gather(task, return_exceptions=True)
+        waited = time.monotonic() - t
+        unstuck.set()
+        await until(lambda: sink.flushed == 1, "the writer's last flush")
+        return task, waited
+
+    task, waited = run_checked(go)
+    assert task.cancelled() and waited < 1.0
+    assert [r["id"] for r in sink.appended] == [f"r{i}" for i in range(11)]
+
+
 def test_a_zero_flush_interval_means_no_timer():
     class Zero(RecordingSink):
         flush_interval_s = 0

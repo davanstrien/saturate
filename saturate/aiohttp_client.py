@@ -8,7 +8,10 @@ classification code is the same for either client. Prototype for the transport A
 from __future__ import annotations
 
 import asyncio
+import functools
 import json as jsonlib
+import urllib.request
+from urllib.parse import urlsplit
 
 import aiohttp
 import httpx2 as httpx
@@ -60,7 +63,7 @@ class AsyncClient:
     async def _request(self, method: str, url: str, *, timeout, headers, **kwargs) -> Response:
         try:
             async with self._open().request(method, url, timeout=_timeout(timeout or self.timeout),
-                                            headers=headers, **kwargs) as r:
+                                            headers=headers, proxy=_proxy_for(url), **kwargs) as r:
                 return Response(r.status, r.headers, await r.read())
         except asyncio.TimeoutError as e:  # aiohttp's own timeouts are TimeoutErrors too
             raise httpx.ReadTimeout(f"timed out: {e!r}") from e
@@ -75,9 +78,23 @@ class AsyncClient:
         if self._session is None:
             connector = aiohttp.TCPConnector(limit=self._max_connections, limit_per_host=0,
                                              keepalive_timeout=KEEPALIVE_S)
-            self._session = aiohttp.ClientSession(connector=connector, headers=self._headers,
-                                                  trust_env=True)
+            # trust_env would read the proxy settings and ~/.netrc on every request: the proxy is
+            # looked up once per host instead (_proxy_for)
+            self._session = aiohttp.ClientSession(connector=connector, headers=self._headers)
         return self._session
+
+
+def _proxy_for(url: str) -> str | None:
+    """The proxy the environment sets for this URL's host, as httpx would use; looked up once."""
+    parts = urlsplit(url)
+    return _proxy_for_host(parts.scheme, parts.hostname or "")
+
+
+@functools.cache
+def _proxy_for_host(scheme: str, host: str) -> str | None:
+    if host in ("localhost", "127.0.0.1", "::1") or urllib.request.proxy_bypass(host):
+        return None
+    return urllib.request.getproxies().get(scheme)
 
 
 def _timeout(t) -> aiohttp.ClientTimeout:

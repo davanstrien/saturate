@@ -149,7 +149,7 @@ class SuspendedScrape:
 @pytest.mark.internals
 def test_reports_during_a_scrape_count_in_that_tick():
     """The counters are read after the scrape, with no await in between: pressure reported while
-    the scrape is in flight reaches this decision, not the next one (Codex review of #50)."""
+    the scrape is in flight reaches this decision, not the next one."""
     ctrl = Recorder()
 
     async def go():

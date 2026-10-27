@@ -60,6 +60,7 @@ from saturate import (
 from saturate.core import Done
 from saturate.source import skip_done
 from saturate.transport import Breaker
+from saturate.writer import sink_hooks
 
 TICK = 0.02
 
@@ -321,7 +322,7 @@ def test_fatal_lands_every_row_that_completed_before_it(stub, tmp_path):
     """r1 finishes (parsed, so published) before r2's to_request raises the fatal error, while
     the consumer is still busy with r0. r1 was paid for and finished, so it must land; the error
     is raised after it. (Rows still in flight at the fatal error are cancelled; see the cancels
-    test above. Before 0.3 a finished row queued behind the fatal error was lost: #35.)"""
+    test above.)"""
     r1_parsed = threading.Event()
 
     def to_request_fatal_on_r2(row):
@@ -534,7 +535,7 @@ def test_a_slow_sink_bounds_the_rows_waiting_and_is_named_the_bottleneck(stub, t
     assert any(t["bound_by"] == "sink" for t in ticks), [t["bound_by"] for t in ticks]
 
 
-# --- cancellation and failure edges found in review (Codex, #54) ----------------------------
+# --- cancellation and failure edges ---------------------------------------------------------
 
 def test_a_cancel_landing_as_a_row_is_handed_over_loses_nothing(stub, tmp_path):
     """parse schedules a cancel of the consumer before it returns: the row is published while
@@ -681,6 +682,82 @@ def test_the_reader_reads_at_most_read_ahead_rows_beyond_what_was_taken(stub):
     run_checked(go)
     ahead = saturate.pipeline.READ_AHEAD
     assert ahead <= read <= ahead + 3, read  # the feeder took at most 3 (2 placed, 1 waiting)
+
+
+def test_an_input_error_before_a_write_failure_is_the_error_raised(tmp_path):
+    """The input raises after one row; writing that row fails afterwards. The input's error
+    came first, so it is the one raised (the write failure is logged)."""
+
+    class SlowThenFails(RecordingSink):
+        def append(self, record):
+            time.sleep(0.1)
+            raise OSError("write failed")
+
+    async def one_then_raise():
+        yield Done("r0", {"text": "row 0"}, {"reply": "x"}, None)
+        raise SourceBoom("input failed")
+
+    with pytest.raises(SourceBoom):
+        run_checked(lambda: drain(one_then_raise(), SlowThenFails()))
+
+
+def test_a_cancel_before_a_write_failure_stays_a_cancel(tmp_path):
+    class SlowThenFails(RecordingSink):
+        def append(self, record):
+            time.sleep(0.3)
+            raise OSError("write failed")
+
+    async def one_then_quiet():
+        yield Done("r0", {"text": "row 0"}, {"reply": "x"}, None)
+        await asyncio.sleep(30)
+
+    async def go():
+        task = asyncio.ensure_future(drain(one_then_quiet(), SlowThenFails()))
+        await asyncio.sleep(0.1)  # the row is with the writer, its append still running
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return task
+
+    assert run_checked(go).cancelled()
+
+
+def test_a_second_cancel_stops_the_waiting_while_a_write_is_stuck(tmp_path):
+    """A write is stuck; the first cancel waits for it; a second cancel, during the final wait,
+    ends drain at once (the write finishes in the background)."""
+    unstuck = threading.Event()
+
+    class Stuck(RecordingSink):
+        def append(self, record):
+            unstuck.wait(10)
+            super().append(record)
+
+    async def one_then_quiet():
+        yield Done("r0", {"text": "row 0"}, {"reply": "x"}, None)
+        await asyncio.sleep(30)
+
+    async def go():
+        task = asyncio.ensure_future(drain(one_then_quiet(), Stuck()))
+        await asyncio.sleep(0.1)
+        task.cancel()  # first: drain waits for the stuck write
+        await asyncio.sleep(0.2)
+        assert not task.done()
+        task.cancel()  # second: stop waiting
+        t = time.monotonic()
+        await asyncio.gather(task, return_exceptions=True)
+        waited = time.monotonic() - t
+        unstuck.set()  # let the write finish in the background before the leak check
+        await asyncio.sleep(0.2)
+        return task, waited
+
+    task, waited = run_checked(go)
+    assert task.cancelled() and waited < 1.0
+
+
+def test_a_zero_flush_interval_means_no_timer():
+    class Zero(RecordingSink):
+        flush_interval_s = 0
+
+    assert sink_hooks(Zero()).flush_interval_s is None
 
 
 # --- the transport and the sink ------------------------------------------------
@@ -963,7 +1040,8 @@ class Sequence:
 
 def test_a_cancellation_right_after_an_immediate_admission_leaks_no_slot():
     """A task admitted at once and cancelled at its next await must give the slot back.
-    anyio <= 4.15.1 released the wrong borrower on this path (Codex review of #51)."""
+    The slot takes a free token without awaiting: anyio <= 4.15.1 releases the wrong borrower when
+    a cancel lands at that await (#52)."""
 
     async def go():
         async with AdaptiveLimiter(Fixed(2)) as limiter:
@@ -984,7 +1062,8 @@ def test_a_cancellation_right_after_an_immediate_admission_leaks_no_slot():
 
 def test_growing_after_a_shrink_admits_only_up_to_the_new_limit():
     """Four held at limit 4; shrink to 2, then grow to 3: three would still be too many with
-    four in flight, so the queued waiter stays queued (anyio 4.10 admitted it)."""
+    four in flight, so the queued waiter stays queued. (anyio before 4.14.2 admits it: this test pins
+    the anyio floor.)"""
     ticks: list[dict] = []
 
     async def go():
@@ -1008,8 +1087,8 @@ def test_growing_after_a_shrink_admits_only_up_to_the_new_limit():
 
 def test_a_release_and_immediate_reentry_does_not_jump_a_queued_waiter():
     """At limit 1 with a waiter queued, a holder that leaves and asks again in the same step
-    (no await between) goes behind the waiter: never two holders at limit 1 (anyio 4.10 handed
-    the freed token to both)."""
+    (no await between) goes behind the waiter: never two holders at limit 1. (anyio before 4.15.0
+    hands the freed token to both: this test pins the anyio floor.)"""
 
     async def go():
         async with AdaptiveLimiter(Fixed(1)) as limiter:

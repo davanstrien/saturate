@@ -53,8 +53,9 @@ class SinkHooks:
 
 
 def sink_hooks(sink) -> SinkHooks:
+    interval = getattr(sink, "flush_interval_s", None)
     return SinkHooks(probe=getattr(sink, "probe", None),
-                     flush_interval_s=getattr(sink, "flush_interval_s", None),
+                     flush_interval_s=interval if interval and interval > 0 else None,  # 0: no timer
                      begin_run=getattr(sink, "begin_run", None),
                      write_telemetry=getattr(sink, "write_telemetry", None),
                      write_stats=getattr(sink, "write_stats", None),
@@ -83,7 +84,9 @@ async def drain(results: AsyncIterable[Done], sink, shard: tuple[int, int] = (0,
                     holding = None
             except asyncio.CancelledError:
                 if not reading.cancel_called:  # you cancelled, not the writer
-                    await _wait_out(asyncio.ensure_future(_hand_over_the_rest(results, writer, holding)))
+                    writer.cancelled = True  # this was the first cancel: any other stops the waiting
+                    await _wait_out(asyncio.ensure_future(_hand_over_the_rest(results, writer, holding)),
+                                    writer)
                 raise
     return stats
 
@@ -109,14 +112,20 @@ def _closing(results):
     return contextlib.aclosing(results) if hasattr(results, "aclose") else contextlib.nullcontext()
 
 
-async def _wait_out(task: asyncio.Future) -> None:
-    """Wait for `task` to finish. A first cancel does not stop the task or the wait; a second
-    stops the wait, and the task goes on by itself."""
-    try:
-        await asyncio.shield(task)
-    except asyncio.CancelledError:
-        await asyncio.shield(task)
-        raise
+async def _wait_out(task: asyncio.Future, writer: _Writer) -> None:
+    """Wait for `task` to finish. Across the whole drain, the first cancel does not stop the
+    waiting; any later one does (the task goes on by itself)."""
+    cancelled_here = False
+    while True:
+        try:
+            await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            if writer.cancelled:
+                raise
+            writer.cancelled = cancelled_here = True
+    if cancelled_here:  # waited through it; the cancel still goes on
+        raise asyncio.CancelledError
 
 
 @contextlib.asynccontextmanager
@@ -130,13 +139,15 @@ async def _writer(sink, stats) -> AsyncGenerator[_Writer, None]:
         yield writer
     except BaseException as e:
         caller_error = e
-    await _wait_out(asyncio.ensure_future(writer.finish(failed=caller_error is not None)))
-    if writer.failure is not None:  # a failed write stopped the run: that is its error
-        if caller_error is not None and not isinstance(caller_error, asyncio.CancelledError):
-            _log(f"after the write failed, also: {caller_error!r}")
-        raise writer.failure
+    await _wait_out(asyncio.ensure_future(writer.finish(failed=caller_error is not None)), writer)
+    # The first failure is the error. A failed write stops the reading at once, so drain ends
+    # without an error of its own: an error the caller hit (a cancel included) came first.
     if caller_error is not None:
+        if writer.failure is not None:
+            _log(f"writing also failed: {writer.failure!r}")
         raise caller_error
+    if writer.failure is not None:
+        raise writer.failure
 
 
 class _Writer:
@@ -149,6 +160,7 @@ class _Writer:
         self.hooks = sink_hooks(sink)
         self.failure: BaseException | None = None
         self.on_failure: Callable[[], None] = lambda: None
+        self.cancelled = False  # drain was cancelled once: a second cancel stops the waiting
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=WRITER_QUEUE)
         self._thread = ThreadPoolExecutor(1, thread_name_prefix="saturate-writer")
         self._task: asyncio.Task | None = None

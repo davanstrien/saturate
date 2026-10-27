@@ -359,8 +359,8 @@ def test_classify_rules_hold_for_every_status(status, retry_after, text):
 
 @pytest.mark.internals
 def test_a_retry_cancelled_mid_flight_still_counts():
-    """A retry is reported as it starts: cancelled during its POST, it still counts (Codex review
-    of #50; main counted it at the start too)."""
+    """A retry is reported as it starts: cancelled during its POST, it still counts, in the tick
+    it started."""
     import saturate.transport as t
 
     class FailThenHang:
@@ -399,7 +399,7 @@ def test_a_retry_cancelled_mid_flight_still_counts():
 @pytest.mark.internals
 def test_a_success_with_malformed_usage_still_counts_and_resets_the_breaker():
     """A 200 whose usage holds null counts: the row's result is fine, the attempt is a success
-    and the breaker resets; the malformed count is taken as 0 (Codex review of #50)."""
+    and the breaker resets; the malformed count is taken as 0."""
 
     class MalformedUsage(_Resp):
         def json(self):

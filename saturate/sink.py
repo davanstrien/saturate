@@ -615,7 +615,7 @@ def as_sink(output, flush_every: int | None = None, schema: pa.Schema | None = N
 
 
 def __getattr__(name: str):
-    """drain() moved to saturate.writer with the writer thread; it stays importable from here."""
+    """drain() lives in saturate.writer, next to the writer thread; it is importable from here too."""
     if name == "drain":
         from saturate.writer import drain
 

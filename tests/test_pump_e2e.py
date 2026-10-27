@@ -315,7 +315,8 @@ def test_prepare_stage_offloads_to_request_and_the_verdict_names_it(stub, tmp_pa
         assert all(t["prep_workers"] == workers for t in ticks)
         if workers == 0:
             assert prep_ticks > len(ticks) / 2, [t["bound_by"] for t in ticks]
-            assert stats.input_bound and stats.bound_by.get("prep", 0) == prep_ticks
+            assert stats.bound_by.get("prep", 0) == prep_ticks
+            assert stats.input_bound == any(t["input_bound"] for t in ticks)  # CONTRACT §7
             assert any(h.startswith("PREP-BOUND: to_request took") for h in stats.hints), stats.hints
         else:
             assert prep_ticks <= len(ticks) / 2, [t["bound_by"] for t in ticks]

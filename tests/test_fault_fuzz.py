@@ -36,7 +36,7 @@ class FaultyServer:
 
     def __init__(self, stub: StubServer, plan: dict[str, str]):
         self.plan, self.attempts = plan, collections.Counter()
-        self.current: dict[str, object] = {}  # each row's fault for its attempt in progress
+        self.current: dict[str, int | str] = {}  # each row's fault (a status, "drop" or "html")
         stub.drop_for = self.start_attempt
         stub.status_for = lambda request: self.status(text_of(request))
         stub.raw_for = self.body
@@ -68,6 +68,8 @@ def text_of(request: dict) -> str:
 
 
 def records(out: str) -> list[dict]:
+    """Every record in the parts, error rows and repeats included (read_output hides both, and
+    the test counts them)."""
     found = []
     for path in sorted(glob.glob(f"{out}/part-*.parquet")):
         found += pq.read_table(path).to_pylist()
@@ -96,8 +98,7 @@ def quick(monkeypatch):
 def test_any_mix_of_faults_ends_with_every_row_accounted_and_resumable(quick, faults):
     rows = [(f"r{i}", {"text": f"row {i}"}) for i in range(len(faults))]
     plan = {f"row {i}": fault for i, fault in enumerate(faults)}
-    out = tempfile.mkdtemp(prefix="fuzz-")
-    with StubServer() as stub:
+    with tempfile.TemporaryDirectory(prefix="fuzz-") as out, StubServer() as stub:
         server = FaultyServer(stub, plan)
         stats = run(stub, out, rows)  # raises RowsLostError if a row went missing
         assert stats.rows_unaccounted == 0

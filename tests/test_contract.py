@@ -1313,7 +1313,7 @@ def test_an_open_breaker_gives_up_on_time_when_a_probe_hangs(stub):
     from saturate.http import HttpClient
     from saturate.transport import Breaker, FatalTransportError
 
-    stub.latency_s = 10.0  # every probe hangs longer than the breaker may stay open
+    stub.latency_s = 1.0  # every probe hangs longer than the breaker may stay open (0.3 s)
 
     async def go():
         breaker = Breaker(threshold=1, probe_interval=0.01, max_open_s=0.3)

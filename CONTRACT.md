@@ -124,9 +124,10 @@ and telemetry writes are best-effort sidecars: failures are non-fatal, and sinks
 `write_stats` produce no stats file. The marker guarantees ordering, not sidecar presence.
 
 Before the marker, a run that ends normally checks that every row it read was skipped or
-written: `rows_total == rows_done_prior + rows_deduped + rows_processed + rows_failed`. If not,
-it raises `RowsLostError` and writes no marker; the rows already written stay, and a re-run
-resumes the rest.
+handed to the sink (counted as it is handed over):
+`rows_total == rows_done_prior + rows_deduped + rows_processed + rows_failed`. If not, it raises
+`RowsLostError` and writes no marker; the rows already written stay, and a re-run resumes the
+rest. The check covers the pipeline, not the sink's own storage.
 
 ## 6. Telemetry (frozen keys)
 

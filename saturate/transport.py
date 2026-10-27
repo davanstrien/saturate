@@ -132,10 +132,10 @@ class Breaker:
         print("[pump] circuit CLOSED — server responding again, resuming admission",
               file=sys.stderr, flush=True)
 
-
     @staticmethod
     async def _probe(client: HttpClient, url: str, model: str | None, limit: float) -> bool:
-        """Whether the inference server answered a probe within `limit` seconds."""
+        """Whether the inference server answered a probe within `limit` seconds. The capped phase
+        timeouts keep each phase short; wait_for bounds their sum, which could reach 3x `limit`."""
         try:
             r = await asyncio.wait_for(client.post(url, json=probe_body(model),
                                                    timeouts=client.timeouts.capped(limit),

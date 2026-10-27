@@ -90,7 +90,8 @@ class Stats:
 
     @property
     def rows_unaccounted(self) -> int:
-        """Rows read but neither skipped nor written; 0 after every run that ends normally."""
+        """Rows read but neither skipped nor handed to the sink; 0 after every run that ends
+        normally."""
         accounted = self.rows_done_prior + self.rows_deduped + self.rows_processed + self.rows_failed
         return self.rows_total - accounted
 
@@ -234,13 +235,13 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
         limiter = client.limiter
         dialect = client.dialect
         stats.breaker_opens = client.breaker.opens
-    if stats.rows_unaccounted:  # a lost row is a bug: the run must not certify itself complete
-        raise RowsLostError(f"{stats.rows_unaccounted} of {stats.rows_total} rows were read but "
-                            "neither skipped nor written; no completion marker was written, and a "
-                            "re-run resumes them")
 
     if writer is not None:
         await writer  # never two writers on one file
+    if stats.rows_unaccounted:  # a lost row is a bug: the run must not certify itself complete
+        raise RowsLostError(f"{stats.rows_unaccounted} of {stats.rows_total} rows were read but "
+                            "neither skipped nor handed to the sink; no completion marker was "
+                            "written, and a re-run resumes them")
     stats.elapsed_s = round(time.monotonic() - t0, 2)
     stats.final_limit = limiter.limit
     stats.retries = getattr(limiter, "retries_total", 0)  # an embedder's own limiter may count none

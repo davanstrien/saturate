@@ -1325,3 +1325,28 @@ def test_an_open_breaker_gives_up_on_time_when_a_probe_hangs(stub):
             return time.monotonic() - t
 
     assert asyncio.run(go()) < 2.0
+
+
+@pytest.mark.internals
+def test_a_run_that_loses_a_row_raises_and_writes_no_marker(stub, tmp_path, monkeypatch):
+    """The row count at the end of a run: a row lost on its way to the sink (here the writer
+    drops the first one it gets) fails the run instead of certifying it complete."""
+    import saturate.writer as writer
+
+    append = writer._Writer._append
+    dropped = []
+
+    def lossy_append(self, batch):
+        if not dropped:
+            dropped.append(batch[0])
+            batch = batch[1:]
+        append(self, batch)
+
+    monkeypatch.setattr(writer._Writer, "_append", lossy_append)
+    with pytest.raises(saturate.RowsLostError, match="1 of 5 rows"):
+        pump(rows(5), default_to_request, default_parse, endpoint=stub.endpoint,
+             output=str(tmp_path), window=Fixed(2), fail_fast=0)
+    assert not list(tmp_path.glob("completions/*.done"))
+    stats = pump(rows(5), default_to_request, default_parse, endpoint=stub.endpoint,
+                 output=str(tmp_path), window=Fixed(2), fail_fast=0)  # the re-run fills the gap
+    assert stats.rows_processed == 1 and stats.rows_unaccounted == 0

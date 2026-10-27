@@ -355,3 +355,62 @@ def test_classify_rules_hold_for_every_status(status, retry_after, text):
     if status >= 500:
         assert out.pressure
     assert str(status) in out.error and len(out.error) <= 400  # the server's text is capped
+
+
+@pytest.mark.internals
+def test_a_retry_cancelled_mid_flight_still_counts():
+    """A retry is reported as it starts: cancelled during its POST, it still counts (Codex review
+    of #50; main counted it at the start too)."""
+    import saturate.transport as t
+
+    class FailThenHang:
+        timeout = httpx.Timeout(30.0, read=1800.0)
+
+        def __init__(self):
+            self.posts = 0
+            self.second_started = asyncio.Event()
+
+        async def post(self, url, **kwargs):
+            self.posts += 1
+            if self.posts == 1:
+                return _Resp(503)
+            self.second_started.set()
+            await asyncio.Event().wait()  # never answers
+
+    async def go():
+        client, observed = FailThenHang(), _Observed()
+        request = make_json_request("/chat/completions", {})
+        task = asyncio.ensure_future(call_endpoint(client, "http://x", request, Breaker(), observed,
+                                                   budget_s=30.0))
+        await asyncio.wait_for(client.second_started.wait(), 5.0)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return observed
+
+    t_backoff = t.BACKOFF_BASE_S
+    t.BACKOFF_BASE_S = 0.01
+    try:
+        observed = asyncio.run(go())
+    finally:
+        t.BACKOFF_BASE_S = t_backoff
+    assert sum(a.retry for a in observed) == 1
+
+
+@pytest.mark.internals
+def test_a_success_with_malformed_usage_still_counts_and_resets_the_breaker():
+    """A 200 whose usage holds null counts: the row's result is fine, the attempt is a success
+    and the breaker resets; the malformed count is taken as 0 (Codex review of #50)."""
+
+    class MalformedUsage(_Resp):
+        def json(self):
+            return {"choices": [], "usage": {"prompt_tokens": None, "completion_tokens": 1}}
+
+    breaker = Breaker()
+    for _ in range(3):
+        breaker.fail()
+    observed = _Observed()
+    body, err = asyncio.run(call_endpoint(_Client(MalformedUsage(200)), "http://x",
+                                          make_json_request("/chat/completions", {}), breaker, observed))
+    assert err is None and body["usage"]["prompt_tokens"] is None
+    assert breaker.consecutive == 0
+    assert [(a.ok, a.tokens) for a in observed] == [(True, 1)]

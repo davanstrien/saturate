@@ -199,10 +199,12 @@ class AdaptiveLimiter:
             await self._tick()
 
     async def _tick(self):
-        counts, self._counts = self._counts, _TickCounts()  # the next tick's reports start fresh
-        self._latencies.extend(counts.latencies)
         t_scrape = time.monotonic()
         gauges = await self.signals.read()
+        # everything since the last tick, read together with no await in between: reports that
+        # arrived during the scrape count in this decision, and a cancelled scrape loses none
+        counts, self._counts = self._counts, _TickCounts()
+        self._latencies.extend(counts.latencies)
         now = time.monotonic()  # actual elapsed, not TICK_S: scrape latency skews the rate
         dt = now - self._t_last
         tok_s = (self.tokens_total - self._last_tokens) / dt if dt > 0 else 0.0

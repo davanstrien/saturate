@@ -536,6 +536,17 @@ def test_a_row_whose_attempts_fail_differently_keeps_the_first_failure(stub, tmp
     assert error.startswith("http 400") and "(first attempt: http 503" in error
 
 
+def test_a_response_with_malformed_usage_lands_its_row(stub, tmp_path):
+    """A server that sends null token counts: the row's output is fine, so it lands; the counts
+    are taken as 0 in the stats."""
+    stub.raw_for = lambda request: (b'{"choices": [{"message": {"content": "hi"}}], '
+                                    b'"usage": {"prompt_tokens": null, "completion_tokens": 3}}')
+    stats = pump([{"text": "row 0"}], default_to_request, default_parse, endpoint=stub.endpoint,
+                 output=str(tmp_path), window=Fixed(1), fail_fast=0)
+    assert (stats.rows_processed, stats.rows_failed) == (1, 0)
+    assert (stats.prompt_tokens, stats.completion_tokens) == (0, 3)
+
+
 def test_timeouts_reach_the_http_client_and_unknown_phases_are_refused():
     async def go():
         async with AdaptiveClient("http://127.0.0.1:1/v1", signal_source="none", read_timeout=99.0,

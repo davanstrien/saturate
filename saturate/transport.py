@@ -142,7 +142,8 @@ class Attempt:
     its row is done: a row backing off for minutes must not hide an overload meanwhile."""
 
     ok: bool = False
-    retry: bool = False  # the attempt was a retry of its row
+    retry: bool = False  # a retry is starting: reported before it is sent, so one cancelled
+    # mid-flight still counts, in the tick it started; its outcome is a separate report
     pressure: bool = False  # the row's first saturation-shaped failure (reported once per row)
     latency_s: float | None = None  # a success: the attempt alone, no backoff or breaker wait
     tokens: int = 0  # a success: prompt + completion tokens from the response's usage
@@ -223,6 +224,8 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
     for attempt in range(5):
         if attempt and (not RETRY_ACTIVE or left() <= 0):
             return None, _row_error(errors)  # hard wall-clock deadline: no attempt starts past it (r6)
+        if attempt:
+            observe(Attempt(retry=True))
         g0 = time.monotonic()
         await breaker.gate(client, url, (req.json or {}).get("model"))  # an open breaker pauses retries too
         t0 += time.monotonic() - g0  # r6: breaker-open time never consumes the row budget (docstring)
@@ -234,11 +237,10 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
         if isinstance(result, dict):  # a success: there is a result to hand on
             # the latency of the successful attempt alone: retries, backoff and breaker waits are
             # not what a request costs the engine, and the controller's waits are scaled to that
-            observe(Attempt(ok=True, retry=attempt > 0, latency_s=time.monotonic() - a0,
-                            tokens=_tokens(result)))
+            observe(Attempt(ok=True, latency_s=time.monotonic() - a0, tokens=sum(usage_tokens(result))))
             breaker.ok()
             return result, None
-        observe(Attempt(retry=attempt > 0, pressure=result.pressure and not pressured))
+        observe(Attempt(pressure=result.pressure and not pressured))
         pressured = pressured or result.pressure
         if result.breaker_fail:
             breaker.fail()
@@ -280,10 +282,18 @@ def _row_error(errors: list[str]) -> str:
     return last if first == last else f"{last} (first attempt: {first})"
 
 
-def _tokens(body: dict) -> int:
-    """Prompt + completion tokens a response reports (0 when it reports no usage)."""
-    usage = body.get("usage") or {}
-    return usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
+def usage_tokens(body: dict) -> tuple[int, int]:
+    """(prompt, completion) tokens a response reports. A count that is missing or not an
+    integer (a server that sends null) is 0: usage is accounting, and a malformed count must not
+    fail a row whose result is fine, or skip the success and breaker reset that come with it."""
+    usage = body.get("usage")
+    if not isinstance(usage, dict):
+        return 0, 0
+    return _count(usage.get("prompt_tokens")), _count(usage.get("completion_tokens"))
+
+
+def _count(value) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def _server_answered(r: httpx.Response) -> bool:

@@ -22,7 +22,7 @@ import time
 import httpx2 as httpx
 
 RETRY_ACTIVE = True  # kill-switch: flip off in tests for determinism
-RETRY_BUDGET_S = 300.0  # total retry wall-clock per row
+RETRY_BUDGET_S = 300.0  # the floor of a row's retry wall-clock; AdaptiveClient scales it with read_timeout
 BACKOFF_BASE_S = 1.0  # first jittered backoff ceiling; doubles per retry up to 60 s
 PROBE_HEADERS = {"x-saturate-probe": "breaker"}  # lets a server (or a stub) tell probes from rows
 PROBE_TIMEOUT_S = 30.0
@@ -181,7 +181,8 @@ def next_wait(delay: float, retry_after: float | None = None,
 
 
 async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
-                        events: dict, breaker: Breaker) -> tuple[dict | None, str | None]:
+                        events: dict, breaker: Breaker,
+                        budget_s: float | None = None) -> tuple[dict | None, str | None]:
     """Returns (response_json, error). `classify` decides what a failed attempt means and
     `next_wait` how long to back off; this loop owns the I/O and the budget.
 
@@ -193,14 +194,16 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
     all. Backpressure counts once per row, however many of its attempts fail: a row that
     always fails (a 500 on one bad image) would otherwise cut the window on every retry and
     hold it at the floor. Many rows failing still counts many times; the breaker sees every
-    attempt."""
+    attempt. `budget_s` is the row's total wall-clock for its attempts (RETRY_BUDGET_S when None):
+    a retry of a request that legitimately takes minutes needs a budget of several of them."""
     url = f"{base.rstrip('/')}{req.route}"
+    budget = RETRY_BUDGET_S if budget_s is None else budget_s
     delay, t0 = BACKOFF_BASE_S, time.monotonic()
     pressured = False
     last_err = "retry budget exhausted"
 
     def left() -> float:
-        return RETRY_BUDGET_S - (time.monotonic() - t0)
+        return budget - (time.monotonic() - t0)
 
     for attempt in range(5):
         if attempt and (not RETRY_ACTIVE or left() <= 0):

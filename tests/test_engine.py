@@ -3,6 +3,7 @@ leaked the spawned server (own session, __exit__ never ran), and teardown only
 waited on the group leader. The GROUP is the teardown unit."""
 
 import os
+import socket
 
 import pytest
 
@@ -48,3 +49,16 @@ def test_group_members_killed_when_leader_exits():
         eng.__enter__()
     with pytest.raises(ProcessLookupError):
         os.killpg(eng.proc.pid, 0)  # the child is gone too
+
+
+def test_a_port_already_in_use_is_refused_before_anything_is_spawned():
+    """Another server on the port would answer the readiness checks for this one (a stale
+    vLLM from an earlier run), and the run would talk to it."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        eng = Engine(model="x", cmd=["sleep", "60"], boot_timeout=5, port=port)
+        with pytest.raises(RuntimeError, match="already in use"):
+            eng.__enter__()
+        assert eng.proc is None  # nothing was spawned

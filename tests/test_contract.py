@@ -35,9 +35,11 @@ import random
 import threading
 import time
 
+import fsspec
 import httpx2 as httpx
 import pyarrow.parquet as pq
 import pytest
+from fsspec.implementations.memory import MemoryFileSystem
 from stub_server import StubServer
 
 import saturate.core
@@ -49,10 +51,12 @@ from saturate import (
     Fixed,
     ParquetSink,
     drain,
+    pump,
     stream,
     through,
 )
 from saturate.core import Done
+from saturate.source import skip_done
 from saturate.transport import Breaker
 
 TICK = 0.02
@@ -99,6 +103,17 @@ def quick_breaker(monkeypatch):
 
 def http_client_closed(client: AdaptiveClient) -> bool:
     return client._client.is_closed
+
+
+def http_client_timeout(client: AdaptiveClient) -> httpx.Timeout:
+    return client._client.timeout
+
+
+@pytest.fixture
+def scaled_retry_budget(monkeypatch):
+    """The retry budget's 300 s floor and the backoff, scaled down to test speed."""
+    monkeypatch.setattr(saturate.transport, "RETRY_BUDGET_S", 0.3)
+    monkeypatch.setattr(saturate.transport, "BACKOFF_BASE_S", 0.01)
 
 
 async def _gated(results, gate: asyncio.Event):
@@ -477,6 +492,65 @@ def test_a_buffered_row_is_flushed_by_age_without_new_arrivals(tmp_path):
     landed = run_checked(go)
     gap(bool(landed), "no part written while the stream was quiet")
     assert pq.read_table(landed[0])["id"].to_pylist() == ["r0"]
+
+
+# --- retry budget, timeouts, resume reads ----------------------------------------------------
+
+@pytest.mark.parametrize("retry_budget_s, lands", [(None, True), (0.3, False)])
+def test_the_default_retry_budget_holds_a_retry_of_a_slow_request(stub, tmp_path, scaled_retry_budget,
+                                                                   retry_budget_s, lands):
+    """Each attempt takes 0.5 s and the first fails. The default budget is max(floor,
+    2 * read_timeout) = 2 s here, so the retry runs and the row lands; a budget held at the
+    0.3 s floor (the old fixed budget, scaled) leaves no time for a retry."""
+    attempts = 0
+
+    def latency(request):
+        nonlocal attempts
+        attempts += 1
+        return 0.5
+
+    stub.latency_for = latency
+    stub.status_for = lambda request: 500 if attempts == 1 else 200
+    stats = pump([{"text": "row 0"}], default_to_request, default_parse, endpoint=stub.endpoint,
+                 output=str(tmp_path), window=Fixed(1), read_timeout=1.0, retry_budget_s=retry_budget_s,
+                 fail_fast=0)
+    assert (stats.rows_processed, stats.rows_failed) == ((1, 0) if lands else (0, 1))
+    assert attempts == (2 if lands else 1)
+
+
+def test_timeouts_reach_the_http_client_and_unknown_phases_are_refused():
+    async def go():
+        async with AdaptiveClient("http://127.0.0.1:1/v1", signal_source="none", read_timeout=99.0,
+                                  timeouts={"connect": 1.5, "pool": 7.0}) as client:
+            return http_client_timeout(client)
+
+    timeout = run_checked(go)
+    assert (timeout.connect, timeout.write, timeout.pool, timeout.read) == (1.5, 30.0, 7.0, 99.0)
+    with pytest.raises(ValueError, match="unknown phase"):
+        AdaptiveClient("http://127.0.0.1:1/v1", timeouts={"read": 5.0})
+
+
+def test_a_resume_check_never_creates_the_output(tmp_path):
+    missing = tmp_path / "never-written"
+    assert saturate.existing_ids(str(missing)) == set()
+    assert list(skip_done(stream(rows(3)), str(missing))) == rows(3)
+    assert not missing.exists()
+
+
+def test_an_output_whose_store_does_not_exist_reads_as_empty():
+    """A remote output that was never created (an hf:// repo) makes the store's listing raise
+    FileNotFoundError; a resume check reads that as "nothing done yet"."""
+
+    class MissingStore(MemoryFileSystem):
+        protocol = "missingstore"
+        store: dict = {}
+        pseudo_dirs = [""]
+
+        def glob(self, path, **kwargs):
+            raise FileNotFoundError(path)
+
+    fsspec.register_implementation("missingstore", MissingStore, clobber=True)
+    assert saturate.existing_ids("missingstore://org/never-created") == set()
 
 
 # --- concurrency primitives ------------------------------------------------------------------

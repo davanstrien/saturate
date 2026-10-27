@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import httpx2 as httpx
 
+from saturate import transport
 from saturate.controller import TICK_S, Auto, Fixed, Obs
 from saturate.signals import HttpScrape, Null
 from saturate.telemetry import tick_record
@@ -232,10 +233,21 @@ class AdaptiveClient:
     def __init__(self, endpoint: str, window: Fixed | Auto | None = None,
                  headers: dict | None = None, read_timeout: float = 1800.0,
                  signal_source: str = "auto",
-                 on_tick: Callable[[dict], None] | None = None):
+                 on_tick: Callable[[dict], None] | None = None,
+                 retry_budget_s: float | None = None,
+                 timeouts: dict[str, float] | None = None):
         self.base = endpoint.rstrip("/")
         self._headers = headers or {}
         self._read_timeout = read_timeout
+        # a row's attempts share one wall-clock budget; it must hold a retry of a long request,
+        # so by default it grows with the read timeout (300 s floor: 3600 s at the default 1800)
+        self.retry_budget_s = (retry_budget_s if retry_budget_s is not None
+                               else max(transport.RETRY_BUDGET_S, 2 * read_timeout))
+        unknown = set(timeouts or {}) - {"connect", "write", "pool"}
+        if unknown:
+            raise ValueError(f"timeouts: unknown phase(s) {sorted(unknown)}; the read timeout is "
+                             "read_timeout=, the others are 'connect', 'write' and 'pool'")
+        self._timeouts = {"connect": 30.0, "write": 30.0, "pool": 30.0, **(timeouts or {})}
         self._signal_source = signal_source
         self.breaker = Breaker()
         self._window_arg = window
@@ -245,7 +257,7 @@ class AdaptiveClient:
 
     async def __aenter__(self):
         limits = httpx.Limits(max_connections=1024, max_keepalive_connections=1024)
-        timeout = httpx.Timeout(30.0, read=self._read_timeout)
+        timeout = httpx.Timeout(read=self._read_timeout, **self._timeouts)
         self._client = httpx.AsyncClient(limits=limits, timeout=timeout, headers=self._headers)
         sig = Null() if self._signal_source == "none" else HttpScrape(self._client, self.base)
         self.limiter = AdaptiveLimiter(self._window_arg, signals=sig, on_tick=self._on_tick)
@@ -272,7 +284,7 @@ class AdaptiveClient:
             if on_admit is not None:
                 on_admit()
             body, err = await call_endpoint(self._client, self.base, req,
-                                            self.limiter.events, self.breaker)
+                                            self.limiter.events, self.breaker, self.retry_budget_s)
         if err is None:
             usage = body.get("usage") or {}
             self.limiter.tokens_total += (usage.get("prompt_tokens", 0)

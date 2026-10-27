@@ -172,6 +172,25 @@ def test_a_cancel_of_the_caller_during_limiter_exit_is_not_swallowed():
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+        assert limiter._task.done()  # the loop finished its cleanup before exit returned
 
     asyncio.run(go())
+
+
+@pytest.mark.internals
+def test_a_limiter_entered_again_still_supervises_its_controller_loop():
+    from saturate.transport import FatalTransportError
+
+    async def go():
+        limiter = AdaptiveLimiter(Fixed(4))
+        async with limiter:
+            pass
+        async with limiter:
+            limiter._task.cancel()
+            await asyncio.sleep(0)
+            async with limiter.slot():
+                pass
+
+    with pytest.raises(FatalTransportError, match="cancelled"):
+        asyncio.run(go())
 

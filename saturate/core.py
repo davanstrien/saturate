@@ -113,6 +113,25 @@ class _Slot:
         self._entered = False
 
 
+async def _wait_for_loop(task: asyncio.Task) -> asyncio.CancelledError | None:
+    """Wait for a stopping controller loop to finish. A cancel of the caller is held until the
+    loop has finished and then returned, to be raised; a second cancel stops the waiting."""
+    caller_cancel = None
+    while not task.done():
+        try:
+            await asyncio.wait({task})  # never raises the loop's own cancellation
+        except asyncio.CancelledError as e:
+            if caller_cancel is not None:
+                raise
+            caller_cancel = e
+    return caller_cancel
+
+
+def _retrieve(task: asyncio.Task) -> None:
+    if not task.cancelled():
+        task.exception()  # marks it retrieved: no "exception was never retrieved" warning
+
+
 class AdaptiveLimiter:
     """Adaptive admission: `async with limiter.slot(): ...; limiter.observe(...)`.
 
@@ -236,6 +255,7 @@ class AdaptiveLimiter:
 
     async def __aenter__(self):
         self._t0 = self._t_last = time.monotonic()
+        self._closing = False  # entered again after an earlier exit: supervise the new loop
         self._task = asyncio.create_task(self._loop())
         return self
 
@@ -243,17 +263,19 @@ class AdaptiveLimiter:
         if self._task is None:
             return
         self._closing = True
-        self._task.cancel()
-        # asyncio.wait returns when the loop ends and never raises the loop's own cancellation;
-        # a cancel of the caller itself still propagates from here
-        await asyncio.wait({self._task})
-        if self._task.cancelled():
-            return
-        failure = self._task.exception()  # a crashed tick loop surfaces here, never dies silently
+        task = self._task
+        task.add_done_callback(_retrieve)  # however exit ends, the loop's outcome is collected
+        task.cancel()
+        caller_cancel = await _wait_for_loop(task)
+        failure = None if task.cancelled() else task.exception()
+        if caller_cancel is not None:
+            if failure is not None:
+                print(f"[pump] controller loop also failed: {failure!r}", file=sys.stderr, flush=True)
+            raise caller_cancel
         if failure is None:
             return
         if not exc or exc[0] is None:
-            raise failure
+            raise failure  # a crashed tick loop surfaces here, never dies silently
         print("[pump] controller loop also failed (primary exception wins)",
               file=sys.stderr, flush=True)  # never mask the body's exception
 

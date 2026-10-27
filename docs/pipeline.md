@@ -162,6 +162,15 @@ that finished before the fatal error was never behind it. It now pins the policy
 marking a bug; the rows 0.2 lost at a fatal error were the ones still in flight, which the policy
 cancels.
 
+**Known costs.** The reader and writer threads cost about 0.15 ms of CPU per row (thread
+wake-ups in both directions; about 4% of a core at 250 rows/s; throughput is unaffected). And on
+Linux, while a process has more than one thread, growing its file-descriptor table waits for an RCU
+grace period: opening the 64th, 128th, 256th, 512th and 1024th descriptor takes 60-100 ms, and that
+call is a new connection's `socket()` on the event loop. A run that ramps its window to 512 pays this
+a few times during the ramp, under half a second in all. Both are measured, and both are left as they
+are for now (#55): the second would need a Linux-specific workaround in the HTTP
+client setup.
+
 **Leak checks.** The reader is a daemon thread, so the contract harness's check for leftover
 non-daemon threads does not count a reader left behind on a stuck input; the test for that case
 releases the input before the check anyway.

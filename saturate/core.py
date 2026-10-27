@@ -23,6 +23,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 
+import anyio
 import httpx2 as httpx
 
 from saturate import transport
@@ -30,7 +31,6 @@ from saturate.controller import TICK_S, Auto, Fixed, Obs
 from saturate.signals import HttpScrape, Null
 from saturate.telemetry import tick_record
 from saturate.transport import Attempt, Breaker, FatalTransportError, Request, call_endpoint, coerce_request
-from saturate.window import Window
 
 
 @dataclasses.dataclass(slots=True)
@@ -66,19 +66,20 @@ class _Slot:
     async def __aenter__(self):
         self._check()  # before queueing on the window...
         t = time.monotonic()
-        await self._l.window.acquire()
+        # the slot itself is the borrower, not the task: one task may hold several slots
+        await self._l._capacity.acquire_on_behalf_of(self)
         admitted = time.monotonic()
         self._l._wait["acquire"] += admitted - t
         try:
             self._check()  # ...and after (r6): the controller may have died while we were queued
         except BaseException:
-            await self._l.window.release()
+            self._l._capacity.release_on_behalf_of(self)
             raise
         self._l._admitted[self] = admitted
 
     async def __aexit__(self, *exc):
         self._l._admitted.pop(self, None)  # never in the way of the release: a leaked count wedges admission
-        await self._l.window.release()
+        self._l._capacity.release_on_behalf_of(self)  # synchronous: no cancellation can interrupt it
 
 
 class AdaptiveLimiter:
@@ -94,7 +95,9 @@ class AdaptiveLimiter:
         self.controller = window or Auto()
         self.signals = signals or Null()
         self.on_tick = on_tick
-        self.window = Window(getattr(self.controller, "initial", 16))
+        # the admission window: the controller resizes it each tick. Shrinking never evicts a
+        # holder; it holds new admissions until fewer than the new limit are in flight
+        self._capacity = anyio.CapacityLimiter(int(getattr(self.controller, "initial", 16)))
         self._counts = _TickCounts()
         self.retries_total = 0  # retry attempts over the run (backpressure counts rows, not attempts)
         self.ticks: list[dict] = []
@@ -110,6 +113,16 @@ class AdaptiveLimiter:
 
     def slot(self) -> _Slot:
         return _Slot(self)
+
+    @property
+    def limit(self) -> int:
+        """The admission window: requests that may be in flight at once."""
+        return int(self._capacity.total_tokens)
+
+    @property
+    def inflight(self) -> int:
+        """Requests holding a slot now."""
+        return self._capacity.borrowed_tokens
 
     def observe(self, attempt: Attempt) -> None:
         """The one way outcomes reach the controller: AdaptiveClient's transport calls it after
@@ -155,13 +168,13 @@ class AdaptiveLimiter:
             return None, False
         w = self._wait
         prep = w["prep"] / max(1, self.prep_workers)  # per-worker occupancy of the prepare stage
-        if self.window.inflight < 0.5 * self.window.limit and max(w["source"], prep) >= 0.25 * dt:
+        if self.inflight < 0.5 * self.limit and max(w["source"], prep) >= 0.25 * dt:
             return ("source" if w["source"] >= prep else "prep"), True
         if self.prep_workers == 0 and w["prep"] >= 0.5 * dt:
             return "prep", False
         if loop_lag_s >= 0.5 * dt:
             return "loop", False
-        if self.window.inflight >= self.window.limit or w["acquire"] > w["source"] + w["prep"]:
+        if self.inflight >= self.limit or w["acquire"] > w["source"] + w["prep"]:
             return "engine", False
         return None, False
 
@@ -215,16 +228,16 @@ class AdaptiveLimiter:
         g = gauges or {}
         # zero tokens with requests in flight is a reading (a stalled or slow engine);
         # None means unobservable: nothing in flight, or an endpoint that never reports usage
-        observable = self.window.inflight > 0 and self.tokens_total > 0
+        observable = self.inflight > 0 and self.tokens_total > 0
         latency_s = self.latency_s
         obs = Obs(waiting=g.get("waiting"), running=g.get("running"),
-                  inflight=self.window.inflight, backpressure=counts.backpressure,
+                  inflight=self.inflight, backpressure=counts.backpressure,
                   successes=counts.successes, input_bound=input_bound,
                   kv=g.get("kv"), hits=g.get("hits"), tok_s=tok_s if tok_s or observable else None,
                   preempts=g.get("preempts"), latency_s=latency_s, oldest_s=self.oldest_s,
                   tick_s=dt if dt > 0 else None)
-        new_limit = self.controller.decide(obs, self.window.limit)
-        rec = tick_record(now - self._t0, self.window.limit, self.window.inflight, gauges,
+        new_limit = self.controller.decide(obs, self.limit)
+        rec = tick_record(now - self._t0, self.limit, self.inflight, gauges,
                           counts.backpressure, counts.successes, input_bound, tok_s,
                           self.controller.last_reason, latency_s, bound_by=bound_by,
                           source_s=self._wait["source"], prep_s=self._wait["prep"],
@@ -235,7 +248,7 @@ class AdaptiveLimiter:
             self.on_tick(rec)
         self._wait["source"] = self._wait["acquire"] = self._wait["prep"] = 0.0
         self._prep_n = 0
-        await self.window.set_limit(new_limit)
+        self._capacity.total_tokens = int(new_limit)  # the setter takes an int, never a float
 
 
 class AdaptiveClient:
@@ -409,7 +422,7 @@ async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]],
                 t = asyncio.create_task(worker(id_, row))
                 tasks.add(t)
                 t.add_done_callback(tasks.discard)
-                while len(tasks) > limiter.window.limit * 2 + 8:
+                while len(tasks) > limiter.limit * 2 + 8:
                     await asyncio.sleep(0.01)  # feed-ahead bound (window-scaled)
                 t_prev = time.monotonic()
         except BaseException as e:  # a crashing source must still release the consumer

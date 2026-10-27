@@ -220,7 +220,7 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
     if writer is not None:
         await writer  # never two writers on one file
     stats.elapsed_s = round(time.monotonic() - t0, 2)
-    stats.final_limit = limiter.window.limit
+    stats.final_limit = limiter.limit
     stats.retries = getattr(limiter, "retries_total", 0)  # an embedder's own limiter may count none
     stats.bound_by = bound_by_counts(limiter.ticks)
     stats.input_bound = stats.bound_by.get("source", 0) + stats.bound_by.get("prep", 0) > 0

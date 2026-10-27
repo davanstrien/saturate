@@ -40,7 +40,7 @@ class StubLimiter:
     records what the pipeline reports (source waits, to_request times, prepare workers)."""
 
     def __init__(self, limit: int = 4):
-        self.window = type("W", (), {"limit": limit})()
+        self.limit = limit
         self.ticks: list[dict] = []
         self.prep_workers = 0
         self.source_waits: list[float] = []

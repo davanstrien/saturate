@@ -108,7 +108,7 @@ def test_slot_exit_always_releases():
         await slot.__aenter__()
         lim._admitted.clear()
         await slot.__aexit__(None, None, None)
-        return lim.window.inflight
+        return lim.inflight
 
     assert run(go()) == 0
 

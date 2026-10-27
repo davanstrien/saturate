@@ -7,6 +7,7 @@ requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Daniel van Strien" }]
 dependencies = [
+    "anyio>=4.10",  # httpx2>=2.9 needs it anyway; CapacityLimiter borrowers, resizing, no-loop init
     "httpx2>=2.9",
     "pyarrow>=19",
     "fsspec>=2024.3",

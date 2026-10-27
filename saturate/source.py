@@ -73,7 +73,7 @@ def skip_done(rows: Iterable[tuple[str, dict]], done, retry_errors: bool = False
     if isinstance(done, str):
         from saturate.sink import ParquetSink
 
-        done = ParquetSink(done)
+        done = ParquetSink(done, create=False)  # a resume check reads; it never creates the output
     error_only: set[str] = set()
     if hasattr(done, "existing_ids"):
         sink, done = done, done.existing_ids(retry_errors=retry_errors)

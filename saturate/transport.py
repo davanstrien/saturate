@@ -22,7 +22,7 @@ import time
 import httpx2 as httpx
 
 RETRY_ACTIVE = True  # kill-switch: flip off in tests for determinism
-RETRY_BUDGET_S = 300.0  # total retry wall-clock per row
+RETRY_BUDGET_S = 300.0  # the floor of a row's retry wall-clock; AdaptiveClient scales it with read_timeout
 BACKOFF_BASE_S = 1.0  # first jittered backoff ceiling; doubles per retry up to 60 s
 PROBE_HEADERS = {"x-saturate-probe": "breaker"}  # lets a server (or a stub) tell probes from rows
 PROBE_TIMEOUT_S = 30.0
@@ -181,7 +181,8 @@ def next_wait(delay: float, retry_after: float | None = None,
 
 
 async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
-                        events: dict, breaker: Breaker) -> tuple[dict | None, str | None]:
+                        events: dict, breaker: Breaker,
+                        budget_s: float | None = None) -> tuple[dict | None, str | None]:
     """Returns (response_json, error). `classify` decides what a failed attempt means and
     `next_wait` how long to back off; this loop owns the I/O and the budget.
 
@@ -193,14 +194,16 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
     all. Backpressure counts once per row, however many of its attempts fail: a row that
     always fails (a 500 on one bad image) would otherwise cut the window on every retry and
     hold it at the floor. Many rows failing still counts many times; the breaker sees every
-    attempt."""
+    attempt. `budget_s` is the row's total wall-clock for its attempts (RETRY_BUDGET_S when None):
+    a retry of a request that legitimately takes minutes needs a budget of several of them."""
     url = f"{base.rstrip('/')}{req.route}"
+    budget = RETRY_BUDGET_S if budget_s is None else budget_s
     delay, t0 = BACKOFF_BASE_S, time.monotonic()
     pressured = False
     last_err = "retry budget exhausted"
 
     def left() -> float:
-        return RETRY_BUDGET_S - (time.monotonic() - t0)
+        return budget - (time.monotonic() - t0)
 
     for attempt in range(5):
         if attempt and (not RETRY_ACTIVE or left() <= 0):
@@ -215,7 +218,8 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
             if req.kind == "multipart":
                 r = await client.post(url, data=req.data, files=req.files)
             elif attempt and RETRY_ACTIVE:  # retries: wall-clock capped to the exact remaining budget
-                r = await asyncio.wait_for(client.post(url, json=req.json, timeout=left()), left())
+                timeout = capped_timeout(getattr(client, "timeout", None), left())
+                r = await asyncio.wait_for(client.post(url, json=req.json, timeout=timeout), left())
             else:
                 r = await client.post(url, json=req.json)
         except (httpx.TimeoutException, httpx.TransportError, asyncio.TimeoutError) as e:
@@ -263,6 +267,20 @@ def _json_object(r: httpx.Response) -> dict | None:
     except ValueError:
         return None
     return body if isinstance(body, dict) else None
+
+
+def capped_timeout(configured: httpx.Timeout | None, cap: float) -> httpx.Timeout:
+    """The client's per-phase timeouts, each capped to `cap` seconds (a phase without a limit gets
+    `cap`). A retry keeps a short connect timeout short, and no phase outlives the row's budget;
+    a single number would replace every phase with the remaining budget, up to an hour."""
+    if configured is None:
+        return httpx.Timeout(cap)
+
+    def phase(limit: float | None) -> float:
+        return cap if limit is None else min(limit, cap)
+
+    return httpx.Timeout(connect=phase(configured.connect), read=phase(configured.read),
+                         write=phase(configured.write), pool=phase(configured.pool))
 
 
 def _parse_retry_after(value: str | None) -> float | None:

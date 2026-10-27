@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -54,6 +55,9 @@ class Engine:
         return f"http://127.0.0.1:{self.port}/v1"
 
     def __enter__(self) -> str:
+        if _port_in_use(self.port):  # readiness would be answered by that server, not ours
+            raise RuntimeError(f"engine: port {self.port} is already in use — another server would answer "
+                               "the readiness checks for this one; stop it or pass port=")
         cmd = self.cmd or _boot(self.engine, self.model, self.port, self.extra_args)
         _log(f"engine: {' '.join(cmd)}")
         # own process group; stdout=2 -> engine chatter to stderr, protecting the CONTRACT §7 stdout line
@@ -93,6 +97,12 @@ class Engine:
                 return  # group empty: teardown verified
             time.sleep(0.1)
         _log(f"engine: process group {pgid} still has members after SIGKILL sweep")
+
+
+def _port_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1.0)
+        return s.connect_ex(("127.0.0.1", port)) == 0
 
 
 def wait_for_health(endpoint: str, timeout_s: int = 1800, proc: subprocess.Popen | None = None,

@@ -112,7 +112,9 @@ def _accepts(got: pa.DataType, pinned: pa.DataType) -> bool:
 
 class ParquetSink:
     def __init__(self, out_uri: str, flush_every: int | None = None, schema: pa.Schema | None = None,
-                 read_workers: int = 16, flush_interval_s: float | None = None):
+                 read_workers: int = 16, flush_interval_s: float | None = None, create: bool = True):
+        """`create=False` opens the output for reading only: no repo, bucket or directory is
+        created, and a missing output reads as empty (resume checks, existing_ids())."""
         import fsspec
 
         self.fs, self.root = fsspec.url_to_fs(out_uri)
@@ -166,7 +168,7 @@ class ParquetSink:
         # typo'd path becomes an empty private repo instead of a hard crash;
         # exist_ok makes re-runs no-ops. Failure here is logged, not fatal —
         # the later glob raises with the real story if the repo truly can't exist.
-        if "hf" in protos and self.root.startswith(("datasets/", "buckets/")):
+        if create and "hf" in protos and self.root.startswith(("datasets/", "buckets/")):
             parts = self.root.split("/")
             if len(parts) >= 3:
                 repo = f"{parts[1]}/{parts[2]}"
@@ -177,12 +179,16 @@ class ParquetSink:
                         HfApi().create_repo(repo, repo_type="dataset", private=True, exist_ok=True)
                     else:
                         HfApi().create_bucket(repo, private=True, exist_ok=True)
+                    # fsspec shares one filesystem instance per process: a read-only check that
+                    # found no repo left "missing" in its cache, and every write would fail on it
+                    self.fs.invalidate_cache()
                 except Exception as e:
                     _log(f"could not ensure output repo {repo}: {e}")
-        try:
-            self.fs.makedirs(self.root, exist_ok=True)
-        except Exception:
-            pass  # HfFileSystem: directories are implicit beyond the repo itself
+        if create:
+            try:
+                self.fs.makedirs(self.root, exist_ok=True)
+            except Exception:
+                pass  # HfFileSystem: directories are implicit beyond the repo itself
 
     def _read_parquet(self, path: str, reader, attempts: int = 3):
         """`reader(file)` on an opened path, or None if the file is unreadable. A remote read can
@@ -231,7 +237,11 @@ class ParquetSink:
         """Manifest-first, exact: any part lacking its manifest sidecar is
         scanned individually (kill-safe). retry_errors=True excludes ids whose
         only record is an error."""
-        manifests = sorted(self.fs.glob(f"{self.root}/_manifest/ids-*.parquet"))
+        try:
+            manifests = sorted(self.fs.glob(f"{self.root}/_manifest/ids-*.parquet"))
+        except FileNotFoundError:  # an output that does not exist yet (a repo never created)
+            self.error_only_ids = set()
+            return set()
         if len(manifests) > 1000:
             _log(f"resume: reading {len(manifests)} manifest files "
                  "(consider larger flush_every for remote outputs)")

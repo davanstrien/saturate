@@ -65,7 +65,7 @@ parts are dropped from that read; read every field with the parts' unified schem
 (`ds.dataset(dir, schema=pa.unify_schemas([pq.read_schema(p) for p in parts]))`),
 `read_output`, or DuckDB `union_by_name`. For a fixed schema from part one, declare it —
 `pump(schema=...)` — every part is cast to it, and a row carrying fields outside the
-declared schema becomes an error row (§4; a direct sink append raises instead). Without a
+declared schema (at any depth, inside lists too) becomes an error row (§4; a direct sink append raises instead). Without a
 declared schema, a row whose value does not widen losslessly into an already-pinned column
 type (§8) likewise becomes an error row — at flush, whichever way it was appended. The library itself writes no token/latency columns — they
 appear when your `parse` emits them. Standard names when written: `prompt_tokens`,
@@ -175,7 +175,8 @@ counted). `input_bound` is true when any tick's `input_bound` was true.
 ## 8. Non-guarantees
 
 No output ordering · no dedup beyond `id` · no schema migration (keep `parse` types stable
-per output dir; a pinned column type never moves and is read back from the newest readable
+per output dir; an output dir written before null-typed fields were left out of parts can
+hold such fields on disk, and a whole-folder read of it can still fail; a pinned column type never moves and is read back from the newest readable
 existing part on resume — a value of the same kind that fits is accepted and cast (an int
 into a double or int32 column, `[1]` into a `list<double>` column, a struct missing a pinned
 field), a struct field the pin lacks extends the pinned struct (§1), any other type change (a

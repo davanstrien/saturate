@@ -1374,3 +1374,26 @@ def test_a_declared_schema_rejects_undeclared_nested_keys(tmp_path):
         sink.probe({"id": "x", "m": {"a": 1, "b": "lost"}, "error": None})
     with pytest.raises(ValueError, match=r"items\[\]\.z"):
         sink.append({"id": "y", "items": [{"k": "x", "z": 2}], "error": None})
+
+
+def test_an_untyped_nested_field_does_not_clash_within_one_batch(tmp_path):
+    """m is not pinned yet. m.new arrives as [] (no type: never written), then as "x" in the
+    same batch. Both probe and flush compared the raw list<null> with string and refused the
+    second row."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    rows = [Done("a", {}, {"m": {"new": [], "k": 1}}, None, {}),
+            Done("b", {}, {"m": {"new": "x", "k": 2}}, None, {})]
+    sink = ParquetSink(str(tmp_path), flush_every=10)
+    stats = asyncio.run(drain(iter_async(rows), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (2, 0)
+    direct = ParquetSink(str(tmp_path / "direct"), flush_every=10)
+    direct.append({"id": "a", "m": {"new": [], "k": 1}, "error": None})
+    direct.append({"id": "b", "m": {"new": "x", "k": 2}, "error": None})
+    direct.flush()
+    assert direct.rows_demoted == 0
+    assert dict(read_output(str(tmp_path / "direct")))["b"] == {"m": {"new": "x", "k": 2}}

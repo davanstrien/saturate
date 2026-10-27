@@ -5,6 +5,8 @@ never retry (their file objects are consumed — a re-send posts empty bodies)."
 import asyncio
 import time
 
+import pytest
+
 import saturate.transport as transport
 from saturate.transport import Breaker, call_endpoint, make_json_request, make_multipart_request
 
@@ -28,6 +30,7 @@ class _Client:
         return self.resp
 
 
+@pytest.mark.internals
 def test_retry_after_capped_by_budget(monkeypatch):
     monkeypatch.setattr(transport, "RETRY_BUDGET_S", 0.2)
     client = _Client(_Resp(429, {"retry-after": "3600"}))
@@ -40,6 +43,7 @@ def test_retry_after_capped_by_budget(monkeypatch):
     assert client.posts == 1  # r4: the budget-capped sleep must not buy another request
 
 
+@pytest.mark.internals
 def test_retry_attempts_get_budget_capped_timeouts(monkeypatch):
     """Codex r5 blocker #2: a retry starting with little budget left must not
     inherit the client's full 1800s read window — its timeout is capped to the
@@ -59,6 +63,7 @@ def test_retry_attempts_get_budget_capped_timeouts(monkeypatch):
     assert len(client.timeouts) >= 2  # it did retry, with capped windows
 
 
+@pytest.mark.internals
 def test_no_timeout_floor_below_budget(monkeypatch):
     """Codex r6 blocker #2: max(1.0, remaining) granted a full second when only
     milliseconds remained. Retry timeouts must be the exact remaining budget."""
@@ -71,6 +76,7 @@ def test_no_timeout_floor_below_budget(monkeypatch):
     assert all(isinstance(t, float) and t <= 0.05 for t in client.timeouts[1:])
 
 
+@pytest.mark.internals
 def test_breaker_open_time_credited_back_to_budget(monkeypatch):
     """Codex r6 blocker #2: the docstring promises breaker-open waits don't
     consume row budgets — now the code makes it true (t0 is credited)."""
@@ -95,6 +101,7 @@ def test_breaker_open_time_credited_back_to_budget(monkeypatch):
     assert err is None and body == {"ok": True}  # the retry survived two 0.1s breaker waits
 
 
+@pytest.mark.internals
 def test_multipart_never_retries():
     client = _Client(_Resp(500))
     body, err = asyncio.run(call_endpoint(
@@ -104,6 +111,7 @@ def test_multipart_never_retries():
     assert client.posts == 1  # single attempt: the file stream is already consumed
 
 
+@pytest.mark.internals
 def test_latency_is_the_successful_attempt_alone():
     """A slow failed attempt, its backoff and a fast success: the controller's
     latency signal is the fast success, not the row's whole retry ladder."""
@@ -146,6 +154,7 @@ def test_parse_retry_after_never_raises():
     assert _parse_retry_after(None) is None
 
 
+@pytest.mark.internals
 def test_redirect_is_poison_not_pressure():
     """A 3xx means the endpoint URL is wrong (redirects are not followed): fail the row
     once, without retrying, counting backpressure, or feeding the breaker."""
@@ -160,6 +169,7 @@ def test_redirect_is_poison_not_pressure():
     assert breaker.consecutive == 0
 
 
+@pytest.mark.internals
 def test_a_row_that_always_fails_counts_as_backpressure_once(monkeypatch):
     """Every failed attempt used to add backpressure, so one row that always returns 500
     (an image the model's processor rejects) cut the window on each of its retries and a 1%
@@ -184,6 +194,7 @@ def test_a_row_that_always_fails_counts_as_backpressure_once(monkeypatch):
 
 
 
+@pytest.mark.internals
 def test_retry_after_is_jittered_so_rows_do_not_wake_together(monkeypatch):
     """Rows told the same Retry-After used to sleep exactly that long and hit the server in
     one burst. The wait is now the header's value times uniform(1, 1.2)."""
@@ -201,6 +212,7 @@ def test_retry_after_is_jittered_so_rows_do_not_wake_together(monkeypatch):
     assert len(set(waits)) > 1  # jittered, not identical
 
 
+@pytest.mark.internals
 def test_a_5xx_error_row_keeps_the_server_message():
     client = _Client(_Resp(500))
     client.resp.text = "CUDA out of memory"

@@ -10,7 +10,8 @@ Runs on its own event loop in a daemon thread, so a test can drive `pump()`
 (which owns the main thread's loop via asyncio.run) against it. Behaviour is
 set through plain attributes read on every request: `latency_s` (or
 `latency_for(request_json) -> seconds` to make it depend on the body) and
-`status_for(request_json) -> int` may be changed between runs. Counters
+`status_for(request_json) -> int` may be changed between runs; `raw_for(request_json)`
+returning bytes replaces the body (a non-JSON page under any status). Counters
 (`requests`, `probes`, `peak_inflight`, token totals) are what the endpoint
 observed, for asserting against the client's own accounting; `probe_log` keeps
 the (path, body) of every circuit-breaker probe (identified by the
@@ -57,6 +58,7 @@ class StubServer:
         self.latency_s = latency_s
         self.latency_for: Callable[[dict], float] | None = None  # overrides latency_s per body
         self.status_for = status_for
+        self.raw_for: Callable[[dict], bytes | None] | None = None  # a raw body for this status, e.g. HTML
         self.port = 0
         self.requests = 0  # completion requests served (any status), probes excluded
         self.probe_log: list[tuple[str, dict]] = []  # (path, body) of every circuit-breaker probe
@@ -169,7 +171,10 @@ class StubServer:
         finally:
             self.inflight -= 1
         status = self.status_for(request)
-        if status != 200:
+        raw = self.raw_for(request) if self.raw_for else None
+        if raw is not None:  # what a proxy or a maintenance page sends: not JSON, whatever the status
+            return status, "text/html", raw
+        if not 200 <= status < 300:
             err = json.dumps({"error": {"message": f"stub returned {status}", "type": "stub"}})
             return status, "application/json", err.encode()
         if path == "/v1/embeddings":
@@ -181,7 +186,7 @@ class StubServer:
                     "data": [{"object": "embedding", "index": i, "embedding": [float(len(t)), 0.0]}
                              for i, t in enumerate(texts)],
                     "usage": {**usage, "total_tokens": usage["prompt_tokens"]}}
-            return 200, "application/json", json.dumps(resp).encode()
+            return status, "application/json", json.dumps(resp).encode()
         content = str((request.get("messages") or [{}])[-1].get("content", ""))
         reply = f"echo: {content}"
         usage = {"prompt_tokens": len(content), "completion_tokens": len(reply)}
@@ -191,11 +196,11 @@ class StubServer:
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": reply},
                              "finish_reason": "stop"}],
                 "usage": {**usage, "total_tokens": sum(usage.values())}}
-        return 200, "application/json", json.dumps(resp).encode()
+        return status, "application/json", json.dumps(resp).encode()
 
 
-_REASON = {200: "OK", 400: "Bad Request", 404: "Not Found", 429: "Too Many Requests",
-           500: "Internal Server Error", 503: "Service Unavailable"}
+_REASON = {200: "OK", 201: "Created", 202: "Accepted", 400: "Bad Request", 404: "Not Found",
+           429: "Too Many Requests", 500: "Internal Server Error", 503: "Service Unavailable"}
 
 
 if __name__ == "__main__":

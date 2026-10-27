@@ -6,6 +6,8 @@ Ticks are driven directly (`limiter._tick()`), never by the clock."""
 
 import asyncio
 
+import pytest
+
 from saturate import AdaptiveLimiter, Auto, Fixed, Stats
 from saturate.controller import Obs
 from saturate.telemetry import cut_reasons
@@ -30,6 +32,7 @@ def run(coro):
     return asyncio.run(coro)
 
 
+@pytest.mark.internals
 def test_zero_tokens_with_requests_in_flight_is_a_reading():
     ctrl = Recorder()
 
@@ -51,6 +54,7 @@ def test_zero_tokens_with_requests_in_flight_is_a_reading():
     assert [t["reason"] for t in lim.ticks] == ["tick:1", "tick:2", "tick:3", "tick:4"]
 
 
+@pytest.mark.internals
 def test_endpoint_without_token_usage_has_no_throughput_signal():
     """Completions that never report tokens leave tok_s None: the controller
     falls back to queue gauges rather than reading a permanent plateau."""
@@ -67,6 +71,7 @@ def test_endpoint_without_token_usage_has_no_throughput_signal():
     assert [o.tok_s for o in ctrl.seen] == [None, None]
 
 
+@pytest.mark.internals
 def test_tick_carries_request_latency_and_the_oldest_inflight_age():
     """Latency is the p50 of successful attempts reported by the transport (or
     observe()); the oldest in-flight age comes from slot admission times."""
@@ -92,6 +97,7 @@ def test_tick_carries_request_latency_and_the_oldest_inflight_age():
     assert lim.oldest_s is None  # released
 
 
+@pytest.mark.internals
 def test_slot_exit_always_releases():
     """A second exit (or a lost admission record) must never leak an in-flight count."""
 
@@ -106,6 +112,7 @@ def test_slot_exit_always_releases():
     assert run(go()) == 0
 
 
+@pytest.mark.internals
 def test_fixed_controller_ticks_carry_hold():
     async def go():
         lim = AdaptiveLimiter(window=Fixed(2))

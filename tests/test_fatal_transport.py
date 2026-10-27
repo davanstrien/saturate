@@ -20,6 +20,7 @@ def test_dead_breaker_gate_raises_fatal():
         asyncio.run(b.gate(None, "http://x/probe"))
 
 
+@pytest.mark.internals
 def test_fatal_aborts_run_without_error_rows(tmp_path):
     class _FatalClient:
         limiter = StubLimiter()
@@ -39,6 +40,7 @@ def test_fatal_aborts_run_without_error_rows(tmp_path):
     assert sink.existing_ids() == set()  # nothing durable: every row retries next run
 
 
+@pytest.mark.internals
 def test_nondict_parse_is_error_row(tmp_path):
     class _OkClient:
         limiter = StubLimiter()

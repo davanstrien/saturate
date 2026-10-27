@@ -293,6 +293,7 @@ def slow_to_request(row):
     return to_request(row)
 
 
+@pytest.mark.internals
 def test_prepare_stage_offloads_to_request_and_the_verdict_names_it(stub, tmp_path, monkeypatch):
     """to_request at 50 ms/row on the loop serialises the pump: the endpoint idles and the
     ticks say `prep`. prepare_workers=4 runs it ahead in threads, the window fills, the run is

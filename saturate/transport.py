@@ -218,7 +218,8 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
             if req.kind == "multipart":
                 r = await client.post(url, data=req.data, files=req.files)
             elif attempt and RETRY_ACTIVE:  # retries: wall-clock capped to the exact remaining budget
-                r = await asyncio.wait_for(client.post(url, json=req.json, timeout=left()), left())
+                timeout = capped_timeout(getattr(client, "timeout", None), left())
+                r = await asyncio.wait_for(client.post(url, json=req.json, timeout=timeout), left())
             else:
                 r = await client.post(url, json=req.json)
         except (httpx.TimeoutException, httpx.TransportError, asyncio.TimeoutError) as e:
@@ -266,6 +267,20 @@ def _json_object(r: httpx.Response) -> dict | None:
     except ValueError:
         return None
     return body if isinstance(body, dict) else None
+
+
+def capped_timeout(configured: httpx.Timeout | None, cap: float) -> httpx.Timeout:
+    """The client's per-phase timeouts, each capped to `cap` seconds (a phase without a limit gets
+    `cap`). A retry keeps a short connect timeout short, and no phase outlives the row's budget;
+    a single number would replace every phase with the remaining budget, up to an hour."""
+    if configured is None:
+        return httpx.Timeout(cap)
+
+    def phase(limit: float | None) -> float:
+        return cap if limit is None else min(limit, cap)
+
+    return httpx.Timeout(connect=phase(configured.connect), read=phase(configured.read),
+                         write=phase(configured.write), pool=phase(configured.pool))
 
 
 def _parse_retry_after(value: str | None) -> float | None:

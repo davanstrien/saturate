@@ -5,6 +5,7 @@ never retry (their file objects are consumed — a re-send posts empty bodies)."
 import asyncio
 import time
 
+import httpx2 as httpx
 import pytest
 
 import saturate.transport as transport
@@ -19,10 +20,11 @@ class _Resp:
 
 
 class _Client:
-    def __init__(self, resp: _Resp):
+    def __init__(self, resp: _Resp, timeout: httpx.Timeout | None = None):
         self.resp = resp
         self.posts = 0
         self.timeouts: list = []
+        self.timeout = timeout or httpx.Timeout(30.0, read=1800.0)  # what AdaptiveClient configures
 
     async def post(self, url, data=None, files=None, json=None, timeout="absent"):
         self.posts += 1
@@ -59,8 +61,22 @@ def test_retry_attempts_get_budget_capped_timeouts(monkeypatch):
         {"backpressure": 0, "successes": 0}, Breaker()))
     assert body is None and "500" in err
     assert client.timeouts[0] == "absent"  # first attempt: client default window
-    assert all(isinstance(t, float) and t <= 1.0 for t in client.timeouts[1:])
+    assert all(max(t.connect, t.read, t.write, t.pool) <= 1.0 for t in client.timeouts[1:])
     assert len(client.timeouts) >= 2  # it did retry, with capped windows
+
+
+@pytest.mark.internals
+def test_a_retry_keeps_the_configured_phase_timeouts_under_its_budget(monkeypatch):
+    """A retry's timeout caps each phase at the remaining budget; it does not replace a short
+    connect or pool timeout with the whole budget (up to an hour by default)."""
+    monkeypatch.setattr(transport, "BACKOFF_BASE_S", 0.01)
+    configured = httpx.Timeout(connect=1.5, read=1800.0, write=2.0, pool=7.0)
+    client = _Client(_Resp(500), timeout=configured)
+    asyncio.run(call_endpoint(client, "http://x", make_json_request("/chat/completions", {}),
+                              {"backpressure": 0, "successes": 0}, Breaker(), budget_s=1000.0))
+    retry = client.timeouts[1]
+    assert (retry.connect, retry.write, retry.pool) == (1.5, 2.0, 7.0)
+    assert 990.0 < retry.read <= 1000.0  # the 1800 s read window, capped to what is left
 
 
 @pytest.mark.internals
@@ -73,7 +89,7 @@ def test_no_timeout_floor_below_budget(monkeypatch):
         client, "http://x", make_json_request("/chat/completions", {}),
         {"backpressure": 0, "successes": 0}, Breaker()))
     assert body is None
-    assert all(isinstance(t, float) and t <= 0.05 for t in client.timeouts[1:])
+    assert all(max(t.connect, t.read, t.write, t.pool) <= 0.05 for t in client.timeouts[1:])
 
 
 @pytest.mark.internals

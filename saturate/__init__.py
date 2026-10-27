@@ -123,9 +123,11 @@ def pump(
         is checked as rows arrive. Rows are counted, not bytes: lower it if parse returns
         large payloads.
     read_timeout: seconds to wait for a single response (long generations are legitimate).
-    retry_budget_s: total wall-clock for one row's attempts, retries and backoff included (time
-        paused on an open circuit breaker does not count). None (default) = max(300, 2 *
-        read_timeout): a retry must be able to wait as long as the first attempt did.
+    retry_budget_s: active-work budget for one row's attempts, retries and backoff included.
+        Time paused on an open circuit breaker does not count, so it is not a deadline: a row
+        can outlive it while the run waits for the server. None (default) = max(300, 2 *
+        read_timeout): a retry must be able to wait as long as the first attempt did. Each
+        retry's phase timeouts are capped to what is left of it.
     timeouts: the other HTTP phases, any of {"connect", "write", "pool"} in seconds (30 each by
         default). "pool" is the wait for a free connection when more requests are in flight
         than the client's 1024 connections.

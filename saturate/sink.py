@@ -179,6 +179,9 @@ class ParquetSink:
                         HfApi().create_repo(repo, repo_type="dataset", private=True, exist_ok=True)
                     else:
                         HfApi().create_bucket(repo, private=True, exist_ok=True)
+                    # fsspec shares one filesystem instance per process: a read-only check that
+                    # found no repo left "missing" in its cache, and every write would fail on it
+                    self.fs.invalidate_cache()
                 except Exception as e:
                     _log(f"could not ensure output repo {repo}: {e}")
         if create:

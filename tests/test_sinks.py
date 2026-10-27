@@ -1170,3 +1170,39 @@ def test_drain_closes_the_results_stream_when_the_sink_fails(tmp_path):
         assert closed == [True]  # closed by drain itself, not later by the loop's shutdown
 
     asyncio.run(run())
+
+
+def test_hf_a_missing_output_read_then_created_is_writable(monkeypatch):
+    """fsspec shares one HfFileSystem per process. A resume check on an output whose repo does
+    not exist yet caches "missing"; the sink then creates the repo, and must clear that entry,
+    or every write fails with FileNotFoundError (Codex review of #48, reproduced with mocks)."""
+    import httpx2
+    import huggingface_hub
+    from huggingface_hub import HfFileSystem
+    from huggingface_hub.errors import RepositoryNotFoundError
+
+    import saturate
+    from saturate import ParquetSink
+
+    repo = "owner/created-after-a-missing-read"
+    exists = {"repo": False}
+
+    def repo_info(self, repo_id, *args, **kwargs):
+        if repo_id == repo and not exists["repo"]:
+            response = httpx2.Response(404, request=httpx2.Request("GET", "https://huggingface.co"))
+            raise RepositoryNotFoundError(f"{repo_id} not found", response=response)
+        return object()
+
+    class FakeApi:
+        def create_repo(self, repo_id, **kwargs):
+            exists["repo"] = True
+
+    monkeypatch.setattr(huggingface_hub.HfApi, "repo_info", repo_info)
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(HfFileSystem, "makedirs", lambda self, *a, **k: None)
+    uri = f"hf://datasets/{repo}/out"
+
+    assert saturate.existing_ids(uri) == set()  # read-only: caches the repo as missing
+    sink = ParquetSink(uri)  # creates it
+    assert exists["repo"]
+    sink.fs.resolve_path(f"{sink.root}/part-0.parquet")  # raised FileNotFoundError before the fix

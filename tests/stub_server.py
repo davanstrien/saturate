@@ -49,6 +49,9 @@ class StubLimiter:
     def note_source_wait(self, seconds: float) -> None:
         self.source_waits.append(seconds)
 
+    def note_sink_wait(self, seconds: float) -> None:
+        pass
+
     def note_prep(self, seconds: float) -> None:
         self.preps.append(seconds)
 

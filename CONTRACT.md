@@ -139,13 +139,14 @@ interval is a quarter of the run so far) and finalised at exit; readers may see 
 | `bp` | backpressure events this tick (saturation-shaped 429/timeout/5xx) |
 | `ok` | requests that succeeded this tick (failures surface in `bp`) |
 | `retries` | retry attempts started this tick (`bp` counts each row once; this counts every re-send) |
-| `input_bound` | true when the client side (the source iterator or `to_request`), not the endpoint, starved admission this tick: `bound_by` is `source` or `prep` with the window under half used |
+| `input_bound` | true when the client side (the source iterator or `to_request`), not the endpoint, starved admission this tick: `bound_by` is `source`, `prep` or `sink` with the window under half used |
 | `tok_s` | delivered tokens/sec this tick (the controller's plateau signal) |
 | `kv` / `hits` / `preempts` | KV-cache utilization · prefix-cache hit rate · scheduler preemptions (when exposed) |
 | `reason` | the controller's decision at the end of this tick: `hold`, `grow`, `probe`, `revert`, `cut:bp`, `cut:kv`, `cut:stall`, `cut:queue`, or `hold:<why>` (`hold` for `Fixed` and custom controllers) |
 | `latency_s` | p50 admission-to-completion time of recent requests (null before the first completes) |
-| `bound_by` | what limited this tick, in this order: `source` when `source_s` is at least a quarter of the tick with the window under half used (`inflight < 0.5 * limit`); `prep` when `prep_s / max(1, prep_workers)` is at least a quarter of the tick with the window under half used, or when `prep_workers` is 0 and `prep_s` is at least half the tick; `loop` when `loop_lag_s` is at least half the tick (the loop was blocked outside `to_request`: `parse` or sink writes); `engine` when the window was full or admission waits dominated; null when nothing was conclusive (idle) |
+| `bound_by` | what limited this tick, in this order: `source` when `source_s` is at least a quarter of the tick with the window under half used (`inflight < 0.5 * limit`); `prep` when `prep_s / max(1, prep_workers)` is at least a quarter of the tick with the window under half used, or when `prep_workers` is 0 and `prep_s` is at least half the tick; `sink` when `sink_s` is at least a quarter of the tick with the window under half used (the output is behind: new rows waited for room); `loop` when `loop_lag_s` is at least half the tick (the loop was blocked outside `to_request`: `parse` or sink writes); `engine` when the window was full or admission waits dominated; null when nothing was conclusive (idle) |
 | `source_s` / `prep_s` | seconds this tick spent in the source iterator / in `to_request` (`prep_s` is the raw sum over prepare workers) |
+| `sink_s` | seconds new rows waited this tick for room in the backlog: the output was behind |
 | `prep_n` / `prep_workers` | `to_request` calls measured this tick / threads running it (0 = on the event loop) |
 | `loop_lag_s` | seconds of this tick beyond the tick period and the gauge scrape: time the event loop was blocked |
 

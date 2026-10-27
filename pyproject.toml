@@ -46,11 +46,6 @@ markers = [
     "internals: reaches into plumbing the 0.3 refactor replaces (Window, the events dict, through()'s hooks); rewritten with it, so `-m 'not internals'` is the suite that must pass unchanged",
 ]
 
-[tool.ty.src]
-# core.py is rewritten in the 0.3 series (its 24 diagnostics come from the events dict and the
-# client's not-yet-entered attributes); it comes off this list with the rewrite
-exclude = ["saturate/core.py"]
-
 [tool.ruff]
 line-length = 110
 target-version = "py310"

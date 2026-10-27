@@ -1,0 +1,380 @@
+"""through(): rows in, finished rows out. The design, in plain terms: docs/pipeline.md.
+
+    input ──▶ reader ──▶ feeder ──▶ one task per row ──▶ results ──▶ (drain)
+            (thread)                  (request + parse)
+
+The reader pulls rows from the input in a thread; the feeder starts a task per row when there is
+room; each row task builds the request, waits for a slot in the window, sends it and parses the
+reply; a finished row goes into `results`, which the caller reads.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import dataclasses
+import inspect
+import sys
+import threading
+import time
+from collections.abc import AsyncGenerator, Callable, Iterable
+
+import anyio
+from anyio.abc import TaskGroup
+
+from saturate.core import AdaptiveClient, AdaptiveLimiter, Done
+from saturate.transport import FatalTransportError
+
+READ_AHEAD = 64  # rows the reader may read before the feeder has taken them
+
+
+
+_END = object()  # put in the queue after the last finished row
+
+
+class Results:
+    """The finished rows, in the order they finished. Taking one makes room for another row to
+    start (the backlog limit), so read it to the end, or leave the `async with` to stop the run.
+
+    The rows travel in an asyncio.Queue: a row handed to a reader that is cancelled before it
+    resumes stays in the queue, so a cancel never loses a finished row."""
+
+    def __init__(self, run: _Run):
+        self._run = run
+
+    def __aiter__(self) -> Results:
+        return self
+
+    async def __anext__(self) -> Done:
+        done = await self._run.results.get()
+        if done is _END:
+            self._run.results.put_nowait(_END)  # every later read sees the end too
+            raise StopAsyncIteration
+        self._run.backlog.release()
+        return done
+
+    def take_waiting(self) -> list[Done]:
+        """Every finished row already waiting, without waiting for more."""
+        taken = []
+        while True:
+            try:
+                done = self._run.results.get_nowait()
+            except asyncio.QueueEmpty:
+                return taken
+            if done is _END:
+                self._run.results.put_nowait(_END)
+                return taken
+            self._run.backlog.release()
+            taken.append(done)
+
+    async def stop(self) -> None:
+        """Stop the run and wait until it has: no row starts or finishes after this returns, and
+        rows already finished (fail_fast's held errors included) can still be taken."""
+        self._run.stop()
+        await self._run.finished.wait()
+
+
+@dataclasses.dataclass
+class _Run:
+    """What the feeder and the row tasks share for one run."""
+
+    client: AdaptiveClient
+    limiter: AdaptiveLimiter
+    to_request: Callable
+    parse: Callable[[dict, dict], dict]
+    route: str
+    fail_fast: int
+    prepare: anyio.Semaphore  # request bodies built but not yet admitted
+    backlog: anyio.Semaphore  # rows started but not yet taken from `results`
+    prepare_threads: anyio.CapacityLimiter | None  # None: to_request runs on the event loop
+    reader: _Reader | None = None
+    failure: BaseException | None = None  # the first failure: the error the run raises
+    held: list[Done] = dataclasses.field(default_factory=list)  # fail_fast: errors before a success
+    succeeded: bool = False
+    discarding: bool = False  # fail_fast gave up: finished rows are dropped, not stored
+    scope: anyio.CancelScope | None = None  # the feeder's and row tasks' scope
+    # finished rows; unbounded because the backlog is the bound
+    results: asyncio.Queue = dataclasses.field(default_factory=asyncio.Queue)
+    finished: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)  # no more rows will come
+
+    def fail(self, error: BaseException) -> None:
+        """Record the run's first failure and stop the row tasks; later failures are logged."""
+        if self.failure is None:
+            self.failure = error
+        elif repr(error) != repr(self.failure):  # rows in flight often hit the same error: say it once
+            print(f"[pump] after the first failure, also: {error!r}", file=sys.stderr, flush=True)
+        self.stop()
+
+    def stop(self) -> None:
+        if self.reader is not None:
+            self.reader.stop()
+        if self.scope is not None:
+            self.scope.cancel()
+
+    def publish(self, done: Done) -> None:
+        """Put a finished row in `results`. No await: once a row is parsed it is never lost to
+        a cancellation before it is published."""
+        if self.discarding:
+            self.backlog.release()
+            return
+        if self.fail_fast and not self.succeeded:
+            if done.error is not None:  # hold errors back until the first success
+                self.held.append(done)
+                if len(self.held) >= self.fail_fast:
+                    self._give_up_fail_fast()
+                return
+            self.succeeded = True
+            for held in self.held:
+                self.results.put_nowait(held)
+            self.held.clear()
+        self.results.put_nowait(done)
+
+    def publish_held(self) -> None:
+        """The input ended before fail_fast rows finished: the held errors are this run's results."""
+        for held in self.held:
+            self.results.put_nowait(held)
+        self.held.clear()
+
+    def _give_up_fail_fast(self) -> None:
+        first = self.held[0].error
+        for _ in self.held:
+            self.backlog.release()
+        self.held.clear()
+        self.discarding = True
+        self.fail(FatalTransportError(
+            f"the first {self.fail_fast} rows all failed, so the run stopped without storing "
+            f"them. First error: {first}. Fix the cause and re-run (these rows will be retried), "
+            "or pass fail_fast=0 to disable this check"))
+
+
+@contextlib.asynccontextmanager
+async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]], to_request: Callable,
+                  parse: Callable, route: str = "/chat/completions", prepare_workers: int = 0,
+                  fail_fast: int = 32, backlog: int | None = None) -> AsyncGenerator[Results, None]:
+    """Run every (id, row) through the endpoint; yields the finished rows as they finish.
+
+        async with through(client, rows, to_request, parse) as results:
+            async for done in results:
+                ...
+
+    `prepare_workers` > 0 runs `to_request` in that many threads (it must bound its own I/O: a
+    running call cannot be interrupted). `fail_fast`: if the first N finished rows all failed,
+    the run stops without storing them and raises. `backlog` caps rows started but not yet read
+    from `results` (at least `fail_fast`: the held failures keep their places); by default room
+    for the largest window, the fail_fast hold-back and 2048 rows for the sink to buffer.
+
+    Leaving the `async with` early stops the run. When the run fails (the input raised, the
+    endpoint is gone, fail_fast), every row that already finished can still be read, and the
+    failure is raised when the `async with` is left."""
+    limiter = client.limiter
+    if not getattr(limiter, "running", True):  # a stand-in limiter without one is trusted
+        raise RuntimeError("through() needs the client entered: `async with AdaptiveClient(...) as client:`")
+    fail_fast = max(0, fail_fast)
+    room = backlog or _default_backlog(limiter, fail_fast)
+    if room < fail_fast:
+        raise ValueError(f"backlog={room} is smaller than fail_fast={fail_fast}: the failures held "
+                         "back would take every place and the run could never go on")
+    limiter.prep_workers = prepare_workers
+    run = _Run(client=client, limiter=limiter, to_request=to_request, parse=adapt_parse(parse),
+               route=route, fail_fast=fail_fast, prepare=anyio.Semaphore(max(2 * prepare_workers, 4)),
+               backlog=anyio.Semaphore(room),
+               prepare_threads=anyio.CapacityLimiter(prepare_workers) if prepare_workers else None)
+    caller_error: BaseException | None = None
+    async with anyio.create_task_group() as group:
+        group.start_soon(_produce, run, rows)
+        try:
+            yield Results(run)
+        except BaseException as e:
+            caller_error = e  # raised below, outside the task group, so it is not wrapped
+        finally:
+            run.stop()
+    raise_first_failure(caller_error, run.failure)
+
+
+def raise_first_failure(caller_error: BaseException | None, run_failure: BaseException | None) -> None:
+    """The run's error is its first failure. A failure recorded by the run happened before the
+    caller's error (the caller's error stops the run at once), so it wins, except over a
+    cancellation, which always goes on as itself."""
+    if caller_error is not None:
+        if isinstance(caller_error, anyio.get_cancelled_exc_class()):
+            if run_failure is not None:
+                print(f"[pump] the run had also failed: {run_failure!r}", file=sys.stderr, flush=True)
+            raise caller_error
+        if run_failure is None:
+            raise caller_error
+        print(f"[pump] after the first failure, also: {caller_error!r}", file=sys.stderr, flush=True)
+    if run_failure is not None:
+        raise run_failure
+
+
+def _default_backlog(limiter: AdaptiveLimiter, fail_fast: int) -> int:
+    window = getattr(limiter, "controller", None)
+    most = getattr(window, "max", None) or getattr(window, "n", None) or 512  # Auto.max, Fixed.n
+    return int(most) + max(0, fail_fast) + 2048
+
+
+async def _produce(run: _Run, rows: Iterable[tuple[str, dict]]) -> None:
+    """The feeder and its row tasks, in their own task group: a failure cancels them, not the
+    caller reading `results`. The end marker tells the caller there is no more."""
+    try:
+        async with anyio.create_task_group() as row_tasks:
+            run.scope = row_tasks.cancel_scope
+            await _feed(run, rows, row_tasks)
+    finally:
+        if not run.discarding and not isinstance(run.failure, FatalTransportError):
+            run.publish_held()  # the input ended (or raised, or the run stopped) before fail_fast rows
+        run.results.put_nowait(_END)
+        run.finished.set()
+
+
+async def _feed(run: _Run, rows: Iterable[tuple[str, dict]], row_tasks: TaskGroup) -> None:
+    """Start a row task per row, when there is room in the backlog and the prepare limit."""
+    limiter = run.limiter
+    reader = run.reader = _Reader(rows)
+    reader.start()
+    try:
+        while True:
+            read = await reader.rows.get()
+            if isinstance(read, _End):
+                if read.error is not None:  # the input raised: rows already started finish, then it fails
+                    run.failure = run.failure or read.error
+                return
+            id_, row = read.item
+            reader.taken()
+            limiter.note_source_wait(read.waited)
+            await _take(run.backlog, limiter.note_sink_wait)
+            await run.prepare.acquire()
+            row_tasks.start_soon(_row, run, id_, row)
+    finally:
+        reader.stop()
+
+
+async def _take(limit: anyio.Semaphore, note_wait: Callable[[float], None]) -> None:
+    """Take one from `limit`, noting how long that waited. Only a real wait is measured: an
+    await yields to the loop even when there is room, and that time is not the limit's."""
+    try:
+        limit.acquire_nowait()
+    except anyio.WouldBlock:
+        t = time.monotonic()
+        await limit.acquire()
+        note_wait(time.monotonic() - t)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _Row:
+    """A row the reader handed over, and how long the input took to yield it."""
+
+    item: tuple[str, dict]
+    waited: float
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _End:
+    """The input is done; `error` when it raised instead of ending."""
+
+    error: BaseException | None = None
+
+
+class _Reader:
+    """Reads the input in its own thread and hands each row to the event loop as soon as it is
+    read, at most READ_AHEAD rows ahead of the feeder. A daemon thread: an input stuck in
+    `next()` cannot be interrupted, so a stopped run leaves it behind, and it never holds up
+    exit. An input left behind like that must not be reused."""
+
+    def __init__(self, rows: Iterable[tuple[str, dict]]):
+        self._source = iter(rows)
+        self._room = threading.Semaphore(READ_AHEAD)
+        self._stopped = threading.Event()
+        self._loop = asyncio.get_running_loop()
+        self.rows: asyncio.Queue[_Row | _End] = asyncio.Queue()
+        self._thread = threading.Thread(target=self._read, name="saturate-reader", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def taken(self) -> None:
+        """The feeder took a row: room to read one more."""
+        self._room.release()
+
+    def stop(self) -> None:
+        self._stopped.set()
+        self._room.release()  # wake the thread if it is waiting for room
+
+    def _read(self) -> None:  # in the reader thread
+        while True:
+            self._room.acquire()
+            if self._stopped.is_set():
+                return
+            t = time.monotonic()
+            try:
+                item = next(self._source)
+            except StopIteration:
+                self._hand_over(_End())
+                return
+            except BaseException as e:
+                self._hand_over(_End(e))
+                return
+            self._hand_over(_Row(item, time.monotonic() - t))
+
+    def _hand_over(self, message: _Row | _End) -> None:
+        try:
+            self._loop.call_soon_threadsafe(self.rows.put_nowait, message)
+        except RuntimeError:  # the event loop is gone: the run ended without this row
+            pass
+
+
+async def _row(run: _Run, id_: str, row: dict) -> None:
+    """One row: build the request, wait for a slot, send it, parse the reply, publish."""
+    holding_prepare = True
+
+    def admitted() -> None:  # the body is in flight: free its place in the prepare limit
+        nonlocal holding_prepare
+        if holding_prepare:
+            run.prepare.release()
+            holding_prepare = False
+
+    try:
+        request = await _build_request(run, row)
+        body, error = await run.client.post(request, run.route, on_admit=admitted)
+        if body is None:  # the request failed: `error` says why
+            run.publish(Done(id_, row, None, error))
+            return
+        out = run.parse(row, body)
+        if not isinstance(out, dict):  # storage contract: rows are dicts
+            raise TypeError(f"parse must return a dict, got {type(out).__name__}")
+        run.publish(Done(id_, row, out, None, body.get("usage") or {}))
+    except FatalTransportError as e:  # the run cannot go on: stop it, never a row error
+        run.backlog.release()
+        run.fail(e)
+    except Exception as e:  # to_request/parse bugs are the row's error, not a lost row
+        run.publish(Done(id_, row, None, f"client: {type(e).__name__}: {e}"))
+    finally:
+        admitted()  # never strand the prepare limit: a failed or cancelled row frees it too
+
+
+async def _build_request(run: _Run, row: dict):
+    """`to_request(row)`, on the event loop or in a prepare thread; its time goes to telemetry."""
+    def build():
+        t = time.monotonic()
+        return run.to_request(row), time.monotonic() - t
+
+    if run.prepare_threads is None:
+        request, took = build()
+    else:
+        request, took = await anyio.to_thread.run_sync(build, limiter=run.prepare_threads,
+                                                       abandon_on_cancel=True)
+    run.limiter.note_prep(took)
+    return request
+
+def adapt_parse(parse: Callable) -> Callable[[dict, dict], dict]:
+    """parse(row, resp) with row passthrough; a parse with one REQUIRED positional parameter
+    is parse(resp). Parameters with defaults do not count: `lambda body, model=M: ...` takes
+    the response, not the row."""
+    try:
+        sig = inspect.signature(parse)
+    except (TypeError, ValueError):  # a callable with no introspectable signature: the documented form
+        return parse
+    params = [p for p in sig.parameters.values()
+              if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) and p.default is p.empty]
+    return parse if len(params) >= 2 else (lambda row, resp: parse(resp))
+

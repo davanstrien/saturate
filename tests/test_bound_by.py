@@ -229,8 +229,8 @@ def test_prepare_workers_run_to_request_in_threads_and_errors_stay_row_errors():
     async def go():
         client = _EchoClient(StubLimiter())
         rows = iter([(str(i), {"n": i}) for i in range(8)])
-        done = [d async for d in through(client, rows, to_request, lambda r, b: b["req"],
-                                         prepare_workers=2)]
+        async with through(client, rows, to_request, lambda r, b: b["req"], prepare_workers=2) as results:
+            done = [d async for d in results]
         return client, done
 
     client, done = asyncio.run(go())
@@ -240,22 +240,3 @@ def test_prepare_workers_run_to_request_in_threads_and_errors_stay_row_errors():
     by_id = {d.id: d for d in done}
     assert by_id["3"].out is None and by_id["3"].error == "client: ValueError: bad row"
     assert {d.out["n"] for d in done if d.out} == {0, 1, 2, 4, 5, 6, 7}
-
-
-@pytest.mark.internals
-def test_a_limiter_without_prep_accounting_still_gets_every_row():
-    """The embedder seam: a limiter that predates note_prep/prep_workers is not an error row."""
-
-    class Bare:
-        limit = 4
-
-        def note_source_wait(self, s):
-            pass
-
-    async def go():
-        client = _EchoClient(Bare())
-        rows = iter([(str(i), {"n": i}) for i in range(5)])
-        return [d async for d in through(client, rows, lambda r: {"n": r["n"]}, lambda r, b: b["req"])]
-
-    done = asyncio.run(go())
-    assert all(d.error is None for d in done) and len(done) == 5

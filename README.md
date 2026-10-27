@@ -163,8 +163,8 @@ rows = stream(load_dataset("...", streaming=True))  # (id, row) pairs, lazy
 rows = skip_done(rows, sink)  # exact resume filter
 
 async with AdaptiveClient(endpoint, window=Auto()) as client:
-    results = through(client, rows, to_request, parse)  # unordered async map, adaptive
-    stats = await drain(results, sink)  # parquet + manifest (pump() adds markers)
+    async with through(client, rows, to_request, parse) as results:  # finished rows, adaptive
+        stats = await drain(results, sink)  # parquet + manifest (pump() adds markers)
 
 # chaining is just more piping — e.g. OCR then judge:
 #   pages -> through(ocr_client, ...) -> drain(stage1_out)
@@ -207,8 +207,9 @@ stats = pump(
 Or skip sinks entirely and consume the stream yourself — no resume, full freedom:
 
 ```python
-async for done in through(client, rows, to_request, parse):
-    my_database.insert(done.id, done.out)
+async with through(client, rows, to_request, parse) as results:
+    async for done in results:
+        my_database.insert(done.id, done.out)
 ```
 
 Embedding just the adaptive part in your own stack (your IO, your loop, your transport —

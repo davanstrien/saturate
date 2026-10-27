@@ -2,6 +2,7 @@
 finalised at exit (CONTRACT §6)."""
 
 import asyncio
+import contextlib
 import json
 
 import pytest
@@ -10,6 +11,11 @@ from stub_server import StubLimiter
 import saturate
 from saturate import ParquetSink
 
+
+async def no_rows():
+    """An empty stream of finished rows."""
+    return
+    yield
 
 def test_write_telemetry_rewrites_one_file_per_run(tmp_path):
     """Repeated writes from one sink instance land in ONE file; the latest write wins.
@@ -75,14 +81,14 @@ def test_pump_writes_telemetry_periodically_and_at_exit(tmp_path, monkeypatch):
         async def __aexit__(self, *exc):
             pass
 
+    @contextlib.asynccontextmanager
     async def fake_through(client, rows, *a, **kw):
         for i in range(60):  # 60 controller ticks, no rows
             client.limiter.ticks.append({"t": 2 * i, "limit": 16})
             captured["on_tick"]({"t": 2 * i, "limit": 16})
             if (i + 1) % 30 == 0:
                 await asyncio.sleep(0.2)  # the periodic write runs off the loop: let it land
-        return
-        yield
+        yield no_rows()
 
     writes = []
 
@@ -121,12 +127,12 @@ def test_pump_periodic_telemetry_failure_is_not_fatal(tmp_path, monkeypatch, cap
         async def __aexit__(self, *exc):
             pass
 
+    @contextlib.asynccontextmanager
     async def fake_through(client, rows, *a, **kw):
         for i in range(30):
             client.limiter.ticks.append({"t": 2 * i})
             captured["on_tick"]({"t": 2 * i})
-        return
-        yield
+        yield no_rows()
 
     class BrokenSink(ParquetSink):
         def write_telemetry(self, shard, lines):

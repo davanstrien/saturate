@@ -1175,7 +1175,7 @@ def test_drain_closes_the_results_stream_when_the_sink_fails(tmp_path):
 def test_hf_a_missing_output_read_then_created_is_writable(monkeypatch):
     """fsspec shares one HfFileSystem per process. A resume check on an output whose repo does
     not exist yet caches "missing"; the sink then creates the repo, and must clear that entry,
-    or every write fails with FileNotFoundError (Codex review of #48, reproduced with mocks)."""
+    or every write fails with FileNotFoundError. A real HfFileSystem, with the Hub calls mocked."""
     import httpx2
     import huggingface_hub
     from huggingface_hub import HfFileSystem

@@ -49,7 +49,7 @@ def test_client_closed_when_tick_loop_crashed(monkeypatch):
 
     with pytest.raises(RuntimeError, match="scrape bug"):
         asyncio.run(go())
-    assert holder[0]._client.is_closed
+    assert holder[0]._client.closed
 
 
 @pytest.mark.internals

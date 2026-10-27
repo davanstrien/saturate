@@ -21,7 +21,7 @@ import sys
 import time
 from collections.abc import Callable
 
-import httpx2 as httpx
+from saturate.http import HttpClient, Reply, TransportError, multipart
 
 RETRY_ACTIVE = True  # kill-switch: flip off in tests for determinism
 RETRY_BUDGET_S = 300.0  # the floor of a row's retry wall-clock; AdaptiveClient scales it with read_timeout
@@ -92,7 +92,7 @@ class Breaker:
     def ok(self) -> None:
         self.consecutive = 0
 
-    async def gate(self, client: httpx.AsyncClient, probe_url: str, model: str | None = None) -> None:
+    async def gate(self, client: HttpClient, probe_url: str, model: str | None = None) -> None:
         """Called at admission AND before every retry attempt — an open breaker
         pauses the whole pump, not just new rows. One caller probes; the rest
         wait on the close event (no double-counted opens). The probe is
@@ -122,11 +122,12 @@ class Breaker:
                     raise FatalTransportError(
                         f"circuit breaker open for {self.max_open_s}s — server is not coming back")
                 try:
-                    r = await client.post(probe_url, json=probe_body(model), timeout=PROBE_TIMEOUT_S,
+                    r = await client.post(probe_url, json=probe_body(model),
+                                          timeouts=client.timeouts.capped(PROBE_TIMEOUT_S),
                                           headers=PROBE_HEADERS)
                     if _server_answered(r):
                         break
-                except (httpx.TimeoutException, httpx.TransportError):
+                except TransportError:
                     pass
                 await asyncio.sleep(self.probe_interval)
             self.consecutive = 0
@@ -195,7 +196,7 @@ def next_wait(delay: float, retry_after: float | None = None,
     return wait, min(delay * 2, 60.0)
 
 
-async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
+async def call_endpoint(client: HttpClient, base: str, req: Request,
                         breaker: Breaker, observe: Callable[[Attempt], None],
                         budget_s: float | None = None) -> tuple[dict | None, str | None]:
     """Returns (response_json, error), and hands `observe` an Attempt as each attempt ends.
@@ -233,7 +234,7 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
         a0 = time.monotonic()
         try:
             result = _read(await _send(client, url, req, retry=attempt > 0, left=left()))
-        except (httpx.TimeoutException, httpx.TransportError, asyncio.TimeoutError) as e:
+        except (TransportError, asyncio.TimeoutError) as e:  # TimeoutError: a retry's wall-clock cap
             result = transport_failure(e)
         if isinstance(result, dict):  # a success: there is a result to hand on
             # the latency of the successful attempt alone: retries, backoff and breaker waits are
@@ -253,20 +254,19 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
     return None, _row_error(errors)
 
 
-async def _send(client: httpx.AsyncClient, url: str, req: Request, retry: bool,
-                left: float) -> httpx.Response:
+async def _send(client: HttpClient, url: str, req: Request, retry: bool, left: float) -> Reply:
     """One attempt on the wire. A multipart request goes once with its files; a retry's phase
     timeouts and wall-clock are capped to what is left of the row's budget; a first attempt
     gets the client's full windows (long generations are legitimate)."""
     if req.kind == "multipart":
-        return await client.post(url, data=req.data, files=req.files)
+        return await client.post(url, form=multipart(req.data, req.files or {}))
     if retry and RETRY_ACTIVE:
-        timeout = capped_timeout(getattr(client, "timeout", None), left)
-        return await asyncio.wait_for(client.post(url, json=req.json, timeout=timeout), left)
+        return await asyncio.wait_for(client.post(url, json=req.json, timeouts=client.timeouts.capped(left)),
+                                      left)
     return await client.post(url, json=req.json)
 
 
-def _read(r: httpx.Response) -> dict | Outcome:
+def _read(r: Reply) -> dict | Outcome:
     """A response's result (a 2xx with a JSON object body), or what its failure means."""
     if 200 <= r.status_code < 300:
         body = _json_object(r)
@@ -302,7 +302,7 @@ def _count(value) -> int:
     return max(0, int(value))
 
 
-def _server_answered(r: httpx.Response) -> bool:
+def _server_answered(r: Reply) -> bool:
     """Whether a probe's response came from the inference server: any status below 500, except
     a 2xx without a JSON object (a proxy or maintenance page answering in the server's place,
     which would close the circuit only for it to open again on the next rows)."""
@@ -311,27 +311,13 @@ def _server_answered(r: httpx.Response) -> bool:
     return r.status_code < 500
 
 
-def _json_object(r: httpx.Response) -> dict | None:
+def _json_object(r: Reply) -> dict | None:
     """The response body as a dict, or None when it is not a JSON object."""
     try:
         body = r.json()
     except ValueError:
         return None
     return body if isinstance(body, dict) else None
-
-
-def capped_timeout(configured: httpx.Timeout | None, cap: float) -> httpx.Timeout:
-    """The client's per-phase timeouts, each capped to `cap` seconds (a phase without a limit gets
-    `cap`). A retry keeps a short connect timeout short, and no phase outlives the row's budget;
-    a single number would replace every phase with the remaining budget, up to an hour."""
-    if configured is None:
-        return httpx.Timeout(cap)
-
-    def phase(limit: float | None) -> float:
-        return cap if limit is None else min(limit, cap)
-
-    return httpx.Timeout(connect=phase(configured.connect), read=phase(configured.read),
-                         write=phase(configured.write), pool=phase(configured.pool))
 
 
 def _parse_retry_after(value: str | None) -> float | None:

@@ -2221,10 +2221,9 @@ name = "saturate"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "anyio" },
     { name = "fsspec" },
-    { name = "httpx2", version = "2.14.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "httpx2", version = "2.16.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pyarrow", version = "25.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pyarrow", version = "26.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
@@ -2250,10 +2249,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.14.4" },
     { name = "anyio", specifier = ">=4.15.1" },
     { name = "datasets", marker = "extra == 'hf'", specifier = ">=5.0" },
     { name = "fsspec", specifier = ">=2024.3" },
-    { name = "httpx2", specifier = ">=2.9" },
     { name = "huggingface-hub", marker = "extra == 'hf'", specifier = ">=1.20" },
     { name = "pillow", marker = "extra == 'hf'", specifier = ">=10" },
     { name = "pyarrow", specifier = ">=19" },

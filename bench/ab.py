@@ -47,6 +47,14 @@ SUITES = {
     },
     # against a real engine (--endpoint); the prompt varies per row so the prefix cache cannot
     # answer for the engine
+    # the HTTP client under load (#55): short outputs at windows past the engine's batch size,
+    # and a long-output check that the client stays out of the way when generation dominates
+    "transport": {
+        "short-auto": (None, ["--rows", "3000", "--window", "auto", "--max-tokens", "64"]),
+        "short-fixed512": (None, ["--rows", "6000", "--window", "512", "--max-tokens", "16"]),
+        "short-fixed2048": (None, ["--rows", "12000", "--window", "2048", "--max-tokens", "16"]),
+        "long-fixed256": (None, ["--rows", "1500", "--window", "256", "--max-tokens", "512"]),
+    },
     "vllm": {
         "short-auto": (None, ["--rows", "3000", "--window", "auto", "--max-tokens", "64"]),
         "short-fixed256": (None, ["--rows", "3000", "--window", "256", "--max-tokens", "64"]),

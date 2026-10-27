@@ -89,3 +89,23 @@ head/base ratios, min–max across reps and scenarios:
 The engine, not the laptop's single-thread stub, sets the pace here, so a Job run detects
 throughput changes several times smaller than a local run. Cost: about $0.12 (a10g-large,
 ~5 min of running time, model load included).
+
+## The HTTP client (httpx2 → aiohttp)
+
+`results/transport-*`: main (httpx2) against the aiohttp branch, `transport` suite, 3 reps, on
+a10g-large with Qwen2.5-0.5B-Instruct. Paired aiohttp/httpx2 ratios:
+
+| scenario | vLLM rows/s | SGLang rows/s | CPU per row |
+|---|---|---|---|
+| short outputs, window 512 | 2.17× | 2.13× | −77% / −84% |
+| short outputs, window 2048 | 2.03× | 2.09× | −77% / −85% |
+| long outputs (512 tokens), window 256 | 1.08× | 1.06× | −55% / −53% |
+| short outputs, Auto | 1.04× | 1.03× | −53% / −30% |
+
+httpx2's pool did work for every connection on each request, which also blocked the event loop
+(up to 0.87 s per tick on SGLang). SGLang ran with `--max-running-requests 256`: at its default,
+the repetition-penalty buffers ran a 24 GB GPU out of memory.
+
+`live_checks.py` runs four checks against a real engine: a complete run, 2048 requests in flight,
+an interrupted run resumed, and the engine restarted mid-run. Each passes only if every row is
+written once with no error rows (`results/live-checks-*`: all pass on both engines, both clients).

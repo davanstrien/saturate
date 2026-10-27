@@ -7,15 +7,21 @@ GGUF rule: download weights to local disk first — mmap-over-FUSE-mount stalls.
 
 from __future__ import annotations
 
+import http.client
+import json
 import os
 import signal
 import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
+from urllib.parse import urlsplit
 
-import httpx2 as httpx
+from multidict import CIMultiDict  # aiohttp's case-insensitive headers (installed with it)
 
+from saturate.http import Reply, environment_proxy
 from saturate.transport import PROBE_HEADERS, probe_body
 
 
@@ -122,22 +128,55 @@ def wait_for_health(endpoint: str, timeout_s: int = 1800, proc: subprocess.Popen
         if proc is not None and proc.poll() is not None:
             raise RuntimeError(f"engine died during boot (exit {proc.returncode})")
         try:
-            if httpx.get(f"{base}/health", timeout=5, headers=headers).status_code == 200:
+            if _get(f"{base}/health", timeout=5, headers=headers).status_code == 200:
                 ok_streak += 1
             else:
                 ok_streak = 0
-        except httpx.HTTPError:
+        except _UNANSWERED:
             ok_streak = 0
         if ok_streak >= consecutive:
             try:  # trial request: even a 400 proves the API path is alive
-                r = httpx.post(f"{endpoint.rstrip('/')}{route}",
-                               json=payload if payload is not None else probe_body(None),
-                               timeout=30, headers={**(headers or {}), **PROBE_HEADERS})
+                r = _post(f"{endpoint.rstrip('/')}{route}",
+                          payload if payload is not None else probe_body(None),
+                          timeout=30, headers={**(headers or {}), **PROBE_HEADERS})
                 if accept(r) if accept is not None else r.status_code < 500:
                     _log(f"engine ready (health x{consecutive} + trial {r.status_code})")
                     return
-            except httpx.HTTPError:
+            except _UNANSWERED:
                 pass
             ok_streak = 0  # trial failed: not actually ready
         time.sleep(poll_interval)
     raise TimeoutError(f"engine not ready after {timeout_s}s")
+
+
+# Boot-time checks are a few synchronous requests: the standard library is enough. They follow
+# the same rules as HttpClient: the environment's proxy (never for localhost), no redirects.
+_UNANSWERED = (OSError, http.client.HTTPException)  # refused, timed out, dropped, not HTTP
+
+
+def _get(url: str, timeout: float, headers: dict | None = None) -> Reply:
+    return _send(urllib.request.Request(url, headers=headers or {}), timeout)
+
+
+def _post(url: str, body: dict, timeout: float, headers: dict | None = None) -> Reply:
+    request = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                                     headers={"content-type": "application/json", **(headers or {})})
+    return _send(request, timeout)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None  # urllib then raises HTTPError for the 3xx, which _send returns as a reply
+
+
+def _send(request: urllib.request.Request, timeout: float) -> Reply:
+    """The server's reply; an error status is a reply too, not an exception."""
+    parts = urlsplit(request.full_url)
+    proxy = environment_proxy(parts.scheme, parts.hostname or "", parts.port)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({parts.scheme: proxy} if proxy else {}),
+                                         _NoRedirect)
+    try:
+        with opener.open(request, timeout=timeout) as r:
+            return Reply(r.status, CIMultiDict(r.headers.items()), r.read())
+    except urllib.error.HTTPError as e:
+        return Reply(e.code, CIMultiDict(e.headers.items()), e.read())

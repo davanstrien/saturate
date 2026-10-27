@@ -145,14 +145,76 @@ def _fit(got: pa.DataType, pinned: pa.DataType) -> pa.DataType | None:
     return pinned if _accepts(got, pinned) else None
 
 
+def _is_list(t: pa.DataType) -> bool:
+    return pa.types.is_list(t) or pa.types.is_large_list(t)
+
+
+def _align(arr: pa.Array, to: pa.DataType) -> pa.Array:
+    """`arr` with its struct fields in the order of `to`, recursively through lists: a field
+    `to` lacks is dropped, and a field `arr` lacks is added as nulls. Leaf types are left to
+    the cast that follows. Arrow 19 casts a struct only into one with the same fields in the
+    same order; newer versions match fields by name."""
+    if arr.type == to:
+        return arr
+    if pa.types.is_struct(arr.type) and pa.types.is_struct(to):
+        children = {f.name: child for f, child in zip(arr.type, arr.flatten(), strict=True)}
+        arrays = []
+        for f in to:
+            child = children.get(f.name)
+            arrays.append(pa.nulls(len(arr), type=f.type) if child is None else _align(child, f.type))
+        fields = [pa.field(f.name, a.type) for f, a in zip(to, arrays, strict=True)]
+        return pa.StructArray.from_arrays(arrays, fields=fields, mask=arr.is_null())
+    if _is_list(arr.type) and _is_list(to):
+        items = _align(arr.values, to.value_type)
+        build = pa.LargeListArray if pa.types.is_large_list(arr.type) else pa.ListArray
+        return build.from_arrays(arr.offsets, items, mask=arr.is_null())
+    return arr
+
+
+def _cast(values: pa.Array | pa.ChunkedArray, to: pa.DataType) -> pa.Array | pa.ChunkedArray:
+    """`values` cast to `to` (a safe cast: values that do not fit raise), struct fields matched
+    by name on every supported pyarrow (`_align`)."""
+    if isinstance(values, pa.ChunkedArray):
+        return pa.chunked_array([_cast(chunk, to) for chunk in values.chunks], type=to)
+    return _align(values, to).cast(to)
+
+
 def _cast_columns(table: pa.Table, schema: pa.Schema) -> pa.Table:
-    """`table` with each column cast to its type in `schema` (a safe cast: values that do not
-    fit raise)."""
+    """`table` with each column cast to its type in `schema` (`_cast`)."""
     for i, f in enumerate(table.schema):
         to = schema.field(f.name).type
         if to != f.type:
-            table = table.set_column(i, pa.field(f.name, to), table.column(i).cast(to))
+            table = table.set_column(i, pa.field(f.name, to), _cast(table.column(i), to))
     return table
+
+
+def _undeclared_keys(value, t: pa.DataType, path: str) -> list[str]:
+    """The paths of the dict keys in `value` (at any depth, inside lists too) that the
+    declared type `t` has no struct field for, e.g. "m.b" or "items[].z"."""
+    found = []
+    if isinstance(value, dict) and pa.types.is_struct(t):
+        names = [f.name for f in t]
+        for key, inner in value.items():
+            if key in names:
+                found.extend(_undeclared_keys(inner, t.field(names.index(key)).type, f"{path}.{key}"))
+            else:
+                found.append(f"{path}.{key}")
+    elif isinstance(value, (list, tuple)) and _is_list(t):
+        for item in value:
+            found.extend(_undeclared_keys(item, t.value_type, f"{path}[]"))
+    return found
+
+
+def _outside_declared(record: dict, schema: pa.Schema) -> list[str]:
+    """The fields of `record`, top level or nested, that the declared `schema` lacks. Arrow
+    would drop an undeclared struct key without a word, losing the value."""
+    found = []
+    for key, value in record.items():
+        if key in schema.names:
+            found.extend(_undeclared_keys(value, schema.field(key).type, key))
+        else:
+            found.append(key)
+    return sorted(set(found))
 
 
 class ParquetSink:
@@ -372,7 +434,7 @@ class ParquetSink:
             if f.name in self._pinned:
                 to = self._conform_type(f.name, f.type)
                 if to is not None:
-                    table = table.set_column(i, pa.field(f.name, to), table.column(i).cast(to))
+                    table = table.set_column(i, pa.field(f.name, to), _cast(table.column(i), to))
             elif not _storable(f.type):
                 raise TypeError(f"{f.name}: {f.type} has a nested empty object: parquet cannot store it")
         return table
@@ -385,27 +447,37 @@ class ParquetSink:
         if self._declared is None:
             if not self._seeded:
                 self._seed_schema()
-            arr = pa.array([record])  # one serialisation: a struct typed per field
-            # probe only reads the pin, so a rejected record leaves no trace on it
-            for i, f in enumerate(arr.type):  # equal types (the common case) cost a dict lookup
-                if f.name in self._pinned and not pa.types.is_null(f.type):  # a null fits any pin
-                    to = self._conform_type(f.name, f.type)
-                    if to is not None:
-                        arr.field(i).cast(to)
-                elif not _storable(f.type):
-                    raise TypeError(f"{f.name}: {f.type} has a nested empty object: "
-                                    "parquet cannot store it")
+            got = self._stored_types(pa.array([record]))  # one serialisation
             # and against the rows already buffered: two types for one not-yet-pinned column
             # (or nested field) inside one batch cannot both be stored — the newcomer is the row
             # that does not fit
-            got = pa.schema(list(arr.type))
             self._widen_buffer(got)
             self._probe_cache = (record, got)  # append() reuses the types without re-serialising
             return
-        extra = record.keys() - set(self._declared.names)
-        if extra:
-            raise ValueError(f"fields outside the declared schema: {sorted(extra)}")
+        outside = _outside_declared(record, self._declared)
+        if outside:
+            raise ValueError(f"fields outside the declared schema: {outside}")
         pa.Table.from_pylist([{n: record.get(n) for n in self._declared.names}], schema=self._declared)
+
+    def _stored_types(self, arr: pa.StructArray) -> pa.Schema:
+        """The types one row (`arr`, a struct array of length 1) is stored as, as flush would
+        conform it: a pinned column takes its conformed type (`_conform_type`), so a nested
+        field with no type yet is left out exactly as flush leaves it out. Raises
+        (TypeError/ValueError) when the row does not fit the pin. Only reads the pin, so a
+        rejected row leaves no trace on it."""
+        fields = []
+        for i, f in enumerate(arr.type):  # equal types (the common case) cost a dict lookup
+            if f.name in self._pinned and not pa.types.is_null(f.type):  # a null fits any pin
+                to = self._conform_type(f.name, f.type)
+                if to is not None:
+                    _cast(arr.field(i), to)  # the values must fit too (0.5 -> int64, overflow)
+                    fields.append(pa.field(f.name, to))
+                    continue
+            elif not _storable(f.type):
+                raise TypeError(f"{f.name}: {f.type} has a nested empty object: "
+                                "parquet cannot store it")
+            fields.append(f)
+        return pa.schema(fields)
 
     def _widen_buffer(self, got: pa.Schema) -> pa.Schema:
         """The buffer's types widened by one more row's; raises (ArrowTypeError) on a clash."""
@@ -418,7 +490,7 @@ class ParquetSink:
             cached = self._probe_cache
             try:
                 got = (cached[1] if cached and cached[0] is record
-                       else pa.schema(list(pa.array([record]).type)))
+                       else self._stored_types(pa.array([record])))
                 self._buf_schema = self._widen_buffer(got)
             except UNSTORABLE:
                 pass  # a direct append of a row that does not fit: flush demotes it (the guarantee)
@@ -442,7 +514,9 @@ class ParquetSink:
         name = f"part-{int(time.time() * 1000)}-{self._seq:06d}-{uuid.uuid4().hex[:8]}.parquet"
         self._seq += 1
         if self._declared is not None:  # declared mode: exact frame — missing fields null, extras raise
-            extra = {k for r in self._buf for k in r} - set(self._declared.names)
+            extra = set()
+            for r in self._buf:
+                extra.update(_outside_declared(r, self._declared))
             if extra:
                 raise ValueError(f"rows carry fields outside the declared schema: {sorted(extra)}")
             table = pa.Table.from_pylist([{n: r.get(n) for n in self._declared.names}
@@ -471,7 +545,7 @@ class ParquetSink:
             for f in schema:
                 if f.name not in table.schema.names:
                     table = table.append_column(f, pa.nulls(len(table), type=f.type))
-            table = table.select(schema.names).cast(schema)
+            table = _cast_columns(table.select(schema.names), schema).cast(schema)
         self._write(f"{self.root}/{name}", table)
         try:  # manifest second: a crash in between leaves an uncovered part -> scanned
             self.fs.makedirs(f"{self.root}/_manifest", exist_ok=True)
@@ -528,7 +602,7 @@ class ParquetSink:
                     table = table.drop_columns([f.name])
             elif typed != f.type:
                 i = table.schema.get_field_index(f.name)
-                table = table.set_column(i, pa.field(f.name, typed), table.column(i).cast(typed))
+                table = table.set_column(i, pa.field(f.name, typed), _cast(table.column(i), typed))
         return table
 
     @staticmethod
@@ -568,9 +642,11 @@ class ParquetSink:
         return pa.concat_tables(tables, promote_options="permissive")
 
     def _cast_to_shared_types(self, conformed: list[pa.Table | None]) -> list[pa.Table | None]:
-        """Each kept row cast to the types the kept rows share; a row whose values do not fit
-        is demoted in place (None in the result, an error row in the buffer), and the shared
-        types are worked out again from the rows still kept, until every one fits."""
+        """Each kept row cast to the types the kept rows share. The first row whose values do
+        not fit is demoted in place (None in the result, an error row in the buffer), and the
+        shared types are worked out again from the rows still kept before any other row is
+        checked: a type only the demoted row brought (a double that 2**60 does not fit) must
+        not cost another row. Repeats until every kept row fits."""
         kept = list(conformed)
         while True:
             schemas = [t.schema for t in kept if t is not None]
@@ -578,7 +654,6 @@ class ParquetSink:
                 return kept
             shared = pa.unify_schemas(schemas, promote_options="permissive")
             cast: list[pa.Table | None] = []
-            demoted = False
             for i, t in enumerate(kept):
                 if t is None:
                     cast.append(None)
@@ -588,9 +663,8 @@ class ParquetSink:
                 except UNSTORABLE as e:
                     self._buf[i] = error_row(self._buf[i].get("id"), e)
                     kept[i] = None
-                    cast.append(None)
-                    demoted = True
-            if not demoted:
+                    break  # the shared types may change without this row: work them out again
+            else:
                 return cast
 
     def begin_run(self, shard: tuple[int, int]) -> None:

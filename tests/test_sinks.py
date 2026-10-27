@@ -1302,3 +1302,75 @@ def test_a_new_nested_key_extends_the_struct_like_a_new_column(tmp_path):
     assert by_id == {"a": {"lang": "en", "script": None}, "b": {"lang": "fr", "script": "Latn"},
                      "c": {"lang": "de", "script": None}}
     assert dict(read_output(str(tmp_path)))["b"] == {"meta": {"lang": "fr", "script": "Latn"}}
+
+
+def test_a_field_typed_after_it_was_first_none_is_stored_on_every_pyarrow(tmp_path):
+    """The pin keeps struct fields in pin order and appends new ones (meta: struct<b, a>), while
+    inference orders them as they arrive (struct<a, b>). Arrow 26 casts structs by name; Arrow 19
+    (our floor) only casts matching order, so the second row became an error row there."""
+    from saturate import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "r1", "m": {"a": None, "b": 1}, "error": None})
+    sink.append({"id": "r2", "m": {"a": "x", "b": 2}, "error": None})
+    assert sink.rows_demoted == 0
+    assert dict(read_output(str(tmp_path)))["r2"] == {"m": {"b": 2, "a": "x"}}
+
+
+def test_probe_checks_a_row_against_the_types_flush_stores(tmp_path):
+    """m.new arrives as [] (dropped: no type yet), then as "x" in the same batch. Flush keeps
+    both rows; probe compared the raw list<null> with string and rejected the second."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "p", "m": {"old": 0}, "error": None})
+    sink.flush_every = 10
+    rows = [Done("a", {}, {"m": {"old": 1, "new": []}}, None, {}),
+            Done("b", {}, {"m": {"old": 2, "new": "x"}}, None, {})]
+    stats = asyncio.run(drain(iter_async(rows), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (2, 0)
+    assert dict(read_output(str(tmp_path)))["b"] == {"m": {"old": 2, "new": "x"}}
+
+
+def test_salvage_works_out_the_shared_types_again_after_each_demotion(tmp_path):
+    """Row a's 2**60 does not fit the double x that row b's 0.5 makes, so a is demoted. Without
+    a, y is int64 and b's 2**60 fits; b was demoted too, against types a had contributed."""
+    from saturate import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=2)
+    sink.append({"id": "a", "x": 2**60, "y": 0.5, "error": None})
+    sink.append({"id": "b", "x": 0.5, "y": 2**60, "error": None})
+    assert sink.rows_demoted == 1
+    assert sink.existing_ids(retry_errors=True) == {"b"}
+    assert dict(read_output(str(tmp_path)))["b"] == {"x": 0.5, "y": 2**60}
+
+
+def test_a_declared_schema_rejects_undeclared_nested_keys(tmp_path):
+    """A declared struct<a> silently dropped m.b: the row succeeded and b was lost. An undeclared
+    key at any depth (inside lists too) is refused like a top-level one, naming the key."""
+    import asyncio
+
+    import pytest
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    schema = pa.schema([("id", pa.string()), ("error", pa.string()),
+                        ("m", pa.struct([("a", pa.int64())])),
+                        ("items", pa.list_(pa.struct([("k", pa.string())])))])
+    sink = ParquetSink(str(tmp_path), flush_every=1, schema=schema)
+    rows = [Done("ok", {}, {"m": {"a": 1}, "items": [{"k": "x"}]}, None, {}),
+            Done("nested", {}, {"m": {"a": 1, "b": "lost"}}, None, {}),
+            Done("in-list", {}, {"items": [{"k": "x", "z": 2}]}, None, {})]
+    stats = asyncio.run(drain(iter_async(rows), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (1, 2)
+    assert sink.existing_ids(retry_errors=True) == {"ok"}
+    with pytest.raises(ValueError, match=r"m\.b"):
+        sink.probe({"id": "x", "m": {"a": 1, "b": "lost"}, "error": None})
+    with pytest.raises(ValueError, match=r"items\[\]\.z"):
+        sink.append({"id": "y", "items": [{"k": "x", "z": 2}], "error": None})

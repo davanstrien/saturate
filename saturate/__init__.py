@@ -227,7 +227,7 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
     stats.final_limit = limiter.limit
     stats.retries = getattr(limiter, "retries_total", 0)  # an embedder's own limiter may count none
     stats.bound_by = bound_by_counts(limiter.ticks)
-    stats.input_bound = stats.bound_by.get("source", 0) + stats.bound_by.get("prep", 0) > 0
+    stats.input_bound = any(t.get("input_bound") for t in limiter.ticks)  # CONTRACT §7: from the ticks
     stats.cut_reasons = cut_reasons(limiter.ticks)
     if lines and write_lines is not None:
         await write_telemetry(write_lines, lines)  # final: the complete trajectory

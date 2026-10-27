@@ -14,7 +14,6 @@ import asyncio
 import contextlib
 import dataclasses
 import inspect
-import math
 import sys
 import threading
 import time
@@ -22,7 +21,6 @@ from collections.abc import AsyncGenerator, Callable, Iterable
 
 import anyio
 from anyio.abc import TaskGroup
-from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 from saturate.core import AdaptiveClient, AdaptiveLimiter, Done
 from saturate.transport import FatalTransportError
@@ -43,34 +41,49 @@ def adapt_parse(parse: Callable) -> Callable[[dict, dict], dict]:
     return parse if len(params) >= 2 else (lambda row, resp: parse(resp))
 
 
+_END = object()  # put in the queue after the last finished row
+
+
 class Results:
     """The finished rows, in the order they finished. Taking one makes room for another row to
-    start (the backlog limit), so read it to the end, or leave the `async with` to stop the run."""
+    start (the backlog limit), so read it to the end, or leave the `async with` to stop the run.
 
-    def __init__(self, receive: MemoryObjectReceiveStream[Done], run: _Run):
-        self._receive, self._run = receive, run
+    The rows travel in an asyncio.Queue: a row handed to a reader that is cancelled before it
+    resumes stays in the queue, so a cancel never loses a finished row."""
+
+    def __init__(self, run: _Run):
+        self._run = run
 
     def __aiter__(self) -> Results:
         return self
 
     async def __anext__(self) -> Done:
-        try:
-            done = await self._receive.receive()
-        except anyio.EndOfStream:
-            raise StopAsyncIteration from None
+        done = await self._run.results.get()
+        if done is _END:
+            self._run.results.put_nowait(_END)  # every later read sees the end too
+            raise StopAsyncIteration
         self._run.backlog.release()
         return done
 
-    def receive_nowait(self) -> Done:
-        """A finished row already waiting, without waiting for one. Raises anyio.WouldBlock when
-        none is waiting, anyio.EndOfStream when the run is over."""
-        done = self._receive.receive_nowait()
-        self._run.backlog.release()
-        return done
+    def take_waiting(self) -> list[Done]:
+        """Every finished row already waiting, without waiting for more."""
+        taken = []
+        while True:
+            try:
+                done = self._run.results.get_nowait()
+            except asyncio.QueueEmpty:
+                return taken
+            if done is _END:
+                self._run.results.put_nowait(_END)
+                return taken
+            self._run.backlog.release()
+            taken.append(done)
 
-    def stop(self) -> None:
-        """Stop starting and running rows; rows already finished stay readable."""
+    async def stop(self) -> None:
+        """Stop the run and wait until it has: no row starts or finishes after this returns, and
+        rows already finished (fail_fast's held errors included) can still be taken."""
         self._run.stop()
+        await self._run.finished.wait()
 
 
 @dataclasses.dataclass
@@ -83,7 +96,6 @@ class _Run:
     parse: Callable[[dict, dict], dict]
     route: str
     fail_fast: int
-    results: MemoryObjectSendStream[Done]
     prepare: anyio.Semaphore  # request bodies built but not yet admitted
     backlog: anyio.Semaphore  # rows started but not yet taken from `results`
     prepare_threads: anyio.CapacityLimiter | None  # None: to_request runs on the event loop
@@ -93,6 +105,9 @@ class _Run:
     succeeded: bool = False
     discarding: bool = False  # fail_fast gave up: finished rows are dropped, not stored
     scope: anyio.CancelScope | None = None  # the feeder's and row tasks' scope
+    # finished rows; unbounded because the backlog is the bound
+    results: asyncio.Queue = dataclasses.field(default_factory=asyncio.Queue)
+    finished: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)  # no more rows will come
 
     def fail(self, error: BaseException) -> None:
         """Record the run's first failure and stop the row tasks; later failures are logged."""
@@ -122,14 +137,14 @@ class _Run:
                 return
             self.succeeded = True
             for held in self.held:
-                self.results.send_nowait(held)
+                self.results.put_nowait(held)
             self.held.clear()
-        self.results.send_nowait(done)
+        self.results.put_nowait(done)
 
     def publish_held(self) -> None:
         """The input ended before fail_fast rows finished: the held errors are this run's results."""
         for held in self.held:
-            self.results.send_nowait(held)
+            self.results.put_nowait(held)
         self.held.clear()
 
     def _give_up_fail_fast(self) -> None:
@@ -157,32 +172,34 @@ async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]], to_r
     `prepare_workers` > 0 runs `to_request` in that many threads (it must bound its own I/O: a
     running call cannot be interrupted). `fail_fast`: if the first N finished rows all failed,
     the run stops without storing them and raises. `backlog` caps rows started but not yet read
-    from `results`; by default room for the largest window, the fail_fast hold-back and 2048
-    rows for the sink to buffer before a flush.
+    from `results` (at least `fail_fast`: the held failures keep their places); by default room
+    for the largest window, the fail_fast hold-back and 2048 rows for the sink to buffer.
 
     Leaving the `async with` early stops the run. When the run fails (the input raised, the
     endpoint is gone, fail_fast), every row that already finished can still be read, and the
     failure is raised when the `async with` is left."""
-    send, receive = anyio.create_memory_object_stream[Done](math.inf)  # the backlog is the bound
     limiter = client.limiter
     if limiter is None:
         raise RuntimeError("through() needs the client entered: `async with AdaptiveClient(...) as client:`")
+    fail_fast = max(0, fail_fast)
+    room = backlog or _default_backlog(limiter, fail_fast)
+    if room < fail_fast:
+        raise ValueError(f"backlog={room} is smaller than fail_fast={fail_fast}: the failures held "
+                         "back would take every place and the run could never go on")
     limiter.prep_workers = prepare_workers
-    run = _Run(client=client, limiter=limiter, to_request=to_request, parse=adapt_parse(parse), route=route,
-               fail_fast=max(0, fail_fast), results=send,
-               prepare=anyio.Semaphore(max(2 * prepare_workers, 4)),
-               backlog=anyio.Semaphore(backlog or _default_backlog(limiter, fail_fast)),
+    run = _Run(client=client, limiter=limiter, to_request=to_request, parse=adapt_parse(parse),
+               route=route, fail_fast=fail_fast, prepare=anyio.Semaphore(max(2 * prepare_workers, 4)),
+               backlog=anyio.Semaphore(room),
                prepare_threads=anyio.CapacityLimiter(prepare_workers) if prepare_workers else None)
     caller_error: BaseException | None = None
-    with receive:
-        async with anyio.create_task_group() as group:
-            group.start_soon(_produce, run, rows)
-            try:
-                yield Results(receive, run)
-            except BaseException as e:
-                caller_error = e  # raised below, outside the task group, so it is not wrapped
-            finally:
-                run.stop()
+    async with anyio.create_task_group() as group:
+        group.start_soon(_produce, run, rows)
+        try:
+            yield Results(run)
+        except BaseException as e:
+            caller_error = e  # raised below, outside the task group, so it is not wrapped
+        finally:
+            run.stop()
     raise_first_failure(caller_error, run.failure)
 
 
@@ -206,13 +223,16 @@ def _default_backlog(limiter: AdaptiveLimiter, fail_fast: int) -> int:
 
 async def _produce(run: _Run, rows: Iterable[tuple[str, dict]]) -> None:
     """The feeder and its row tasks, in their own task group: a failure cancels them, not the
-    caller reading `results`. Closing `results` at the end tells the caller there is no more."""
-    with run.results:
+    caller reading `results`. The end marker tells the caller there is no more."""
+    try:
         async with anyio.create_task_group() as row_tasks:
             run.scope = row_tasks.cancel_scope
             await _feed(run, rows, row_tasks)
+    finally:
         if not run.discarding and not isinstance(run.failure, FatalTransportError):
-            run.publish_held()  # the input ended (or raised) before fail_fast rows finished
+            run.publish_held()  # the input ended (or raised, or the run stopped) before fail_fast rows
+        run.results.put_nowait(_END)
+        run.finished.set()
 
 
 async def _feed(run: _Run, rows: Iterable[tuple[str, dict]], row_tasks: TaskGroup) -> None:
@@ -222,7 +242,7 @@ async def _feed(run: _Run, rows: Iterable[tuple[str, dict]], row_tasks: TaskGrou
     reader.start()
     try:
         while True:
-            read = await reader.rows.receive()
+            read = await reader.rows.get()
             if isinstance(read, _End):
                 if read.error is not None:  # the input raised: rows already started finish, then it fails
                     run.failure = run.failure or read.error
@@ -274,7 +294,7 @@ class _Reader:
         self._room = threading.Semaphore(READ_AHEAD)
         self._stopped = threading.Event()
         self._loop = asyncio.get_running_loop()
-        self._send, self.rows = anyio.create_memory_object_stream[_Row | _End](math.inf)
+        self.rows: asyncio.Queue[_Row | _End] = asyncio.Queue()
         self._thread = threading.Thread(target=self._read, name="saturate-reader", daemon=True)
 
     def start(self) -> None:
@@ -306,7 +326,7 @@ class _Reader:
 
     def _hand_over(self, message: _Row | _End) -> None:
         try:
-            self._loop.call_soon_threadsafe(self._send.send_nowait, message)
+            self._loop.call_soon_threadsafe(self.rows.put_nowait, message)
         except RuntimeError:  # the event loop is gone: the run ended without this row
             pass
 

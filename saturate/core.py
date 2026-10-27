@@ -306,17 +306,25 @@ class AdaptiveClient:
         if unknown:
             raise ValueError(f"timeouts: unknown phase(s) {sorted(unknown)}; the read timeout is "
                              "read_timeout=, the others are 'connect', 'write' and 'pool'")
-        phases = {"connect": 30.0, "write": 30.0, "pool": 30.0, **(timeouts or {})}
+        self._timeout = httpx.Timeout(read=read_timeout,
+                                      **{"connect": 30.0, "write": 30.0, "pool": 30.0, **(timeouts or {})})
+        self._headers = headers or {}
+        self._signal_source, self._window, self._on_tick = signal_source, window, on_tick
         self.breaker = Breaker()
-        # built here, used once the client is entered (`async with`): the HTTP client opens no
-        # connection and the limiter starts no tick loop until then
-        self._client = httpx.AsyncClient(
+        self._client, self.limiter = self._build()
+
+    def _build(self) -> tuple[httpx.AsyncClient, AdaptiveLimiter]:
+        """A fresh HTTP client and limiter. Built at construction, so neither is ever None; the
+        client opens no connection and the limiter starts no tick loop until `async with`."""
+        client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=1024, max_keepalive_connections=1024),
-            timeout=httpx.Timeout(read=read_timeout, **phases), headers=headers or {})
-        signals = Null() if signal_source == "none" else HttpScrape(self._client, self.base)
-        self.limiter = AdaptiveLimiter(window, signals=signals, on_tick=on_tick)
+            timeout=self._timeout, headers=self._headers)
+        signals = Null() if self._signal_source == "none" else HttpScrape(client, self.base)
+        return client, AdaptiveLimiter(self._window, signals=signals, on_tick=self._on_tick)
 
     async def __aenter__(self):
+        if self._client.is_closed:  # entered again after an earlier `async with`: start fresh
+            self._client, self.limiter = self._build()
         await self.limiter.__aenter__()
         return self
 

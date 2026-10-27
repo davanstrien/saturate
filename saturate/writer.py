@@ -24,6 +24,7 @@ from saturate.sink import UNSTORABLE, _error_row
 from saturate.transport import usage_tokens
 
 WRITER_QUEUE = 256  # finished rows waiting for the writer; a full queue makes drain wait
+_END = object()  # put in the writer's queue after the last row
 
 
 class Sink(Protocol):
@@ -62,24 +63,44 @@ def sink_hooks(sink) -> SinkHooks:
 
 
 async def drain(results: AsyncIterable[Done], sink, shard: tuple[int, int] = (0, 1), stats=None):
-    """Write every finished row to the sink; returns the run's Stats. However the run ends, the
-    rows that already finished are written. If you cancel, drain first stops the run, takes the
-    rows already waiting in `results` and waits for them to be written, then the cancellation
-    goes on. Completion markers are pump()'s job; drain writes none."""
+    """Write every finished row to the sink; returns the run's Stats.
+
+    However the run ends, the rows that already finished are written. If you cancel, drain
+    stops the run, takes the finished rows still waiting, and waits for them to be written
+    before the cancellation goes on (a second cancel stops waiting). If writing fails, drain
+    stops reading at once and raises the write error. Completion markers are pump()'s job."""
     from saturate import Stats  # local import: avoid cycle
 
     stats = stats if stats is not None else Stats()
     async with _closing(results), _writer(sink, stats) as writer:
-        holding: Done | None = None  # a row taken from `results` but not yet with the writer
-        try:
-            async for done in results:
-                holding = done
-                await writer.put(done)
-                holding = None
-        except asyncio.CancelledError:
-            await asyncio.shield(_hand_over_the_rest(results, writer, holding))
-            raise
+        with anyio.CancelScope() as reading:
+            writer.on_failure = reading.cancel  # a failed write stops the reading straight away
+            holding: Done | None = None  # taken from `results`, not yet with the writer
+            try:
+                async for done in results:
+                    holding = done
+                    await writer.put(done)
+                    holding = None
+            except asyncio.CancelledError:
+                if not reading.cancel_called:  # you cancelled, not the writer
+                    await _wait_out(asyncio.ensure_future(_hand_over_the_rest(results, writer, holding)))
+                raise
     return stats
+
+
+async def _hand_over_the_rest(results: AsyncIterable[Done], writer: _Writer, holding: Done | None) -> None:
+    """On a cancel: stop the run and wait until it has, then give the writer every finished row."""
+    try:
+        stop = getattr(results, "stop", None)
+        if stop is not None:
+            await stop()
+        if holding is not None:
+            await writer.put(holding)
+        take_waiting = getattr(results, "take_waiting", None)
+        for done in take_waiting() if take_waiting is not None else []:
+            await writer.put(done)
+    except Exception as e:
+        _log(f"stopped before every finished row was written: {e!r}")
 
 
 def _closing(results):
@@ -88,117 +109,125 @@ def _closing(results):
     return contextlib.aclosing(results) if hasattr(results, "aclose") else contextlib.nullcontext()
 
 
-async def _hand_over_the_rest(results: AsyncIterable[Done], writer: _Writer, holding: Done | None) -> None:
-    """On cancel: stop the run, then give the writer every finished row already waiting. After
-    a second cancel the writer may close first: the rows it did not take are logged as lost."""
+async def _wait_out(task: asyncio.Future) -> None:
+    """Wait for `task` to finish. A first cancel does not stop the task or the wait; a second
+    stops the wait, and the task goes on by itself."""
     try:
-        await _give_the_rest(results, writer, holding)
-    except Exception as e:
-        _log(f"stopped before every finished row was written: {e!r}")
-
-
-async def _give_the_rest(results: AsyncIterable[Done], writer: _Writer, holding: Done | None) -> None:
-    stop = getattr(results, "stop", None)
-    if stop is not None:
-        stop()
-    if holding is not None:
-        await writer.put(holding)
-    take = getattr(results, "receive_nowait", None)
-    while take is not None:
-        try:
-            done = take()
-        except (anyio.WouldBlock, anyio.EndOfStream):
-            return
-        await writer.put(done)
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.shield(task)
+        raise
 
 
 @contextlib.asynccontextmanager
 async def _writer(sink, stats) -> AsyncGenerator[_Writer, None]:
-    """Start the writer; on the way out let it write what it was given, then join its thread."""
+    """Run the writer for the duration; on the way out it writes everything it was given and
+    flushes, even through a first cancel."""
     writer = _Writer(sink, stats)
+    writer.start()
     caller_error: BaseException | None = None
     try:
-        async with anyio.create_task_group() as group:
-            group.start_soon(writer.run)
-            try:
-                yield writer
-            except BaseException as e:
-                caller_error = e  # raised below, outside the task group, so it is not wrapped
-            finally:
-                writer.no_more_rows(failed=caller_error is not None)
-    finally:
-        writer.join()  # never abandon a write: it could leave half a file
-    if caller_error is not None and caller_error is not writer.failure:
-        if writer.failure is not None:  # the caller's error (a cancel, say) came first
-            _log(f"writing also failed: {writer.failure!r}")
-        raise caller_error
-    if writer.failure is not None:
+        yield writer
+    except BaseException as e:
+        caller_error = e
+    await _wait_out(asyncio.ensure_future(writer.finish(failed=caller_error is not None)))
+    if writer.failure is not None:  # a failed write stopped the run: that is its error
+        if caller_error is not None and not isinstance(caller_error, asyncio.CancelledError):
+            _log(f"after the write failed, also: {caller_error!r}")
         raise writer.failure
+    if caller_error is not None:
+        raise caller_error
 
 
 class _Writer:
-    """One thread owns the sink. Rows arrive on a queue; each batch is appended in one call to
-    the thread; when none arrive for the sink's flush interval, what it holds is flushed."""
+    """One thread owns the sink. Rows arrive on a queue; the writer task takes every row
+    waiting and appends them in one call to the thread; when none arrive for the sink's flush
+    interval, what the sink holds is flushed."""
 
     def __init__(self, sink, stats):
         self.sink, self.stats = sink, stats
         self.hooks = sink_hooks(sink)
         self.failure: BaseException | None = None
+        self.on_failure: Callable[[], None] = lambda: None
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=WRITER_QUEUE)
         self._thread = ThreadPoolExecutor(1, thread_name_prefix="saturate-writer")
-        self._send, self._receive = anyio.create_memory_object_stream[Done](WRITER_QUEUE)
+        self._task: asyncio.Task | None = None
+        self._next_row: asyncio.Future | None = None  # a get waiting for the next row
+        self._ended = False  # drain said there are no more rows
         self._run_failed = False
         self._appended_since_flush = 0
         self._demoted_before = getattr(sink, "rows_demoted", 0)
 
+    def start(self) -> None:
+        self._task = asyncio.ensure_future(self._run())
+
     async def put(self, done: Done) -> None:
-        """Give the writer a finished row; waits while its queue is full. Raises the writer's
-        error if it has stopped."""
+        """Give the writer a finished row; waits while its queue is full. A row either is in
+        the queue when this returns or is not if it raised: never half."""
+        if self._task is not None and self._task.done():
+            _log(f"the writer has finished; row {done.id} was not written")
+            return
+        await self._queue.put(done)
+
+    async def finish(self, failed: bool) -> None:
+        """No more rows: let the writer write what it holds, flush, and stop."""
+        self._run_failed = self._run_failed or failed
+        await self._queue.put(_END)
+        if self._task is not None:
+            await self._task
+        self._thread.shutdown(wait=False)  # idle by now: the thread exits on its own
+
+    async def _run(self) -> None:
+        """The writer task: write each batch, flush when quiet, flush at the end. After a failed
+        write it keeps taking rows (and drops them), so a sender never waits on a full queue."""
         try:
-            await self._send.send(done)
-        except (anyio.BrokenResourceError, anyio.ClosedResourceError):
-            raise self.failure or RuntimeError("the writer has stopped") from None
-
-    def no_more_rows(self, failed: bool) -> None:
-        self._run_failed = failed
-        self._send.close()
-
-    def join(self) -> None:
-        self._thread.shutdown(wait=True)
-
-    async def run(self) -> None:
-        """The writer task: write each batch, flush when quiet, flush at the end."""
-        with self._receive:
-            try:
-                while (batch := await self._next_batch()) is not None:
-                    if batch:
-                        await self._in_thread(self._append, batch)
-                    elif self._appended_since_flush:
-                        await self._in_thread(self._flush)
-            except BaseException as e:
-                self.failure = e
-                self._run_failed = True
-            await self._in_thread(self._finish)
+            while (batch := await self._next_batch()) is not None:
+                if self.failure is not None:
+                    continue
+                if batch:
+                    await self._call(self._append, batch)
+                elif self._appended_since_flush:  # quiet for the flush interval
+                    await self._call(self._flush)
+        finally:
+            if self._next_row is not None:
+                self._next_row.cancel()  # a pending get: the row it would take stays in the queue
+        await self._call(self._finish)
 
     async def _next_batch(self) -> list[Done] | None:
-        """The finished rows waiting now (at least one); [] when none arrived for the sink's
-        flush interval; None when drain has no more."""
-        quiet = self.hooks.flush_interval_s
-        try:
-            with anyio.fail_after(quiet) if quiet else contextlib.nullcontext():
-                first = await self._receive.receive()
-        except TimeoutError:
-            return []
-        except anyio.EndOfStream:
+        """Every row waiting now (at least one); [] when none arrived for the sink's flush
+        interval; None once drain has said there are no more."""
+        if self._ended:
             return None
-        batch = [first]
+        if self._next_row is None:  # kept across quiet intervals, so no row is ever dropped
+            self._next_row = asyncio.ensure_future(self._queue.get())
+        done, _ = await asyncio.wait({self._next_row}, timeout=self.hooks.flush_interval_s)
+        if not done:
+            return []
+        batch = [self._next_row.result(), *self._take_waiting()]
+        self._next_row = None
+        if _END in batch:
+            self._ended = True
+            batch = [d for d in batch if d is not _END]
+            return batch or None
+        return batch
+
+    def _take_waiting(self) -> list:
+        taken = []
         while True:
             try:
-                batch.append(self._receive.receive_nowait())
-            except (anyio.WouldBlock, anyio.EndOfStream):
-                return batch
+                taken.append(self._queue.get_nowait())
+            except asyncio.QueueEmpty:
+                return taken
 
-    async def _in_thread(self, call: Callable[..., None], *args) -> None:
-        await asyncio.get_running_loop().run_in_executor(self._thread, call, *args)
+    async def _call(self, call: Callable[..., None], *args) -> None:
+        """Run `call` in the writer thread; a failure is recorded, stops the reading, and from
+        then on rows are dropped."""
+        try:
+            await asyncio.get_running_loop().run_in_executor(self._thread, call, *args)
+        except Exception as e:
+            if self.failure is None:
+                self.failure = e
+                self.on_failure()
 
     # --- in the writer thread ------------------------------------------------------------------
 
@@ -217,11 +246,11 @@ class _Writer:
         try:
             self._flush()
         except Exception as e:
-            if not self._run_failed:
-                self.failure = self.failure or e
-            else:
-                _log(f"flush after a failed run also failed (the first error is raised): {e!r}")
-        _count_demoted(self.sink, self._demoted_before, self.stats)
+            if not self._run_failed and self.failure is None:
+                raise
+            _log(f"flush after a failed run also failed (the first error is raised): {e!r}")
+        finally:
+            _count_demoted(self.sink, self._demoted_before, self.stats)
 
 
 def _record(done: Done, probe, stats) -> dict:

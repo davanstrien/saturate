@@ -414,3 +414,10 @@ def test_a_success_with_malformed_usage_still_counts_and_resets_the_breaker():
     assert err is None and body["usage"]["prompt_tokens"] is None
     assert breaker.consecutive == 0
     assert [(a.ok, a.tokens) for a in observed] == [(True, 1)]
+
+
+@pytest.mark.internals
+@pytest.mark.parametrize("value, expected", [(7, 7), (3.0, 3), (2.6, 2), (-5, 0), (None, 0), (True, 0),
+                                             ("7", 0), (float("nan"), 0), (float("inf"), 0)])
+def test_a_token_count_is_a_non_negative_int_or_zero(value, expected):
+    assert transport.usage_tokens({"usage": {"prompt_tokens": value}}) == (expected, 0)

@@ -33,7 +33,7 @@ from saturate.transport import Attempt, Breaker, FatalTransportError, Request, c
 from saturate.window import Window
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class _TickCounts:
     """What the attempts reported since the last tick."""
 
@@ -43,7 +43,7 @@ class _TickCounts:
     latencies: list[float] = dataclasses.field(default_factory=list)
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class Done:
     """One completed row: out is the parse result on success, None on error."""
 

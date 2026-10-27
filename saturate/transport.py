@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import math
 import random
 import sys
 import time
@@ -136,7 +137,7 @@ class Breaker:
               file=sys.stderr, flush=True)
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class Attempt:
     """What one HTTP attempt tells the controller, reported as soon as the attempt ends, not when
     its row is done: a row backing off for minutes must not hide an overload meanwhile."""
@@ -149,7 +150,7 @@ class Attempt:
     tokens: int = 0  # a success: prompt + completion tokens from the response's usage
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class Outcome:
     """What one failed attempt means for its row. Pure data: `classify` decides it,
     `call_endpoint` acts on it."""
@@ -293,7 +294,12 @@ def usage_tokens(body: dict) -> tuple[int, int]:
 
 
 def _count(value) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+    """A token count as a non-negative int; a float (3.0) counts, anything else is 0."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return 0
+    if isinstance(value, float) and not math.isfinite(value):
+        return 0
+    return max(0, int(value))
 
 
 def _server_answered(r: httpx.Response) -> bool:

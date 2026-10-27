@@ -19,8 +19,9 @@ import time
 from collections.abc import Callable, Iterable
 
 from saturate.controller import Auto, Fixed, Obs
-from saturate.core import AdaptiveClient, AdaptiveLimiter, Done, through
+from saturate.core import AdaptiveClient, AdaptiveLimiter, Done
 from saturate.engine import Engine, wait_for_health
+from saturate.pipeline import through
 from saturate.signals import CEILING_FLAG
 from saturate.sink import FileSink, ParquetSink, as_sink, drain, read_output
 from saturate.source import content_id, prepare_ahead, shard_select, skip_done, stream
@@ -209,10 +210,10 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
                               read_timeout=read_timeout,
                               signal_source=signal_source, on_tick=on_tick,
                               retry_budget_s=retry_budget_s, timeouts=timeouts) as client:
-        results = through(client, pending, to_request, parse, route=route,
-                          prepare_workers=prepare_workers,
-                          fail_fast=0 if retry_errors else fail_fast)
-        await drain(results, sink, shard=shard, stats=stats)
+        async with through(client, pending, to_request, parse, route=route,
+                           prepare_workers=prepare_workers,
+                           fail_fast=0 if retry_errors else fail_fast) as results:
+            await drain(results, sink, shard=shard, stats=stats)
         limiter = client.limiter
         dialect = client.dialect
         stats.breaker_opens = client.breaker.opens

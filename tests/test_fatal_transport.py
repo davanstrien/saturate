@@ -8,7 +8,7 @@ import pytest
 from stub_server import StubLimiter
 
 from saturate import FatalTransportError, ParquetSink
-from saturate.core import through
+from saturate.pipeline import through
 from saturate.sink import drain
 from saturate.transport import Breaker
 
@@ -25,15 +25,15 @@ def test_fatal_aborts_run_without_error_rows(tmp_path):
     class _FatalClient:
         limiter = StubLimiter()
 
-        async def post(self, request, route="/chat/completions"):
+        async def post(self, request, route="/chat/completions", on_admit=None):
             raise FatalTransportError("circuit breaker gave up")
 
     sink = ParquetSink(str(tmp_path), flush_every=5)
 
     async def go():
-        results = through(_FatalClient(), iter([(str(i), {"n": i}) for i in range(20)]),
-                          lambda r: {"p": r["n"]}, lambda r, b: b)
-        await drain(results, sink)
+        async with through(_FatalClient(), iter([(str(i), {"n": i}) for i in range(20)]),
+                           lambda r: {"p": r["n"]}, lambda r, b: b) as results:
+            await drain(results, sink)
 
     with pytest.raises(FatalTransportError):
         asyncio.run(go())
@@ -45,14 +45,14 @@ def test_nondict_parse_is_error_row(tmp_path):
     class _OkClient:
         limiter = StubLimiter()
 
-        async def post(self, request, route="/chat/completions"):
+        async def post(self, request, route="/chat/completions", on_admit=None):
             return {"usage": {}}, None
 
     sink = ParquetSink(str(tmp_path), flush_every=1)
 
     async def go():
-        results = through(_OkClient(), iter([("a", {})]), lambda r: {}, lambda r, b: None)
-        return await drain(results, sink)
+        async with through(_OkClient(), iter([("a", {})]), lambda r: {}, lambda r, b: None) as results:
+            return await drain(results, sink)
 
     stats = asyncio.run(go())
     assert stats.rows_failed == 1

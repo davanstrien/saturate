@@ -7,21 +7,18 @@ InferenceRunner, a DataDesigner-style admission seam). It never touches HTTP.
 AdaptiveClient — AdaptiveLimiter + the HTTP transport (retry ladder, breaker):
 `await client.post(request)` with everything handled.
 
-through() — the pipeline's product: an async generator of completed Done
-results, in completion order, adaptively concurrent.
+through() — the pipeline itself — lives in saturate/pipeline.py (docs/pipeline.md).
 """
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
-import inspect
 import statistics
 import sys
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
 
 import anyio
 import httpx2 as httpx
@@ -130,7 +127,7 @@ class AdaptiveLimiter:
         self.retries_total = 0  # retry attempts over the run (backpressure counts rows, not attempts)
         self.ticks: list[dict] = []
         self.tokens_total = 0
-        self._wait = {"source": 0.0, "acquire": 0.0, "prep": 0.0}  # seconds since the last tick
+        self._wait = {"source": 0.0, "acquire": 0.0, "prep": 0.0, "sink": 0.0}  # seconds since the last tick
         self._prep_n = 0  # to_request calls measured since the last tick
         self.prep_workers = 0  # threads running to_request; 0 = on the event loop itself
         self._admitted: dict[_Slot, float] = {}  # admission time of every request in flight
@@ -173,6 +170,10 @@ class AdaptiveLimiter:
     def note_source_wait(self, seconds: float) -> None:
         """Time the source iterator took to yield a row."""
         self._wait["source"] += seconds
+
+    def note_sink_wait(self, seconds: float) -> None:
+        """Time a new row waited for room in the backlog: the output, not the engine, was behind."""
+        self._wait["sink"] += seconds
 
     def note_prep(self, seconds: float) -> None:
         """Wall time one `to_request` call took (where it ran: the loop, or a prepare thread)."""
@@ -274,7 +275,7 @@ class AdaptiveLimiter:
         self.ticks.append(rec)
         if self.on_tick:
             self.on_tick(rec)
-        self._wait["source"] = self._wait["acquire"] = self._wait["prep"] = 0.0
+        self._wait = dict.fromkeys(self._wait, 0.0)
         self._prep_n = 0
         self._capacity.total_tokens = int(new_limit)  # the setter takes an int, never a float
 
@@ -339,160 +340,3 @@ class AdaptiveClient:
                 on_admit()
             return await call_endpoint(self._client, self.base, req, self.breaker,
                                        self.limiter.observe, self.retry_budget_s)
-
-
-def adapt_parse(parse: Callable) -> Callable[[dict, dict], dict]:
-    """parse(row, resp) with row passthrough; a parse with one REQUIRED positional parameter
-    is parse(resp). Parameters with defaults do not count: `lambda body, model=M: ...` takes
-    the response, not the row."""
-    try:
-        sig = inspect.signature(parse)
-    except (TypeError, ValueError):  # a callable with no introspectable signature: the documented form
-        return parse
-    params = [p for p in sig.parameters.values()
-              if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) and p.default is p.empty]
-    return parse if len(params) >= 2 else (lambda row, resp: parse(resp))
-
-
-async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]],
-                  to_request: Callable, parse: Callable,
-                  route: str = "/chat/completions", prepare_workers: int = 0,
-                  fail_fast: int = 32) -> AsyncIterator[Done]:
-    """(id, row) stream -> Done stream, in completion order, adaptively concurrent.
-
-    Row PAYLOADS never materialize beyond two bounds: request bodies in flight are
-    capped by the window, and built-but-unadmitted bodies by the prepare bound,
-    `max(2 * prepare_workers, 4)`, held from before `to_request` until the window
-    admits the request — the same rule on the loop and in threads. The feeder itself
-    runs ahead of completions by at most ~2x the window (rows, not bodies). Honest
-    bound: the id SETS are in-memory — resume holds the done-set and dedup holds
-    admitted ids (~60B/id: fine to ~10M rows, plan shard-scoped done-sets beyond
-    that). Source wait and `to_request` time are reported to the limiter so the
-    per-tick `bound_by` verdict can name the client side when it is the bottleneck.
-
-    `prepare_workers` > 0 runs `to_request` in that many threads ahead of
-    admission; `parse` stays on the loop. A `to_request` error is that row's
-    error row either way. A `to_request` still running in a prepare thread when
-    the pump aborts cannot be interrupted: the pool is shut down without waiting,
-    but the interpreter waits for those calls at exit — so `to_request` must bound
-    its own I/O with timeouts.
-
-    `fail_fast`: until the first row succeeds, error results are held back, not yielded. If
-    the first `fail_fast` rows all fail (a wrong model name, a bad token, a parse bug) the
-    run raises FatalTransportError with the first error, and none of those rows is stored,
-    so a plain re-run retries them. A stream that ends sooner yields its held errors. 0
-    disables the check. It cannot tell a config error from a dataset whose first
-    `fail_fast` rows are genuinely bad; the error message names the way out.
-    """
-    parse = adapt_parse(parse)
-    queue: asyncio.Queue = asyncio.Queue()
-    tasks: set[asyncio.Task] = set()  # strong refs: asyncio only weak-refs tasks
-    fed = 0
-    feed_error: list[BaseException] = []
-    feeding_done = asyncio.Event()
-    pool = ThreadPoolExecutor(prepare_workers, thread_name_prefix="saturate-prepare") \
-        if prepare_workers > 0 else None
-    prepared = asyncio.Semaphore(max(2 * prepare_workers, 4))  # built bodies awaiting a slot
-    loop = asyncio.get_running_loop()
-    limiter = client.limiter
-    # the bound is released at admission when the client's post offers the hook; a client
-    # that predates it (the embedder seam) releases just before posting — a weaker bound
-    admit_hook = "on_admit" in inspect.signature(client.post).parameters
-    note_prep = getattr(limiter, "note_prep", None)  # an embedder's own limiter may predate it
-    if hasattr(limiter, "prep_workers"):
-        limiter.prep_workers = prepare_workers
-
-    def prepare(row: dict) -> tuple[Request | dict, float]:
-        t = time.monotonic()  # wall time where it runs: on the loop, or in a prepare worker
-        return to_request(row), time.monotonic() - t
-
-    async def worker(id_: str, row: dict):
-        holding = False  # the prepare bound, from the start of prepare until admission
-
-        def admitted() -> None:
-            nonlocal holding
-            if holding:
-                prepared.release()
-                holding = False
-
-        try:
-            await prepared.acquire()
-            holding = True
-            req, took = await loop.run_in_executor(pool, prepare, row) if pool else prepare(row)
-            if note_prep is not None:
-                note_prep(took)
-            if admit_hook:
-                body, err = await client.post(req, route, on_admit=admitted)
-            else:
-                admitted()
-                body, err = await client.post(req, route)
-            if err is None:
-                out = parse(row, body)
-                if not isinstance(out, dict):  # storage contract: rows are dicts
-                    raise TypeError(f"parse must return a dict, got {type(out).__name__}")
-                await queue.put(Done(id_, row, out, None, body.get("usage") or {}))
-            else:
-                await queue.put(Done(id_, row, None, err))
-        except FatalTransportError as e:  # run-fatal: surfaced to the consumer, never a row error
-            await queue.put(e)
-        except Exception as e:  # to_request/parse bugs become error results, not lost rows
-            await queue.put(Done(id_, row, None, f"client: {type(e).__name__}: {e}"))
-        finally:
-            admitted()  # never strand the bound: a failed or fatal row releases it too
-
-    async def feed():
-        nonlocal fed
-        t_prev = time.monotonic()
-        try:
-            for id_, row in rows:
-                limiter.note_source_wait(time.monotonic() - t_prev)
-                fed += 1
-                t = asyncio.create_task(worker(id_, row))
-                tasks.add(t)
-                t.add_done_callback(tasks.discard)
-                while len(tasks) > limiter.limit * 2 + 8:
-                    await asyncio.sleep(0.01)  # feed-ahead bound (window-scaled)
-                t_prev = time.monotonic()
-        except BaseException as e:  # a crashing source must still release the consumer
-            feed_error.append(e)
-        finally:
-            feeding_done.set()
-
-    feeder = asyncio.create_task(feed())
-    served = 0
-    ok_seen = fail_fast <= 0
-    held: list[Done] = []  # error results before the first success (fail_fast)
-    try:
-        while not (feeding_done.is_set() and served >= fed):
-            try:
-                item = await asyncio.wait_for(queue.get(), timeout=0.25)
-            except asyncio.TimeoutError:
-                continue
-            served += 1
-            if isinstance(item, BaseException):
-                raise item  # fatal transport: abort the pump, no durable error rows
-            if not ok_seen:
-                if item.error is not None:
-                    held.append(item)
-                    if len(held) >= fail_fast:
-                        raise FatalTransportError(
-                            f"the first {fail_fast} rows all failed, so the run stopped without "
-                            f"storing them. First error: {held[0].error}. Fix the cause and re-run "
-                            "(these rows will be retried), or pass fail_fast=0 to disable this check")
-                    continue
-                ok_seen = True
-                for h in held:
-                    yield h
-                held.clear()
-            yield item
-        for h in held:  # the stream ended before fail_fast rows: they are this run's results
-            yield h
-        if feed_error:
-            raise feed_error[0]
-    finally:
-        feeder.cancel()
-        for t in tasks:
-            t.cancel()
-        await asyncio.gather(feeder, *tasks, return_exceptions=True)  # reap, don't abandon
-        if pool:
-            pool.shutdown(wait=False, cancel_futures=True)  # a running to_request still finishes

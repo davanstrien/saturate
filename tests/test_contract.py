@@ -119,15 +119,12 @@ def scaled_retry_budget(monkeypatch):
 async def _gated(results, gate: asyncio.Event):
     """Pass results on, but after the first one wait for `gate`: a consumer that is busy while
     the pipeline keeps completing rows behind it."""
-    try:
-        first = True
-        async for done in results:
-            yield done
-            if first:
-                first = False
-                await gate.wait()
-    finally:
-        await results.aclose()
+    first = True
+    async for done in results:
+        yield done
+        if first:
+            first = False
+            await gate.wait()
 
 
 async def pipeline(endpoint, data, sink, *, window=None, to_request=None, parse=None, clients=None,
@@ -137,11 +134,9 @@ async def pipeline(endpoint, data, sink, *, window=None, to_request=None, parse=
     async with AdaptiveClient(endpoint, window=window or Fixed(4), signal_source="none") as client:
         if clients is not None:
             clients.append(client)
-        results = through(client, stream(data), to_request or default_to_request, parse or default_parse,
-                          **kw)
-        if gate is not None:
-            results = _gated(results, gate)
-        return await drain(results, sink)
+        async with through(client, stream(data), to_request or default_to_request,
+                           parse or default_parse, **kw) as results:
+            return await drain(_gated(results, gate) if gate is not None else results, sink)
 
 
 # --- helpers ---------------------------------------------------------------------------------
@@ -312,46 +307,39 @@ def test_fatal_cancels_in_flight_rows_instead_of_waiting_for_them(stub, tmp_path
     assert on_disk(tmp_path) == set()  # r0 was cancelled, never completed
 
 
-@known_gap("#35: results already queued behind a fatal error are discarded")
 def test_fatal_lands_every_row_that_completed_before_it(stub, tmp_path):
-    """r2's to_request raises the fatal once r1 has reached the server; r1 answers 1 s later,
-    so it completes behind the fatal. The consumer is busy until r1 is parsed. r1 was paid for,
-    so it must land."""
-    r1_arrived = threading.Event()
-
-    def latency(request):
-        if content(request) == "row 1":
-            r1_arrived.set()
-            return 1.0
-        return 0.0
-
-    stub.latency_for = latency
+    """r1 finishes (parsed, so published) before r2's to_request raises the fatal error, while
+    the consumer is still busy with r0. r1 was paid for and finished, so it must land; the error
+    is raised after it. (Rows still in flight at the fatal error are cancelled; see the cancels
+    test above. Before 0.3 a finished row queued behind the fatal error was lost: #35.)"""
+    r1_parsed = threading.Event()
 
     def to_request_fatal_on_r2(row):
         if row["text"] == "row 2":
-            r1_arrived.wait(10)
+            r1_parsed.wait(10)  # in the prepare thread: wait until r1 has finished
             raise FatalTransportError("breaker gave up")
         return default_to_request(row)
 
     parsed: list[str] = []
 
     async def go():
-        r1_parsed = asyncio.Event()
+        consumer_may_go_on = asyncio.Event()
 
         def recording_parse(row, resp):
             parsed.append(f"r{row['text'].split()[-1]}")
             if row["text"] == "row 1":
                 r1_parsed.set()
+                consumer_may_go_on.set()
             return default_parse(row, resp)
 
         await pipeline(stub.endpoint, rows(3), ParquetSink(str(tmp_path), flush_every=1000),
                        to_request=to_request_fatal_on_r2, parse=recording_parse, prepare_workers=1,
-                       gate=r1_parsed)
+                       gate=consumer_may_go_on)
 
     with pytest.raises(FatalTransportError):
         run_checked(go)
-    assert "r1" in parsed  # the scenario happened: r1 completed
-    gap(set(parsed) <= on_disk(tmp_path), f"parsed {sorted(parsed)}, on disk {sorted(on_disk(tmp_path))}")
+    assert "r1" in parsed  # the scenario happened: r1 finished before the fatal error
+    assert set(parsed) <= on_disk(tmp_path), f"parsed {sorted(parsed)}, on disk {sorted(on_disk(tmp_path))}"
 
 
 def test_fail_fast_stores_nothing_when_every_early_row_fails(stub, tmp_path):

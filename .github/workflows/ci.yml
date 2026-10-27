@@ -43,8 +43,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.13
       - run: uv sync --locked
       - run: uv run ty check saturate
+      - name: excluded files, for the record (informational; drift from the baseline shows here)
+        run: uv run ty check saturate/core.py --output-format concise | tail -n 1 || true
   lowest:
     # the declared dependency floors: an unlocked sync only ever tests the newest releases
     runs-on: ubuntu-latest

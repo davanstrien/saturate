@@ -7,13 +7,15 @@ plumbing. Prints one JSON line on stdout.
     python bench/workload.py --endpoint http://127.0.0.1:8000/v1 --rows 5000 --window 256
 
 What it reports:
-- rows_per_s, wall_s: throughput as the caller sees it.
+- rows_per_s, wall_s: successful rows per second as the caller sees it (rows_failed is reported;
+  a run with failures is not comparable).
 - cpu_ms_per_row: client CPU time (all threads) per row. At zero endpoint latency this is the
   library's own overhead, independent of how fast the server answers.
-- loop_lag_p99_s, loop_lag_max_s: from the per-tick `loop_lag_s` telemetry (CONTRACT §6), the
+- loop_lag_max_s, loop_lag_mean_s: from the per-tick `loop_lag_s` telemetry (CONTRACT §6), the
   time the event loop was blocked beyond the tick. A flush or a parse on the loop shows here.
+  Ticks are 2 s, so a run has few; loop_lag_p99_s is reported only from 20 ticks on.
 - first_durable_s: seconds from start until the first part file exists in the output.
-- peak_rss_mb: the process's peak resident memory.
+- peak_rss_mib: the process's peak resident memory.
 """
 
 from __future__ import annotations
@@ -86,10 +88,12 @@ def make_parse(parse_ms: float):
 
 
 class FirstPartWatcher:
-    """Polls the output for its first part file, to time how long results take to be durable."""
+    """Polls the output for its first part file, to time how long results take to be durable.
+    Every 10 ms on a local or in-memory store; every 0.5 s on a remote one, where each poll is a
+    listing request (rate limits, and load on the store being measured)."""
 
-    def __init__(self, fs, root: str, t0: float):
-        self.fs, self.root, self.t0 = fs, root, t0
+    def __init__(self, fs, root: str, t0: float, interval_s: float):
+        self.fs, self.root, self.t0, self.interval_s = fs, root, t0, interval_s
         self.first_s: float | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -102,7 +106,7 @@ class FirstPartWatcher:
                     return
             except Exception:
                 pass
-            time.sleep(0.01)
+            time.sleep(self.interval_s)
 
     def start(self) -> FirstPartWatcher:
         self._thread.start()
@@ -129,9 +133,9 @@ def percentile(values: list[float], q: float) -> float | None:
     return statistics.quantiles(values, n=100, method="inclusive")[int(q) - 1]
 
 
-def peak_rss_mb() -> float:
+def peak_rss_mib() -> float:
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return rss / 1e6 if sys.platform == "darwin" else rss / 1e3  # bytes on macOS, KiB on Linux
+    return rss / 2**20 if sys.platform == "darwin" else rss / 2**10  # bytes on macOS, KiB on Linux
 
 
 def main() -> None:
@@ -150,7 +154,8 @@ def main() -> None:
     ap.add_argument("--output", choices=["local", "slowmem"], default="local")
     ap.add_argument("--output-uri", default=None,
                     help="any fsspec URI (e.g. hf://buckets/...); a fresh subdirectory per run")
-    ap.add_argument("--write-delay-ms", type=float, default=0.0, help="slowmem: seconds each write takes")
+    ap.add_argument("--write-delay-ms", type=float, default=0.0,
+                    help="slowmem: milliseconds each write takes")
     ap.add_argument("--flush-every", type=int, default=None)
     args = ap.parse_args()
 
@@ -171,7 +176,8 @@ def main() -> None:
 
     t0 = time.perf_counter()
     cpu0 = time.process_time()
-    watcher = FirstPartWatcher(fs, root, t0).start()
+    local = args.output_uri is None
+    watcher = FirstPartWatcher(fs, root, t0, interval_s=0.01 if local else 0.5).start()
     stats = pump(rows, make_to_request(args.prep_ms, args.prep_kind, args.model, args.max_tokens),
                  make_parse(args.parse_ms),
                  endpoint=args.endpoint, output=out_uri, window=window, flush_every=args.flush_every,
@@ -189,15 +195,16 @@ def main() -> None:
         "rows_ok": stats.rows_processed,
         "rows_failed": stats.rows_failed,
         "wall_s": round(wall, 3),
-        "rows_per_s": round(args.rows / wall, 1),
+        "rows_per_s": round(stats.rows_processed / wall, 1),
         "cpu_ms_per_row": round(cpu * 1000 / args.rows, 4),
-        "loop_lag_p99_s": percentile(lags, 99),
         "loop_lag_max_s": max(lags) if lags else None,
+        "loop_lag_mean_s": round(statistics.fmean(lags), 4) if lags else None,
+        "loop_lag_p99_s": percentile(lags, 99) if len(lags) >= 20 else None,
         "ticks": len(lags),
         "first_durable_s": round(watcher.first_s, 3) if watcher.first_s is not None else None,
         "final_limit": stats.final_limit,
         "tokens_per_s": stats.tokens_per_sec,
-        "peak_rss_mb": round(peak_rss_mb(), 1),
+        "peak_rss_mib": round(peak_rss_mib(), 1),
     }))
 
 

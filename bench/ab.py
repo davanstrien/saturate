@@ -61,8 +61,8 @@ SUITES = {
 }
 
 # metric -> True when higher is better (only used to label the report)
-METRICS = {"rows_per_s": True, "tokens_per_s": True, "cpu_ms_per_row": False, "loop_lag_p99_s": False,
-           "first_durable_s": False, "peak_rss_mb": False}
+METRICS = {"rows_per_s": True, "tokens_per_s": True, "cpu_ms_per_row": False, "loop_lag_max_s": False,
+           "loop_lag_mean_s": False, "first_durable_s": False, "peak_rss_mib": False}
 
 
 def sh(*cmd: str, **kw) -> str:
@@ -81,7 +81,8 @@ def build_arm(name: str, ref: str, workdir: pathlib.Path, python: str) -> dict:
     venv = workdir / f"venv-{name}"
     sh("uv", "venv", "-q", "--python", python, str(venv))
     py = str(venv / "bin" / "python")
-    sh("uv", "pip", "install", "-q", "--python", py, str(src))
+    # [hf] so an hf:// output works; compiled bytecode so no run pays the .pyc compile
+    sh("uv", "pip", "install", "-q", "--compile-bytecode", "--python", py, f"{src}[hf]")
     return {"name": name, "ref": ref, "sha": sha, "python": py, "src": str(src)}
 
 
@@ -96,15 +97,25 @@ def start_server(python: str, latency_ms: float) -> tuple[subprocess.Popen, str]
 
 
 def run_workload(arm: dict, endpoint: str, args: list[str], cwd: str) -> dict:
+    # TMPDIR=cwd: a local output lands in the A/B's own work dir, removed with it
     out = subprocess.run([arm["python"], str(BENCH / "workload.py"), "--endpoint", endpoint, *args],
-                         capture_output=True, text=True, cwd=cwd, timeout=900)
+                         capture_output=True, text=True, cwd=cwd, timeout=900,
+                         env={**os.environ, "TMPDIR": cwd})
     if out.returncode != 0:
         raise RuntimeError(f"{arm['name']} workload failed:\n{out.stderr[-2000:]}")
     return json.loads(out.stdout.strip().splitlines()[-1])
 
 
+def paired_ratios(base: list[dict], head: list[dict], metric: str) -> list[float]:
+    """head/base for each rep: the two arms of a rep ran back to back, so machine drift between
+    reps cancels within each ratio."""
+    return [h[metric] / b[metric] for b, h in zip(base, head, strict=True)
+            if b.get(metric) and h.get(metric) is not None]
+
+
 def bootstrap_ratio(base: list[float], head: list[float], n: int = 2000, seed: int = 0):
-    """95% interval of median(head) / median(base), resampling each arm's runs."""
+    """95% interval of median(head) / median(base), resampling each arm's runs. Secondary: with a
+    handful of reps it takes few distinct values and under-covers."""
     rng = random.Random(seed)
     ratios = []
     for _ in range(n):
@@ -117,25 +128,26 @@ def bootstrap_ratio(base: list[float], head: list[float], n: int = 2000, seed: i
 
 
 def summarise(results: dict) -> tuple[list[str], dict]:
-    lines = ["| scenario | metric | base median | head median | head/base | 95% interval |",
-             "|---|---|---|---|---|---|"]
+    """Per scenario and metric: each arm's median, the median of the per-rep paired ratios with
+    their range (the headline), and the bootstrap interval of the ratio of medians (secondary)."""
+    lines = ["| scenario | metric | base median | head median | paired head/base (min–max) "
+             "| bootstrap 95% |", "|---|---|---|---|---|---|"]
     summary: dict = {}
     for scenario, arms in results.items():
         for metric in METRICS:
             base = [r[metric] for r in arms["base"] if r.get(metric) is not None]
             head = [r[metric] for r in arms["head"] if r.get(metric) is not None]
-            if not base or not head:
+            pairs = paired_ratios(arms["base"], arms["head"], metric)
+            if not base or not head or not pairs:
                 continue
             mb, mh = statistics.median(base), statistics.median(head)
-            ratio = mh / mb if mb else None
-            lo, hi = bootstrap_ratio(base, head) if mb else (None, None)
+            lo, hi = bootstrap_ratio(base, head)
             summary.setdefault(scenario, {})[metric] = {
-                "base_median": mb, "head_median": mh, "ratio": ratio, "interval": [lo, hi]}
-            fmt = (lambda v: f"{v:.3g}")  # noqa: E731
-            interval = f"{lo:.3f}–{hi:.3f}" if lo is not None else "n/a"
-            lines.append(f"| {scenario} | {metric} | {fmt(mb)} | {fmt(mh)} | "
-                         f"{ratio:.3f} | {interval} |" if ratio is not None else
-                         f"| {scenario} | {metric} | {fmt(mb)} | {fmt(mh)} | n/a | n/a |")
+                "base_median": mb, "head_median": mh, "paired_median": statistics.median(pairs),
+                "paired_min": min(pairs), "paired_max": max(pairs), "bootstrap_95": [lo, hi]}
+            lines.append(f"| {scenario} | {metric} | {mb:.3g} | {mh:.3g} | "
+                         f"{statistics.median(pairs):.3f} ({min(pairs):.3f}–{max(pairs):.3f}) | "
+                         f"{lo:.3f}–{hi:.3f} |")
     return lines, summary
 
 
@@ -148,6 +160,9 @@ def main() -> None:
     ap.add_argument("--python", default="3.13")
     ap.add_argument("--out", default=None, help="JSON results path (default: bench/results/...)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--warmup", type=int, default=1,
+                    help="discarded runs per scenario and arm before the measured reps (first-request "
+                         "costs: imports, an engine's CUDA-graph capture)")
     ap.add_argument("--endpoint", default=None,
                     help="a running engine to measure against instead of the stub servers")
     ap.add_argument("--model", default=None, help="model name for --endpoint")
@@ -176,6 +191,12 @@ def main() -> None:
         if args.model:
             extra += ["--model", args.model, "--prompt", "Write one sentence about the number {i}."]
         results: dict = {name: {"base": [], "head": []} for name in suite}
+        for _ in range(args.warmup):
+            for latency, wl_args in suite.values():
+                for arm in arms:
+                    endpoint = args.endpoint or servers[latency][1]
+                    run_workload(arm, endpoint, wl_args + extra, cwd=str(workdir))
+            print(f"warmup done ({args.warmup} per scenario and arm)", file=sys.stderr)
         for rep in range(args.reps):
             for name, (latency, wl_args) in suite.items():
                 order = arms[:]
@@ -194,8 +215,9 @@ def main() -> None:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps({
             "base": {k: arms[0][k] for k in ("ref", "sha")}, "head": {k: arms[1][k] for k in ("ref", "sha")},
-            "suite": args.suite, "reps": args.reps, "python": args.python, "platform": sys.platform,
-            "machine": os.uname().machine, "summary": summary, "runs": results}, indent=1))
+            "suite": args.suite, "reps": args.reps, "warmup": args.warmup, "python": args.python,
+            "platform": sys.platform, "machine": os.uname().machine, "summary": summary,
+            "runs": results}, indent=1))
         print(f"\nwrote {out}", file=sys.stderr)
     finally:
         for proc, _ in servers.values():

@@ -26,19 +26,24 @@ uncommitted changes included.
 
 ## Metrics
 
-- `rows_per_s` — throughput as the caller sees it.
+- `rows_per_s` — successful rows per second as the caller sees it (`rows_failed` is reported too;
+  a run with failures is not comparable). `tokens_per_s` from Stats.
 - `cpu_ms_per_row` — client CPU (all threads) per row. At zero endpoint latency this is the
   library's own cost, whatever the server's speed.
-- `loop_lag_p99_s` — from the per-tick `loop_lag_s` telemetry: how long the event loop was blocked
-  beyond a tick. A flush or a parse on the loop shows here. Ticks are 2 s, so short runs have few.
+- `loop_lag_max_s`, `loop_lag_mean_s` — from the per-tick `loop_lag_s` telemetry: how long the
+  event loop was blocked beyond a tick. A flush or a parse on the loop shows here. Ticks are 2 s,
+  so a run has few (2–7 in the quick suite); `loop_lag_p99_s` is reported only from 20 ticks on.
 - `first_durable_s` — time until the first part file exists in the output.
-- `peak_rss_mb` — the client process's peak resident memory.
+- `peak_rss_mib` — the client process's peak resident memory.
 
 ## Reading a result
 
-A ratio is head/base of the per-arm medians. An interval that contains 1.0 is no measurable
-change. Run an A/A on the same machine first: its interval width is the smallest change that
-machine can detect. One Job run reliably detects a ~10% change, not a 5% one.
+Every rep runs both arms back to back, in a random order, after one discarded warmup run per
+scenario and arm. The headline is the median of the per-rep **paired** ratios (head/base within a
+rep, so drift between reps cancels), with their min–max range. The bootstrap interval of the ratio
+of medians is a secondary number: with a handful of reps it takes few distinct values and
+under-covers. Run an A/A on the same machine first: the spread of its paired ratios is the
+smallest change that machine can detect.
 
 The local stub answers from one asyncio thread, so at zero latency it can be the bottleneck for
 `rows_per_s`; `cpu_ms_per_row` is the overhead number that does not depend on it.
@@ -47,19 +52,25 @@ These are informational, not a CI gate: shared CI runners vary by 20–30%.
 
 ## Noise floor
 
-`results/aa-noise-floor-20261027.json`: main against main, `quick` suite, 5 reps, on an Apple
-Silicon laptop (`arm64`). The 95% intervals of the head/base ratio:
+`results/aa-noise-floor-20261027.json`: main against main, `quick` suite, 5 reps, M1 Pro. It was
+taken before the paired ratios, the warmup and the metric renames (its `loop_lag_p99_s` is in
+effect the max, its `peak_rss_mb` is MiB on macOS), so it is the first-cut floor; the per-run JSON
+lets the paired ratios be recomputed. The 95% bootstrap intervals of the head/base ratio:
 
 | metric | interval width across scenarios | read |
 |---|---|---|
 | `rows_per_s` | about ±5–15% | a ~10% change is detectable |
 | `cpu_ms_per_row` | about ±5–13% | a ~10% change is detectable |
-| `peak_rss_mb` | under ±1% (±9% on overhead-w64) | small changes are detectable |
+| `peak_rss_mb` (MiB) | under ±1% (±9% on overhead-w64) | small changes are detectable |
 | `first_durable_s` | ±5% to ±70% | only large changes |
-| `loop_lag_p99_s` | up to −80% / +50% | too noisy at 5 reps for a verdict; use it to spot large blocks |
+| `loop_lag_p99_s` (≈ max) | up to −80% / +50% | too noisy for a verdict; use it to spot large blocks |
 
 Two baseline facts from the same run, worth knowing before the rewrite:
-- `overhead-w512`: the event loop is blocked ~0.45 s per tick (p99) at a 512 window with zero
+- `overhead-w512`: the event loop is blocked up to ~0.45 s per tick at a 512 window with zero
   latency; at window 64 it is ~0.02 s.
 - `default-flush-w64` against `overhead-w64`: the default local flush (10 rows) costs ~40% of
   zero-latency throughput (546 vs 928 rows/s) and ~50% more CPU per row.
+
+A real-engine floor (vLLM, Qwen2.5-0.5B, a10g-large, both arms main) is being taken with
+`jobs_ab.sh`; it goes in `results/` when it lands. Until then there is no measured detection limit
+for a Job run.

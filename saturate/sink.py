@@ -20,13 +20,11 @@ import os
 import sys
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-
-from saturate.transport import usage_tokens
 
 
 def _log(msg: str) -> None:
@@ -616,81 +614,13 @@ def as_sink(output, flush_every: int | None = None, schema: pa.Schema | None = N
     return output
 
 
-async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
-                stats=None):
-    """Terminal stage: persist a Done stream; returns Stats with counts filled in.
-    Completion markers are pump()'s job (written last, after stats/telemetry) —
-    drain alone writes no marker.
+def __getattr__(name: str):
+    """drain() moved to saturate.writer with the writer thread; it stays importable from here."""
+    if name == "drain":
+        from saturate.writer import drain
 
-    However the run ends, the rows already paid for are flushed and the results stream is
-    closed (a sink error must stop the pipeline feeding it, or its requests keep running with
-    no consumer). When the run failed, the error that ended it is the one raised: a flush that
-    fails as well is logged, not raised over it."""
-    from saturate import Stats  # local import: avoid cycle
-
-    stats = stats if stats is not None else Stats()
-    # r7: validation is the SINK'S contract — only a sink that supplies probe() gets it.
-    # A generic duck-typed sink (FileSink str()s its values) must not inherit Arrow's rules.
-    probe = getattr(sink, "probe", None)
-    demoted0 = getattr(sink, "rows_demoted", 0)  # rows flush demotes were counted as processed here
-    async with _closing(results):
-        try:
-            async for done in results:
-                sink.append(_record(done, probe, stats))
-        except BaseException:
-            _flush_after_failure(sink)
-            raise
-        else:
-            sink.flush()
-        finally:
-            _count_demoted(sink, demoted0, stats)
-    return stats
-
-
-def _record(done, probe, stats) -> dict:
-    """The record one Done result leaves in the sink, with its counts added to `stats`."""
-    if done.error is not None:
-        stats.rows_failed += 1
-        return {"id": done.id, "error": done.error}
-    # id/error are reserved columns and ALWAYS win over parse output —
-    # a parse returning e.g. the OpenAI response id must not break resume
-    rec = {**done.out, "id": done.id, "error": None}
-    if probe is not None:
-        try:  # r5/r6 #6: validate against the sink's ACTUAL schema before buffering —
-            probe(rec)  # a bad value must become an error row, not a flush crash
-        except UNSTORABLE as e:
-            rec = _error_row(done.id, e)
-    # tokens were spent even when the sink rejects the output
-    prompt, completion = usage_tokens({"usage": done.usage})
-    stats.prompt_tokens += prompt
-    stats.completion_tokens += completion
-    if rec["error"] is None:
-        stats.rows_processed += 1
-    else:
-        stats.rows_failed += 1
-    return rec
-
-
-def _closing(results):
-    """Close the results stream on the way out, if it can be closed."""
-    return contextlib.aclosing(results) if hasattr(results, "aclose") else contextlib.nullcontext()
-
-
-def _flush_after_failure(sink) -> None:
-    """Land the rows already paid for after the run failed. A sink that failed once often fails
-    its flush too; the error that ended the run is the one to report."""
-    try:
-        sink.flush()
-    except Exception as e:
-        _log(f"flush after a failed run also failed (the first error is raised): {e!r}")
-
-
-def _count_demoted(sink, demoted0: int, stats) -> None:
-    """Rows a flush demoted landed as error rows, not successes. Capped at what this drain
-    counted: rows buffered before it started were never in these stats."""
-    demoted = min(getattr(sink, "rows_demoted", 0) - demoted0, stats.rows_processed)
-    stats.rows_processed -= demoted
-    stats.rows_failed += demoted
+        return drain
+    raise AttributeError(f"module 'saturate.sink' has no attribute {name!r}")
 
 
 def read_output(out_uri: str) -> Iterator[tuple[str, dict]]:

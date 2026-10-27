@@ -23,7 +23,7 @@ from saturate.core import AdaptiveClient, AdaptiveLimiter, Done
 from saturate.engine import Engine, wait_for_health
 from saturate.pipeline import through
 from saturate.signals import CEILING_FLAG
-from saturate.sink import FileSink, ParquetSink, as_sink, drain, read_output
+from saturate.sink import FileSink, ParquetSink, as_sink, read_output
 from saturate.source import content_id, prepare_ahead, shard_select, skip_done, stream
 from saturate.sources import bucket_rows, dataset_rows
 from saturate.telemetry import advise, advise_input, bound_by_counts, cut_reasons
@@ -34,12 +34,14 @@ from saturate.transport import (
     make_json_request,
     make_multipart_request,
 )
+from saturate.writer import Sink, drain, sink_hooks
 
 __all__ = [
     "pump", "Stats", "Fixed", "Auto", "Obs", "Attempt", "Engine", "wait_for_health",
     "Request", "make_json_request", "make_multipart_request", "existing_ids",
     "AdaptiveClient", "AdaptiveLimiter", "Done", "through", "stream", "skip_done",
-    "drain", "read_output", "ParquetSink", "FileSink", "shard_select", "content_id", "prepare_ahead",
+    "drain", "read_output", "Sink", "sink_hooks", "ParquetSink", "FileSink", "shard_select",
+    "content_id", "prepare_ahead",
     "FatalTransportError", "dataset_rows", "bucket_rows"]
 try:
     __version__ = importlib.metadata.version("saturate")
@@ -183,13 +185,14 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
     pending = stream(rows, id_key=id_key, id_fn=id_fn)
     pending = skip_done(pending, sink, retry_errors=retry_errors, stats=stats)
 
-    if hasattr(sink, "begin_run"):
-        sink.begin_run(shard)  # this run's telemetry gets its own file, whatever the last run did
+    hooks = sink_hooks(sink)
+    if hooks.begin_run is not None:
+        hooks.begin_run(shard)  # this run's telemetry gets its own file, whatever the last run did
     lines: list[str] = []  # one JSON line per tick, serialised once (a run is many ticks)
-    every = max(1, getattr(sink, "telemetry_every_ticks", 30))
+    every = hooks.telemetry_every_ticks
     next_at = every
     writer: asyncio.Task | None = None
-    write_lines = getattr(sink, "write_telemetry", None)
+    write_lines = hooks.write_telemetry
 
     async def write_telemetry(write: Callable, snapshot: list[str]) -> None:
         try:  # a remote rewrite is a commit (seconds): never on the loop, never overlapping
@@ -236,13 +239,13 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
                            "retry_errors=True to retry them")
     for h in stats.hints:
         _log(f"advisor: {h}")
-    if hasattr(sink, "write_stats"):  # console-facing exact summary (CONTRACT §5)
+    if hooks.write_stats is not None:  # console-facing exact summary (CONTRACT §5)
         try:
-            sink.write_stats(shard, stats.to_json())
+            await asyncio.to_thread(hooks.write_stats, shard, stats.to_json())
         except Exception as e:
             _log(f"stats write failed (non-fatal): {e}")
-    if hasattr(sink, "write_marker"):  # last: the marker certifies stats/telemetry landed
-        sink.write_marker(shard)
+    if hooks.write_marker is not None:  # last: the marker certifies stats/telemetry landed
+        await asyncio.to_thread(hooks.write_marker, shard)
     if stats.rows_done_prior:
         _log(f"resume: skipped {stats.rows_done_prior} rows already in the output "
              f"({stats.rows_errored_prior} of them only as errors)")

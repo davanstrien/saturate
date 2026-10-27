@@ -182,10 +182,11 @@ class AdaptiveLimiter:
 
     def _bound_by(self, dt: float, loop_lag_s: float) -> tuple[str | None, bool]:
         """(verdict, input_bound) for this tick. `source` or `prep` when that stage ate at least
-        a quarter of the tick (prep per worker) and the window sat under half used — the only
-        two verdicts that are input-bound, i.e. evidence the controller must not read as the
-        engine's. `prep` also when on-loop `to_request` ate half the tick outright, and `loop`
-        when the loop was blocked that long by something else (parse, a sink flush): a blocked
+        a quarter of the tick (prep per worker) and the window sat under half used, and `sink`
+        when new rows waited that long for the output — the only verdicts that are input-bound,
+        i.e. evidence the controller must not read as the engine's. `prep` also when on-loop
+        `to_request` ate half the tick outright, and `loop` when the loop was blocked that long
+        by something else (parse): a blocked
         loop holds slots without serving them, so the window count says nothing — but the
         window IS full, so these are not input-bound. `engine` when the window was full or
         admission waits dominated; None when nothing is conclusive (idle).
@@ -197,8 +198,12 @@ class AdaptiveLimiter:
             return None, False
         w = self._wait
         prep = w["prep"] / max(1, self.prep_workers)  # per-worker occupancy of the prepare stage
-        if self.inflight < 0.5 * self.limit and max(w["source"], prep) >= 0.25 * dt:
-            return ("source" if w["source"] >= prep else "prep"), True
+        # the stages outside the engine that can starve admission: the input, building requests,
+        # and the output (new rows wait for room in the backlog when writing falls behind)
+        outside = {"source": w["source"], "prep": prep, "sink": w["sink"]}
+        stage = max(outside, key=outside.__getitem__)  # ties go to the first: source, prep, sink
+        if self.inflight < 0.5 * self.limit and outside[stage] >= 0.25 * dt:
+            return stage, True
         if self.prep_workers == 0 and w["prep"] >= 0.5 * dt:
             return "prep", False
         if loop_lag_s >= 0.5 * dt:
@@ -270,6 +275,7 @@ class AdaptiveLimiter:
                           counts.backpressure, counts.successes, input_bound, tok_s,
                           self.controller.last_reason, latency_s, bound_by=bound_by,
                           source_s=self._wait["source"], prep_s=self._wait["prep"],
+                          sink_s=self._wait["sink"],
                           prep_n=self._prep_n, prep_workers=self.prep_workers, loop_lag_s=loop_lag_s,
                           retries=counts.retries)
         self.ticks.append(rec)
@@ -292,8 +298,6 @@ class AdaptiveClient:
                  retry_budget_s: float | None = None,
                  timeouts: dict[str, float] | None = None):
         self.base = endpoint.rstrip("/")
-        self._headers = headers or {}
-        self._read_timeout = read_timeout
         # a row's attempts share one wall-clock budget; it must hold a retry of a long request,
         # so by default it grows with the read timeout (300 s floor: 3600 s at the default 1800)
         self.retry_budget_s = (retry_budget_s if retry_budget_s is not None
@@ -302,20 +306,17 @@ class AdaptiveClient:
         if unknown:
             raise ValueError(f"timeouts: unknown phase(s) {sorted(unknown)}; the read timeout is "
                              "read_timeout=, the others are 'connect', 'write' and 'pool'")
-        self._timeouts = {"connect": 30.0, "write": 30.0, "pool": 30.0, **(timeouts or {})}
-        self._signal_source = signal_source
+        phases = {"connect": 30.0, "write": 30.0, "pool": 30.0, **(timeouts or {})}
         self.breaker = Breaker()
-        self._window_arg = window
-        self._on_tick = on_tick
-        self.limiter: AdaptiveLimiter | None = None
-        self._client: httpx.AsyncClient | None = None
+        # built here, used once the client is entered (`async with`): the HTTP client opens no
+        # connection and the limiter starts no tick loop until then
+        self._client = httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=1024, max_keepalive_connections=1024),
+            timeout=httpx.Timeout(read=read_timeout, **phases), headers=headers or {})
+        signals = Null() if signal_source == "none" else HttpScrape(self._client, self.base)
+        self.limiter = AdaptiveLimiter(window, signals=signals, on_tick=on_tick)
 
     async def __aenter__(self):
-        limits = httpx.Limits(max_connections=1024, max_keepalive_connections=1024)
-        timeout = httpx.Timeout(read=self._read_timeout, **self._timeouts)
-        self._client = httpx.AsyncClient(limits=limits, timeout=timeout, headers=self._headers)
-        sig = Null() if self._signal_source == "none" else HttpScrape(self._client, self.base)
-        self.limiter = AdaptiveLimiter(self._window_arg, signals=sig, on_tick=self._on_tick)
         await self.limiter.__aenter__()
         return self
 

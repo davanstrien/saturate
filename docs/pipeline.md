@@ -23,7 +23,7 @@ the requests in flight, and every way a run can stop is handled so completed row
 
 | job | does | runs on |
 |---|---|---|
-| **reader** | pulls rows from your input in small batches | its own thread, so a slow input never blocks requests |
+| **reader** | reads rows from your input and hands each over as soon as it is read | its own thread, so a slow input never blocks requests |
 | **feeder** | starts a task for each row, when there is room | the event loop |
 | **row task** | builds the request, waits for a slot, sends it, parses the reply | the event loop (`to_request` can run in threads) |
 | **drain** | takes finished rows and counts them | the event loop |
@@ -31,7 +31,8 @@ the requests in flight, and every way a run can stop is handled so completed row
 
 ## A row's life
 
-1. The **reader** pulls the row from your input and passes it on.
+1. The **reader** reads the row from your input and hands it over straight away (it reads at most
+   64 rows ahead of the feeder).
 2. The **feeder** waits until there is room (see the limits below), then starts the row's task.
 3. The **row task** calls your `to_request` to build the request body.
 4. It waits for a free **slot** in the window, the number of requests allowed in flight at once,
@@ -126,18 +127,24 @@ them to the writer, wait for it to finish, then re-raise.
 unwrapped only when it holds a single error.
 
 **The writer thread.** One `ThreadPoolExecutor(1)`: every call that touches the output's state
-(`probe`, `append`, `flush`, and the final stats and marker) runs there, in order. It takes rows in
-batches (about 50 ms or 64 rows) and calls `flush()` when no row has arrived for the output's flush
-interval; with the age check inside `append`, that bounds how long any row waits. The thread is
+(`probe`, `append`, `flush`) runs there, in order. Each time, it takes every row already waiting
+(so batches form on their own under load, and a lone row is not held back) and calls `flush()` when
+no row has arrived for the output's flush interval; with the age check inside `append`, that bounds
+how long any row waits. The final stats and marker are written after the writer has finished, on a
+worker thread. The thread is
 never abandoned: abandoning a write could leave half a file, so shutdown waits for the call in
 progress, as the on-loop flush does today. Outputs must bound their own I/O (fsspec and
 HfFileSystem have transport timeouts). Telemetry rewrites stay separate, as the output contract
 already allows.
 
-**The reader thread.** Batches are bounded by time first (about 50 ms), so a slow input is not held
-for a full batch. If the input raises mid-batch, the rows before the error are still passed on. On
-cancellation the thread is abandoned, because a blocking `next()` cannot be interrupted; an input
-abandoned this way must not be reused (a resume uses a fresh input and the stored ids, as today).
+**The reader thread.** It hands each row to the event loop as soon as `next()` returns it
+(`loop.call_soon_threadsafe`, a few microseconds), and a semaphore keeps it at most 64 rows ahead
+of the feeder. An earlier design batched rows in the thread; a test with an input stuck in `next()`
+showed the rows read before the stall were trapped in the unfinished batch, so it hands over per
+row. If the input raises, the rows before the error are already handed over. The thread is a daemon
+thread: a blocking `next()` cannot be interrupted, so a stopped run leaves it behind and it never
+holds up exit; an input left behind like that must not be reused (a resume uses a fresh input and
+the stored ids, as today).
 
 **Output protocol.** A `typing.Protocol` with `existing_ids`, `append` and `flush`; the optional
 features (`probe`, `flush_interval_s`, `rows_demoted`, `begin_run`, `write_telemetry`,
@@ -152,5 +159,6 @@ that finished before the fatal error was never behind it. It now pins the policy
 marking a bug; the rows 0.2 lost at a fatal error were the ones still in flight, which the policy
 cancels.
 
-**Leak checks.** anyio's worker threads are not daemon threads, so the contract harness needs an
-explicit expectation for the abandoned-reader case.
+**Leak checks.** The reader is a daemon thread, so the contract harness's check for leftover
+non-daemon threads does not count a reader left behind on a stuck input; the test for that case
+releases the input before the check anyway.

@@ -10,6 +10,7 @@ reply; a finished row goes into `results`, which the caller reads.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import inspect
@@ -17,7 +18,7 @@ import math
 import sys
 import threading
 import time
-from collections.abc import AsyncGenerator, Callable, Iterable, Iterator
+from collections.abc import AsyncGenerator, Callable, Iterable
 
 import anyio
 from anyio.abc import TaskGroup
@@ -26,8 +27,7 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 from saturate.core import AdaptiveClient, AdaptiveLimiter, Done
 from saturate.transport import FatalTransportError
 
-READ_BATCH_ROWS = 64  # the reader hands over at most this many rows at a time...
-READ_BATCH_S = 0.05  # ...and never holds a batch longer than this
+READ_AHEAD = 64  # rows the reader may read before the feeder has taken them
 
 
 def adapt_parse(parse: Callable) -> Callable[[dict, dict], dict]:
@@ -87,7 +87,7 @@ class _Run:
     prepare: anyio.Semaphore  # request bodies built but not yet admitted
     backlog: anyio.Semaphore  # rows started but not yet taken from `results`
     prepare_threads: anyio.CapacityLimiter | None  # None: to_request runs on the event loop
-    reader_stop: threading.Event = dataclasses.field(default_factory=threading.Event)
+    reader: _Reader | None = None
     failure: BaseException | None = None  # the first failure: the error the run raises
     held: list[Done] = dataclasses.field(default_factory=list)  # fail_fast: errors before a success
     succeeded: bool = False
@@ -103,7 +103,8 @@ class _Run:
         self.stop()
 
     def stop(self) -> None:
-        self.reader_stop.set()
+        if self.reader is not None:
+            self.reader.stop()
         if self.scope is not None:
             self.scope.cancel()
 
@@ -217,40 +218,97 @@ async def _produce(run: _Run, rows: Iterable[tuple[str, dict]]) -> None:
 async def _feed(run: _Run, rows: Iterable[tuple[str, dict]], row_tasks: TaskGroup) -> None:
     """Start a row task per row, when there is room in the backlog and the prepare limit."""
     limiter = run.limiter
-    source = iter(rows)
-    while True:
-        batch, error = await anyio.to_thread.run_sync(_read_batch, source, run.reader_stop,
-                                                      abandon_on_cancel=True)
-        for (id_, row), waited in batch:
-            limiter.note_source_wait(waited)
-            t = time.monotonic()
-            await run.backlog.acquire()
-            limiter.note_sink_wait(time.monotonic() - t)
+    reader = run.reader = _Reader(rows)
+    reader.start()
+    try:
+        while True:
+            read = await reader.rows.receive()
+            if isinstance(read, _End):
+                if read.error is not None:  # the input raised: rows already started finish, then it fails
+                    run.failure = run.failure or read.error
+                return
+            id_, row = read.item
+            reader.taken()
+            limiter.note_source_wait(read.waited)
+            await _take(run.backlog, limiter.note_sink_wait)
             await run.prepare.acquire()
             row_tasks.start_soon(_row, run, id_, row)
-        if error is not None:  # the input raised: rows already started finish, then the run fails
-            if not isinstance(error, StopIteration):
-                run.failure = run.failure or error
-            return
+    finally:
+        reader.stop()
 
 
-def _read_batch(source: Iterator[tuple[str, dict]],
-                stop: threading.Event) -> tuple[list[tuple[tuple[str, dict], float]], BaseException | None]:
-    """In the reader thread: up to READ_BATCH_ROWS rows, or what READ_BATCH_S allows, each with
-    the time the input took to yield it. Ends with the input's StopIteration or error, if any,
-    after the rows read before it."""
-    batch: list[tuple[tuple[str, dict], float]] = []
-    started = time.monotonic()
-    while len(batch) < READ_BATCH_ROWS and not stop.is_set():
+async def _take(limit: anyio.Semaphore, note_wait: Callable[[float], None]) -> None:
+    """Take one from `limit`, noting how long that waited. Only a real wait is measured: an
+    await yields to the loop even when there is room, and that time is not the limit's."""
+    try:
+        limit.acquire_nowait()
+    except anyio.WouldBlock:
         t = time.monotonic()
+        await limit.acquire()
+        note_wait(time.monotonic() - t)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _Row:
+    """A row the reader handed over, and how long the input took to yield it."""
+
+    item: tuple[str, dict]
+    waited: float
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _End:
+    """The input is done; `error` when it raised instead of ending."""
+
+    error: BaseException | None = None
+
+
+class _Reader:
+    """Reads the input in its own thread and hands each row to the event loop as soon as it is
+    read, at most READ_AHEAD rows ahead of the feeder. A daemon thread: an input stuck in
+    `next()` cannot be interrupted, so a stopped run leaves it behind, and it never holds up
+    exit. An input left behind like that must not be reused."""
+
+    def __init__(self, rows: Iterable[tuple[str, dict]]):
+        self._source = iter(rows)
+        self._room = threading.Semaphore(READ_AHEAD)
+        self._stopped = threading.Event()
+        self._loop = asyncio.get_running_loop()
+        self._send, self.rows = anyio.create_memory_object_stream[_Row | _End](math.inf)
+        self._thread = threading.Thread(target=self._read, name="saturate-reader", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def taken(self) -> None:
+        """The feeder took a row: room to read one more."""
+        self._room.release()
+
+    def stop(self) -> None:
+        self._stopped.set()
+        self._room.release()  # wake the thread if it is waiting for room
+
+    def _read(self) -> None:  # in the reader thread
+        while True:
+            self._room.acquire()
+            if self._stopped.is_set():
+                return
+            t = time.monotonic()
+            try:
+                item = next(self._source)
+            except StopIteration:
+                self._hand_over(_End())
+                return
+            except BaseException as e:
+                self._hand_over(_End(e))
+                return
+            self._hand_over(_Row(item, time.monotonic() - t))
+
+    def _hand_over(self, message: _Row | _End) -> None:
         try:
-            item = next(source)
-        except BaseException as e:  # StopIteration included: the input is done
-            return batch, e
-        batch.append((item, time.monotonic() - t))
-        if time.monotonic() - started >= READ_BATCH_S:
-            break
-    return batch, (StopIteration() if stop.is_set() else None)
+            self._loop.call_soon_threadsafe(self._send.send_nowait, message)
+        except RuntimeError:  # the event loop is gone: the run ended without this row
+            pass
 
 
 async def _row(run: _Run, id_: str, row: dict) -> None:

@@ -57,6 +57,7 @@ class Done:
 class _Slot:
     def __init__(self, limiter: AdaptiveLimiter):
         self._l = limiter
+        self._entered = False  # a slot is entered once: the limiter keys its waiters by slot
 
     def _check(self):
         task = self._l._task  # r5: a dead controller fails admissions run-fatally, never row errors
@@ -64,22 +65,40 @@ class _Slot:
             raise FatalTransportError(f"controller loop died: {task.exception()!r}")
 
     async def __aenter__(self):
+        if self._entered:
+            raise RuntimeError("a limiter slot is entered once; take a new one with limiter.slot()")
         self._check()  # before queueing on the window...
+        self._entered = True
         t = time.monotonic()
+        capacity = self._l._capacity
         # the slot itself is the borrower, not the task: one task may hold several slots
-        await self._l._capacity.acquire_on_behalf_of(self)
+        try:
+            # A free token is taken without awaiting. anyio <= 4.15.1 releases the wrong borrower
+            # when a native asyncio cancellation lands right after an immediate acquisition
+            # (fixed upstream in anyio 9e6b71e, not yet released): never take that path.
+            capacity.acquire_on_behalf_of_nowait(self)
+        except anyio.WouldBlock:
+            try:
+                await capacity.acquire_on_behalf_of(self)
+            except BaseException:
+                self._entered = False
+                raise
         admitted = time.monotonic()
         self._l._wait["acquire"] += admitted - t
         try:
             self._check()  # ...and after (r6): the controller may have died while we were queued
         except BaseException:
-            self._l._capacity.release_on_behalf_of(self)
+            self._release()
             raise
         self._l._admitted[self] = admitted
 
     async def __aexit__(self, *exc):
         self._l._admitted.pop(self, None)  # never in the way of the release: a leaked count wedges admission
+        self._release()
+
+    def _release(self) -> None:
         self._l._capacity.release_on_behalf_of(self)  # synchronous: no cancellation can interrupt it
+        self._entered = False
 
 
 class AdaptiveLimiter:

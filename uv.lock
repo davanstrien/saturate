@@ -2250,7 +2250,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = ">=4.10" },
+    { name = "anyio", specifier = ">=4.15.1" },
     { name = "datasets", marker = "extra == 'hf'", specifier = ">=5.0" },
     { name = "fsspec", specifier = ">=2024.3" },
     { name = "httpx2", specifier = ">=2.9" },

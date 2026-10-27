@@ -21,7 +21,7 @@ def test_index_ids_stable_across_iterations():
     one = list(dataset_rows(ds(), split="train"))
     two = list(dataset_rows(ds(), split="train"))
     assert one == two
-    assert [i for i, _ in one] == [f"train-{n:09d}" for n in range(4)]
+    assert [i for i, _ in one] == [f"train:{n:09d}" for n in range(4)]
     assert one[0][1] == {"text": "alpha", "key": "a1", "extra": 1}
 
 
@@ -33,8 +33,8 @@ def test_streaming_object_matches_materialized():
 
 def test_limit_and_columns():
     rows = list(dataset_rows(ds(), columns=["text"], limit=2))
-    assert rows == [("train-000000000", {"text": "alpha"}),
-                    ("train-000000001", {"text": "beta"})]
+    assert rows == [("train:000000000", {"text": "alpha"}),
+                    ("train:000000001", {"text": "beta"})]
 
 
 def test_content_ids_dedup_identical_rows():
@@ -70,7 +70,7 @@ def test_revision_or_token_with_loaded_object_raises():
 def test_empty_columns_means_empty_rows_not_all():
     # columns=[] must not be treated as columns=None (codex MEDIUM)
     rows = list(dataset_rows(ds(), columns=[], limit=1))
-    assert rows == [("train-000000000", {})]
+    assert rows == [("train:000000000", {})]
 
 
 def test_id_strategy_producing_none_raises_loudly():
@@ -116,3 +116,45 @@ def test_rolling_map_keeps_none_items_and_what_follows():
     with ThreadPoolExecutor(2) as pool:
         # a None after the first window used to read as "exhausted": [1, 2, 3] and the rest lost
         assert list(rolling_map([1, 2, 3, None, 5], lambda x: x, pool, window=2)) == [1, 2, 3, None, 5]
+
+
+def test_index_ids_name_the_dataset_config_and_revision(monkeypatch):
+    """Index ids were `{split}-{i}`: a second config (or another dataset) written to the same
+    output was skipped as done (#34)."""
+    import datasets
+
+    monkeypatch.setattr(datasets, "load_dataset", lambda *a, **kw: ds())
+    en = [i for i, _ in dataset_rows("org/books", "en", limit=2)]
+    fr = [i for i, _ in dataset_rows("org/books", "fr", limit=2)]
+    other = [i for i, _ in dataset_rows("org/papers", "en", limit=2)]
+    pinned = [i for i, _ in dataset_rows("org/books", "en", revision="abc123", limit=2)]
+    assert en == ["org/books:en:train:000000000", "org/books:en:train:000000001"]
+    assert pinned[0] == "org/books@abc123:en:train:000000000"
+    assert len(set(en) | set(fr) | set(other) | set(pinned)) == 8
+
+
+def test_shard_keeps_only_its_rows_and_decodes_nothing_else(monkeypatch):
+    """Fan-out decoded every row on every shard, then threw (K-1)/K of them away (#34). With
+    shard=, a row of another shard is never decoded."""
+    import datasets
+
+    from saturate import shard_of
+
+    calls = []
+    real = datasets.Features.decode_example
+
+    def counting(self, example, *a, **kw):
+        calls.append(example.get("key"))
+        return real(self, example, *a, **kw)
+
+    monkeypatch.setattr(datasets.Features, "decode_example", counting)
+    big = Dataset.from_dict({"key": [f"k{i}" for i in range(40)]})
+    whole = [i for i, _ in dataset_rows(big.to_iterable_dataset())]
+    calls.clear()
+    slices = [list(dataset_rows(big.to_iterable_dataset(), shard=(r, 4))) for r in range(4)]
+    assert sorted(i for s in slices for i, _ in s) == sorted(whole)  # disjoint and complete
+    for rank, s in enumerate(slices):
+        assert all(shard_of(i, 4) == rank for i, _ in s)
+    assert len(calls) == 40  # each row decoded once, by its own shard
+    # a map-style Dataset shards the same way
+    assert [i for i, _ in dataset_rows(big, shard=(2, 4))] == [i for i, _ in slices[2]]

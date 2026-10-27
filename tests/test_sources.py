@@ -133,12 +133,9 @@ def test_index_ids_name_the_dataset_config_and_revision(monkeypatch):
     assert len(set(en) | set(fr) | set(other) | set(pinned)) == 8
 
 
-def test_shard_keeps_only_its_rows_and_decodes_nothing_else(monkeypatch):
-    """Fan-out decoded every row on every shard, then threw (K-1)/K of them away (#34). With
-    shard=, a row of another shard is never decoded."""
+def decode_counter(monkeypatch):
+    """Record the "key" of every example datasets decodes."""
     import datasets
-
-    from saturate import shard_of
 
     calls = []
     real = datasets.Features.decode_example
@@ -148,13 +145,98 @@ def test_shard_keeps_only_its_rows_and_decodes_nothing_else(monkeypatch):
         return real(self, example, *a, **kw)
 
     monkeypatch.setattr(datasets.Features, "decode_example", counting)
+    return calls
+
+
+def test_shard_keeps_only_its_rows_and_decodes_nothing_else(monkeypatch):
+    """Fan-out decoded every row on every shard, then threw (K-1)/K of them away (#34). With
+    shard=, a row of another shard is never decoded: for a map-style Dataset, and for a
+    streaming dataset loaded from a repo id."""
+    import datasets
+
+    from saturate import shard_of
+
+    calls = decode_counter(monkeypatch)
     big = Dataset.from_dict({"key": [f"k{i}" for i in range(40)]})
-    whole = [i for i, _ in dataset_rows(big.to_iterable_dataset())]
+    whole = [i for i, _ in dataset_rows(big)]
     calls.clear()
-    slices = [list(dataset_rows(big.to_iterable_dataset(), shard=(r, 4))) for r in range(4)]
+    slices = [list(dataset_rows(big, shard=(r, 4))) for r in range(4)]
     assert sorted(i for s in slices for i, _ in s) == sorted(whole)  # disjoint and complete
     for rank, s in enumerate(slices):
         assert all(shard_of(i, 4) == rank for i, _ in s)
     assert len(calls) == 40  # each row decoded once, by its own shard
-    # a map-style Dataset shards the same way
-    assert [i for i, _ in dataset_rows(big, shard=(2, 4))] == [i for i, _ in slices[2]]
+
+    monkeypatch.setattr(datasets, "load_dataset", lambda *a, **kw: big.to_iterable_dataset())
+    expected = [(i, row) for i, row in dataset_rows("org/keys") if shard_of(i, 4) == 2]
+    calls.clear()
+    streamed = list(dataset_rows("org/keys", shard=(2, 4)))
+    assert streamed == expected
+    assert len(calls) == len(streamed)
+
+
+def test_nested_shard_select_with_another_shard_raises():
+    """shard_select(shard_select(rows, 0, 2), 1, 2) kept nothing and was tagged (1, 2), so
+    pump(shard=(1, 2)) accepted an empty slice."""
+    from saturate import shard_select, stream
+
+    rows = [{"text": f"row {i}"} for i in range(20)]
+    with pytest.raises(ValueError, match="sharded for"):
+        shard_select(shard_select(stream(rows), 0, 2), 1, 2)
+    once = shard_select(stream(rows), 1, 2)
+    assert shard_select(once, 1, 2) is once  # the same shard: kept as it is
+
+
+def test_fractional_or_bool_shards_raise():
+    """(0.9, 2) was truncated to (0, 2) and (1.5, 1.8) to (1, 1): a wrong shard ran quietly."""
+    from saturate import shard_select
+
+    for bad in [(0.9, 2), (1.5, 1.8), (True, 2), (0, "4")]:
+        with pytest.raises((ValueError, TypeError), match="shard"):
+            shard_select(iter(()), *bad)
+
+
+def test_transformed_iterable_is_never_decoded_twice(monkeypatch):
+    """A filter or map on an IterableDataset decodes the example itself; decoding it again
+    broke images ('PngImageFile' object is not subscriptable). Such pipelines are iterated
+    as they are, and every example is decoded exactly once."""
+    from saturate import shard_of
+
+    calls = decode_counter(monkeypatch)
+    big = Dataset.from_dict({"key": [f"k{i}" for i in range(40)]})
+    for transformed in (big.to_iterable_dataset().filter(lambda ex: True),
+                        big.to_iterable_dataset().map(lambda ex: ex)):
+        calls.clear()
+        plain = [i for i, _ in dataset_rows(big)]
+        calls.clear()
+        got = list(dataset_rows(transformed, shard=(0, 4)))
+        assert [i for i, _ in got] == [i for i in plain if shard_of(i, 4) == 0]
+        assert len(calls) == len(set(calls))  # no example decoded twice
+
+
+def test_sharded_image_dataset_through_a_filter():
+    pytest.importorskip("PIL")
+    import io
+
+    from datasets import Features, Image, Value
+    from PIL import Image as PILImage
+
+    png = io.BytesIO()
+    PILImage.new("RGB", (2, 2)).save(png, format="PNG")
+    images = Dataset.from_dict(
+        {"img": [{"bytes": png.getvalue(), "path": None}] * 8, "key": [f"k{i}" for i in range(8)]},
+        features=Features({"img": Image(), "key": Value("string")}))
+    rows = list(dataset_rows(images.to_iterable_dataset().filter(lambda ex: True), shard=(0, 1)))
+    assert len(rows) == 8 and all(hasattr(row["img"], "size") for _, row in rows)
+
+
+def test_empty_and_transformed_datasets_shard():
+    """An empty Dataset raised (to_iterable_dataset cannot make one shard from zero rows), and
+    a Dataset with a transform raised NotImplementedError."""
+    empty = Dataset.from_dict({"text": []})
+    assert list(dataset_rows(empty, shard=(0, 1))) == []
+
+    def shout(batch):
+        return {"text": [t.upper() for t in batch["text"]]}
+
+    shouted = list(dataset_rows(ds().with_transform(shout), columns=["text"], shard=(0, 1)))
+    assert [row["text"] for _, row in shouted] == ["ALPHA", "BETA", "GAMMA", "ALPHA"]

@@ -46,12 +46,6 @@ def test_read_false_lists_only(tmp_path):
     assert len(rows) == 3
 
 
-def test_limit_applies_after_skip(tmp_path):
-    root = make_tree(tmp_path)
-    rows = list(bucket_rows(f"{root}/**/*.png", root=str(root), skip={"vol1/p1.png"}, limit=1))
-    assert [rid for rid, _ in rows] == ["vol1/p2.png"]
-
-
 def test_prefetch_preserves_order(tmp_path):
     root = tmp_path / "many"
     root.mkdir()
@@ -172,3 +166,18 @@ def test_shard_selects_before_reading(tmp_path, monkeypatch):
     for rank, s in enumerate(slices):
         assert all(shard_of(rid, 4) == rank for rid, _ in s)
     assert len(opened) == 40  # each object fetched once, by its own shard
+
+
+def test_limit_counts_the_input_before_shard_and_skip(tmp_path):
+    """limit means the first N objects of the listing, as in dataset_rows: K shards with one
+    limit cover those N objects between them, and a resume with the same limit finishes the
+    same N (it does not take N new ones)."""
+    root = tmp_path / "many"
+    root.mkdir()
+    for i in range(40):
+        (root / f"f{i:03d}.bin").write_bytes(bytes([i]))
+    first_ten = [f"f{i:03d}.bin" for i in range(10)]
+    slices = [ids_of(f"{root}/*.bin", root=str(root), limit=10, shard=(r, 4)) for r in range(4)]
+    assert sorted(rid for s in slices for rid in s) == first_ten
+    rest = ids_of(f"{root}/*.bin", root=str(root), limit=10, skip=set(first_ten[:7]))
+    assert rest == first_ten[7:]

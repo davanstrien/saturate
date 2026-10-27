@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import numbers
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Executor, ThreadPoolExecutor
@@ -136,8 +137,18 @@ def prepare_ahead(rows: Iterable[tuple[str, dict]], fn: Callable[[dict], dict], 
     to control its lifetime and size — with a process pool, `fn` and the rows must be
     picklable (a module-level function, not a lambda). An exception in `fn` is raised at
     the consumer. Work done here happens before the pump sees the row, so a pump fed by
-    prepare_ahead reads that cost as source wait (SOURCE-BOUND), not prep."""
+    prepare_ahead reads that cost as source wait (SOURCE-BOUND), not prep.
 
+    Rows sharded by a source, `shard_select` or `as_sharded` keep their shard tag through
+    here, so pump() still checks it against its own `shard`."""
+    prepared = _prepare_ahead(rows, fn, workers, executor)
+    if isinstance(rows, ShardedRows):
+        return ShardedRows(prepared, rows.shard)
+    return prepared
+
+
+def _prepare_ahead(rows: Iterable[tuple[str, dict]], fn: Callable[[dict], dict], workers: int,
+                   executor: Executor | None) -> Iterator[tuple[str, dict]]:
     apply = partial(_apply_to_row, fn)  # module-level + partial: picklable for a process pool
     if executor is not None:
         yield from rolling_map(rows, apply, executor, workers)
@@ -150,8 +161,12 @@ def prepare_ahead(rows: Iterable[tuple[str, dict]], fn: Callable[[dict], dict], 
 
 
 def check_shard(shard) -> tuple[int, int]:
-    """`shard` as a validated (rank, world) pair: world >= 1 and 0 <= rank < world."""
+    """`shard` as a validated (rank, world) pair of ints: world >= 1 and 0 <= rank < world.
+    A float or a bool raises: truncating (0.9, 2) to (0, 2) would run the wrong shard quietly."""
     rank, world = shard
+    for value in (rank, world):
+        if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+            raise TypeError(f"shard must be a pair of ints (rank, world), got {tuple(shard)!r}")
     if world < 1 or not 0 <= rank < world:
         raise ValueError(f"shard must be (rank, world) with 0 <= rank < world, got {tuple(shard)!r}")
     return int(rank), int(world)
@@ -168,19 +183,45 @@ def shard_of(row_id: str, world: int) -> int:
 
 
 class ShardedRows:
-    """An (id, row) iterator that holds only the rows of one shard. `shard` is that
-    (rank, world). pump() reads it to skip a second selection, and to refuse rows that were
-    sharded for another shard than the one it runs."""
+    """An iterator that holds only the rows of one shard. `shard` is that (rank, world).
+    pump() reads it to skip a second selection, and to refuse rows that were sharded for
+    another shard than the one it runs.
 
-    def __init__(self, rows: Iterable[tuple[str, dict]], shard: tuple[int, int]):
+    The tag lives on this object. `prepare_ahead` keeps it; a generator, `islice` or any
+    other wrapper drops it, and pump() then selects by hash again. That is harmless when the
+    shards agree. When they differ, the run processes the wrong rows, or none."""
+
+    def __init__(self, rows: Iterable, shard: tuple[int, int]):
         self._rows = iter(rows)
         self.shard = shard
 
     def __iter__(self) -> ShardedRows:
         return self
 
-    def __next__(self) -> tuple[str, dict]:
+    def __next__(self):
         return next(self._rows)
+
+
+def already_sharded(rows: Iterable, shard: tuple[int, int]) -> bool:
+    """True when `rows` carries the tag of `shard`. Raises when it carries another shard's
+    tag: selecting again would keep none of its rows, or the wrong ones."""
+    if not isinstance(rows, ShardedRows):
+        return False
+    if rows.shard != shard:
+        raise ValueError(f"rows were sharded for {rows.shard}, not {shard}; use one (rank, world) "
+                         "for the source, shard_select, as_sharded and pump()")
+    return True
+
+
+def as_sharded(rows: Iterable, shard: tuple[int, int]) -> ShardedRows:
+    """Mark `rows` as holding only shard `shard`'s rows, selected by you (for example with
+    datasets' `split_dataset_by_node`). pump(shard=shard) then takes every row as it is, and
+    `shard` only labels the output. Rows already tagged with the same shard are returned as
+    they are; rows tagged with another shard raise."""
+    shard = check_shard(shard)
+    if isinstance(rows, ShardedRows) and already_sharded(rows, shard):
+        return rows
+    return ShardedRows(rows, shard)
 
 
 def _rows_of_shard(rows: Iterable[tuple[str, dict]], rank: int, world: int) -> Iterator[tuple[str, dict]]:
@@ -191,7 +232,9 @@ def _rows_of_shard(rows: Iterable[tuple[str, dict]], rank: int, world: int) -> I
 
 def shard_select(rows: Iterable[tuple[str, dict]], rank: int = 0, world: int = 1) -> ShardedRows:
     """The (id, row) pairs that belong to shard `rank` of `world`: those with
-    `shard_of(id, world) == rank` (CONTRACT §2). Selecting twice with the same shard keeps
-    the same rows, so a slice can pass through here again without losing any."""
-    rank, world = check_shard((rank, world))
-    return ShardedRows(_rows_of_shard(rows, rank, world), (rank, world))
+    `shard_of(id, world) == rank` (CONTRACT §2). Rows already tagged with this shard are
+    returned as they are; rows tagged with another shard raise."""
+    shard = check_shard((rank, world))
+    if isinstance(rows, ShardedRows) and already_sharded(rows, shard):
+        return rows
+    return ShardedRows(_rows_of_shard(rows, *shard), shard)

@@ -109,8 +109,11 @@ input order, resume filtering and a growing input; the shards are disjoint and c
 input; a source can apply it before it reads or decodes a row; and applying it twice
 with the same `(r, K)` keeps the same rows. Changing K between runs moves rows between
 shards, which is safe: resume is per id over the whole output (§3). Ids never come from a
-per-shard counter. A caller who selects rows by another rule passes `pre_sharded=True`,
-and `shard` then only labels the output (§5).
+per-shard counter. Rows a source or `shard_select` sharded carry a `(rank, world)` tag:
+pump takes rows tagged with its own shard as they are and refuses rows tagged for
+another. A caller who selects rows by another rule tags them with
+`as_sharded(rows, shard)`, and `shard` then only labels the output (§5). A source's
+`limit` counts input rows before sharding.
 
 ## 3. Resume semantics
 

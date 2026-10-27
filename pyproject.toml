@@ -27,6 +27,7 @@ dev = [
     "pytest>=8",
     "ruff>=0.6",
     "datasets>=5.0",
+    "pillow>=10",  # image-column tests: datasets decodes Image features with Pillow
     "hypothesis>=6.100",
     "pytest-timeout>=2.3",
     "ty==0.0.92",  # pre-1.0: pinned, a new release can change what passes

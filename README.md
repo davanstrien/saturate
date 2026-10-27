@@ -250,10 +250,21 @@ rows = dataset_rows("org/pages", shard=(RANK, 4))  # decodes 1/4 (each Job still
 stats = pump(rows, to_request, parse, endpoint, output, shard=(RANK, 4))
 ```
 
-`pump()` does not select a second time from a source sharded the same way, and it raises
-if the source was sharded for a different `(rank, world)`. If you select a shard's rows
-yourself by another rule (for example `datasets.distributed.split_dataset_by_node`), pass
-`pre_sharded=True`: `shard=` then only labels the output.
+A sharded source tags its rows with its `(rank, world)`. `pump()` does not select a second
+time from rows tagged with its own shard, and it raises if they are tagged for another
+shard. `prepare_ahead` keeps the tag. A generator, `islice` or other wrapper drops it, and
+`pump()` then selects by hash again: harmless when the shards agree, but a mismatch is no
+longer caught. `limit=` in both sources counts the first N rows of the input before
+sharding, so K shards with one limit cover those N rows between them.
+
+If you select a shard's rows yourself by another rule (for example
+`datasets.distributed.split_dataset_by_node`), tag them with `as_sharded`. `pump()` then
+processes every row it is given, and `shard=` only labels the output:
+
+```python
+rows = as_sharded(split_dataset_by_node(ds, rank=RANK, world_size=4), (RANK, 4))
+stats = pump(rows, to_request, parse, endpoint, output, shard=(RANK, 4))
+```
 
 Each shard adapts to its own node independently and writes `completions/shard-{rank}.done`
 when finished (datatrove's marker convention — a coordinator can watch the directory).

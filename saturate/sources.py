@@ -104,11 +104,15 @@ def dataset_rows(
     so K shards with one limit cover those rows between them).
 
     `shard=(rank, world)` yields only the rows whose id belongs to that shard
-    (`shard_of`, CONTRACT §2). With index or column ids an example of another
-    shard is skipped before it is decoded (images, audio); with content or
-    callable ids the id needs the decoded example, so every example is decoded
-    and the others are then dropped. Every shard still streams the whole
-    dataset. Pass the same `shard` to pump().
+    (`shard_of`, CONTRACT §2). An example of another shard is skipped before it
+    is decoded (images, audio) when the id is an index or a column and the
+    dataset is a repo id or a plain map-style Dataset. Otherwise every example
+    is decoded and the other shards' rows are then dropped: content and
+    callable ids need the decoded example, and an IterableDataset object, or a
+    Dataset with a format or transform, may already decode in its own
+    pipeline (a filter or map does). The result is the same either way; only
+    the cost differs. Every shard still streams the whole dataset. Pass the
+    same `shard` to pump().
     """
     if shard is not None:
         shard = check_shard(shard)
@@ -126,6 +130,7 @@ def dataset_rows(
         )
         loaded_config = getattr(getattr(dataset, "info", None), "config_name", None)
         prefix = _index_id_prefix(repo, revision, config or loaded_config or "default", split)
+        loaded_here = True
     elif revision is not None or token is not None:
         raise ValueError(
             "revision=/token= only apply when `dataset` is a repo id string; "
@@ -135,6 +140,7 @@ def dataset_rows(
     else:
         loaded_config = getattr(getattr(dataset, "info", None), "config_name", None)
         prefix = _index_id_prefix(None, None, loaded_config, split)
+        loaded_here = False
     if columns is not None and not callable(ids):
         # column pushdown: select BEFORE iterating so unused features are
         # neither downloaded nor decoded — found live embedding the text
@@ -148,18 +154,32 @@ def dataset_rows(
                 dataset = dataset.select_columns(sorted(keep))
             except Exception:
                 pass  # unknown names surface naturally at first iteration
-    rows = _iter_dataset(dataset, ids, columns, limit, prefix, shard)
+    rows = _iter_dataset(dataset, ids, columns, limit, prefix, shard, loaded_here)
     return ShardedRows(rows, shard) if shard is not None else rows
 
 
-def _iter_dataset(dataset, ids, columns, limit, prefix, shard) -> Iterator[tuple[str, dict]]:
-    if shard is not None and hasattr(dataset, "to_iterable_dataset"):
-        dataset = dataset.to_iterable_dataset()  # a map-style Dataset: shard it the streaming way
-    # An index or column id is known before the example is decoded, so a sharded run
-    # iterates the raw examples and decodes only its own (an image decode is the cost).
+def _is_plain_map_style(dataset) -> bool:
+    """A non-empty map-style Dataset with no format or transform set: its stored examples are
+    still encoded, and to_iterable_dataset() yields them unchanged."""
+    if not hasattr(dataset, "to_iterable_dataset") or not hasattr(dataset, "format"):
+        return False
+    return dataset.format.get("type") is None and len(dataset) > 0
+
+
+def _iter_dataset(dataset, ids, columns, limit, prefix, shard, loaded_here) -> Iterator[tuple[str, dict]]:
+    # An index or column id is known before the example is decoded, so a sharded run can
+    # iterate the raw examples and decode only its own (an image decode is the cost). That
+    # is safe only where nothing upstream has decoded the examples already: a dataset loaded
+    # here from a repo id, or a plain map-style Dataset. A filter, map or transform the
+    # caller set up decodes on its own, so such a dataset is iterated as it is and the
+    # other shards' rows are dropped after decoding.
+    raw_examples = loaded_here
+    if shard is not None and _is_plain_map_style(dataset):
+        dataset = dataset.to_iterable_dataset()
+        raw_examples = True
     id_before_decode = not callable(ids) and ids != "content"
     features = getattr(dataset, "features", None)
-    decode_late = (shard is not None and id_before_decode and features is not None
+    decode_late = (shard is not None and raw_examples and id_before_decode and features is not None
                    and hasattr(dataset, "decode"))
     examples = dataset.decode(False) if decode_late else dataset
     for i, ex in enumerate(examples):
@@ -170,8 +190,11 @@ def _iter_dataset(dataset, ids, columns, limit, prefix, shard) -> Iterator[tuple
             rid = _row_id(ids, ex, None, i, prefix)
             if shard_of(rid, shard[1]) != shard[0]:
                 continue
-            # the same token the dataset would use to read a private repo's files
-            ex = features.decode_example(ex, token_per_repo_id=getattr(dataset, "_token_per_repo_id", None))
+            # The token datasets itself passes when it decodes, so files in a private repo
+            # can be read. `_token_per_repo_id` is a private datasets attribute: if a release
+            # renames it, getattr returns None and late decoding of private-repo files that
+            # are fetched by path (not embedded bytes) fails with an auth error.
+            ex =features.decode_example(ex, token_per_repo_id=getattr(dataset, "_token_per_repo_id", None))
         row = {k: ex[k] for k in columns} if columns is not None else dict(ex)
         if rid is None:
             rid = _row_id(ids, ex, row, i, prefix)
@@ -186,6 +209,9 @@ def _store_root(fs, path: str) -> str:
     expose split_path (s3, gcs, azure), and the filesystem root otherwise (local disk)."""
     in_store = None
     if hasattr(fs, "resolve_path"):  # HfFileSystem
+        # The root is the prefix of `path` before the in-store path (path_in_repo for a repo,
+        # path for a bucket), not `resolved.root`: that is rebuilt by huggingface_hub, and a
+        # revision spelled differently there than in `path` would put every match outside it.
         resolved = fs.resolve_path(path)
         in_store = getattr(resolved, "path_in_repo", None)
         if in_store is None:
@@ -230,8 +256,11 @@ def bucket_rows(
     buckets: pass `existing_ids(output)` and a re-run pays listing only, not
     transfer. `shard=(rank, world)` keeps only the paths whose id belongs to
     that shard (`shard_of`, CONTRACT §2), also before any read: each shard
-    lists the whole glob and fetches only its own objects. `limit` counts the
-    objects left after shard and skip. `read=False` yields {"path"} rows
+    lists the whole glob and fetches only its own objects. `limit` keeps the
+    first `limit` objects of the sorted listing, before shard and skip, as
+    `limit` in dataset_rows does: K shards with one limit cover those objects
+    between them, and a re-run with the same limit finishes the same objects
+    rather than taking new ones. `read=False` yields {"path"} rows
     without fetching (manifest / counting passes). `prefetch` reads ahead with
     a BOUNDED window of that many in-flight fetches — sequential remote reads
     would starve a fast consumer, and an unbounded prefetch would hold a
@@ -273,19 +302,18 @@ def bucket_rows(
             raise ValueError(f"{path!r} is not under root {base_path!r}")
         return path[len(base_path):]
 
+    if limit is not None:
+        paths = paths[: max(0, limit)]  # the first `limit` objects, before shard and skip
     selected = []
-    if limit is None or limit > 0:  # limit<=0 selects (and fetches) nothing
-        for p in paths:
-            rid = rid_of(p)
-            if not rid:
-                raise ValueError(f"id strategy produced no id for {p!r}")
-            if shard is not None and shard_of(rid, shard[1]) != shard[0]:
-                continue
-            if skip and rid in skip:
-                continue
-            selected.append((rid, p))
-            if limit is not None and len(selected) >= limit:
-                break
+    for p in paths:
+        rid = rid_of(p)
+        if not rid:
+            raise ValueError(f"id strategy produced no id for {p!r}")
+        if shard is not None and shard_of(rid, shard[1]) != shard[0]:
+            continue
+        if skip and rid in skip:
+            continue
+        selected.append((rid, p))
 
     rows = _fetch(fs, selected, prefetch) if read else _listed(selected)
     return ShardedRows(rows, shard) if shard is not None else rows

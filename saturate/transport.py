@@ -18,6 +18,7 @@ import dataclasses
 import random
 import sys
 import time
+from collections.abc import Callable
 
 import httpx2 as httpx
 
@@ -136,6 +137,18 @@ class Breaker:
 
 
 @dataclasses.dataclass(frozen=True)
+class Attempt:
+    """What one HTTP attempt tells the controller, reported as soon as the attempt ends, not when
+    its row is done: a row backing off for minutes must not hide an overload meanwhile."""
+
+    ok: bool = False
+    retry: bool = False  # the attempt was a retry of its row
+    pressure: bool = False  # the row's first saturation-shaped failure (reported once per row)
+    latency_s: float | None = None  # a success: the attempt alone, no backoff or breaker wait
+    tokens: int = 0  # a success: prompt + completion tokens from the response's usage
+
+
+@dataclasses.dataclass(frozen=True)
 class Outcome:
     """What one failed attempt means for its row. Pure data: `classify` decides it,
     `call_endpoint` acts on it."""
@@ -181,10 +194,12 @@ def next_wait(delay: float, retry_after: float | None = None,
 
 
 async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
-                        events: dict, breaker: Breaker,
+                        breaker: Breaker, observe: Callable[[Attempt], None],
                         budget_s: float | None = None) -> tuple[dict | None, str | None]:
-    """Returns (response_json, error). `classify` decides what a failed attempt means and
-    `next_wait` how long to back off; this loop owns the I/O and the budget.
+    """Returns (response_json, error), and hands `observe` an Attempt as each attempt ends.
+    `classify` decides what a failed attempt means and `next_wait` how long to back off; this
+    loop owns the I/O and the budget. When a row's attempts fail in different ways, its error
+    names the first failure too (the root cause is often the first).
 
     Poison rows (3xx/4xx) never retry; multipart is single-attempt (file objects are consumed
     by the wire — a re-send posts empty bodies). Budget semantics: the FIRST attempt gets the
@@ -200,55 +215,75 @@ async def call_endpoint(client: httpx.AsyncClient, base: str, req: Request,
     budget = RETRY_BUDGET_S if budget_s is None else budget_s
     delay, t0 = BACKOFF_BASE_S, time.monotonic()
     pressured = False
-    last_err = "retry budget exhausted"
+    errors: list[str] = []
 
     def left() -> float:
         return budget - (time.monotonic() - t0)
 
     for attempt in range(5):
         if attempt and (not RETRY_ACTIVE or left() <= 0):
-            return None, last_err  # hard wall-clock deadline: no attempt starts past it (r6)
-        if attempt:
-            events["retries"] = events.get("retries", 0) + 1
+            return None, _row_error(errors)  # hard wall-clock deadline: no attempt starts past it (r6)
         g0 = time.monotonic()
         await breaker.gate(client, url, (req.json or {}).get("model"))  # an open breaker pauses retries too
         t0 += time.monotonic() - g0  # r6: breaker-open time never consumes the row budget (docstring)
         a0 = time.monotonic()
         try:
-            if req.kind == "multipart":
-                r = await client.post(url, data=req.data, files=req.files)
-            elif attempt and RETRY_ACTIVE:  # retries: wall-clock capped to the exact remaining budget
-                timeout = capped_timeout(getattr(client, "timeout", None), left())
-                r = await asyncio.wait_for(client.post(url, json=req.json, timeout=timeout), left())
-            else:
-                r = await client.post(url, json=req.json)
+            result = _read(await _send(client, url, req, retry=attempt > 0, left=left()))
         except (httpx.TimeoutException, httpx.TransportError, asyncio.TimeoutError) as e:
-            outcome = transport_failure(e)
-        else:
-            if 200 <= r.status_code < 300:
-                body = _json_object(r)
-                if body is not None:  # a success only once there is a result to hand on
-                    events["successes"] += 1
-                    # the successful attempt alone: retries, backoff, breaker waits and poison rows
-                    # are not what a request costs the engine, and the controller's waits are
-                    # scaled to that
-                    events.setdefault("latencies", []).append(time.monotonic() - a0)
-                    breaker.ok()
-                    return body, None
-                outcome = unreadable_body(r.status_code, r.text)
-            else:
-                outcome = classify(r.status_code, r.headers.get("retry-after"), r.text)
-        if outcome.pressure and not pressured:
-            events["backpressure"] += 1
-            pressured = True
-        if outcome.breaker_fail:
+            result = transport_failure(e)
+        if isinstance(result, dict):  # a success: there is a result to hand on
+            # the latency of the successful attempt alone: retries, backoff and breaker waits are
+            # not what a request costs the engine, and the controller's waits are scaled to that
+            observe(Attempt(ok=True, retry=attempt > 0, latency_s=time.monotonic() - a0,
+                            tokens=_tokens(result)))
+            breaker.ok()
+            return result, None
+        observe(Attempt(retry=attempt > 0, pressure=result.pressure and not pressured))
+        pressured = pressured or result.pressure
+        if result.breaker_fail:
             breaker.fail()
-        last_err = outcome.error
-        if not outcome.retry or attempt == 4 or req.files is not None or not RETRY_ACTIVE:
-            return None, last_err
-        wait, delay = next_wait(delay, outcome.retry_after)
+        errors.append(result.error)
+        if not result.retry or attempt == 4 or req.files is not None or not RETRY_ACTIVE:
+            return None, _row_error(errors)
+        wait, delay = next_wait(delay, result.retry_after)
         await asyncio.sleep(min(wait, max(0.0, left())))
-    return None, last_err
+    return None, _row_error(errors)
+
+
+async def _send(client: httpx.AsyncClient, url: str, req: Request, retry: bool,
+                left: float) -> httpx.Response:
+    """One attempt on the wire. A multipart request goes once with its files; a retry's phase
+    timeouts and wall-clock are capped to what is left of the row's budget; a first attempt
+    gets the client's full windows (long generations are legitimate)."""
+    if req.kind == "multipart":
+        return await client.post(url, data=req.data, files=req.files)
+    if retry and RETRY_ACTIVE:
+        timeout = capped_timeout(getattr(client, "timeout", None), left)
+        return await asyncio.wait_for(client.post(url, json=req.json, timeout=timeout), left)
+    return await client.post(url, json=req.json)
+
+
+def _read(r: httpx.Response) -> dict | Outcome:
+    """A response's result (a 2xx with a JSON object body), or what its failure means."""
+    if 200 <= r.status_code < 300:
+        body = _json_object(r)
+        return body if body is not None else unreadable_body(r.status_code, r.text)
+    return classify(r.status_code, r.headers.get("retry-after"), r.text)
+
+
+def _row_error(errors: list[str]) -> str:
+    """A failed row's error: the last attempt's, naming the first attempt's too when it differs
+    (the first failure is often the root cause)."""
+    if not errors:
+        return "retry budget exhausted"
+    first, last = errors[0], errors[-1]
+    return last if first == last else f"{last} (first attempt: {first})"
+
+
+def _tokens(body: dict) -> int:
+    """Prompt + completion tokens a response reports (0 when it reports no usage)."""
+    usage = body.get("usage") or {}
+    return usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
 
 
 def _server_answered(r: httpx.Response) -> bool:

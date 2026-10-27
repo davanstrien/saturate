@@ -11,6 +11,7 @@ import pytest
 from saturate import AdaptiveLimiter, Auto, Fixed, Stats
 from saturate.controller import Obs
 from saturate.telemetry import cut_reasons
+from saturate.transport import Attempt
 
 
 class Recorder:
@@ -40,7 +41,7 @@ def test_zero_tokens_with_requests_in_flight_is_a_reading():
         lim = AdaptiveLimiter(window=ctrl)
         await lim._tick()  # idle: nothing in flight, nothing observable
         async with lim.slot():
-            lim.observe(ok=True, tokens=100)
+            lim.observe(Attempt(ok=True, tokens=100))
             await lim._tick()  # tokens delivered this tick
             await lim._tick()  # a request sits in flight delivering nothing
         await lim._tick()
@@ -63,7 +64,7 @@ def test_endpoint_without_token_usage_has_no_throughput_signal():
     async def go():
         lim = AdaptiveLimiter(window=ctrl)
         async with lim.slot():
-            lim.observe(ok=True, tokens=0)
+            lim.observe(Attempt(ok=True, tokens=0))
             await lim._tick()
             await lim._tick()
 
@@ -83,9 +84,9 @@ def test_tick_carries_request_latency_and_the_oldest_inflight_age():
         await lim._tick()
         assert ctrl.seen[-1].latency_s is None and ctrl.seen[-1].oldest_s is None
         async with lim.slot():
-            lim.observe(ok=True, tokens=10, latency_s=0.25)
+            lim.observe(Attempt(ok=True, tokens=10, latency_s=0.25))
         async with lim.slot():
-            lim.events["latencies"].append(0.75)  # what call_endpoint appends on a 200
+            lim.observe(Attempt(ok=True, latency_s=0.75))  # what call_endpoint reports on a 200
             await lim._tick()
         return lim
 
@@ -93,7 +94,7 @@ def test_tick_carries_request_latency_and_the_oldest_inflight_age():
     obs = ctrl.seen[-1]
     assert obs.latency_s == 0.5 and obs.oldest_s >= 0.0  # median of the two attempts
     assert obs.tick_s is not None and obs.tick_s > 0
-    assert lim.ticks[-1]["latency_s"] == 0.5 and lim.events["latencies"] == []
+    assert lim.ticks[-1]["latency_s"] == 0.5 and lim._counts.latencies == []
     assert lim.oldest_s is None  # released
 
 

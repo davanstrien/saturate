@@ -215,13 +215,16 @@ Embedding just the adaptive part in your own stack (your IO, your loop, your tra
 this is the datatrove-shaped seam):
 
 ```python
-from saturate import AdaptiveLimiter, Auto
+from saturate import AdaptiveLimiter, Attempt, Auto
 
 async with AdaptiveLimiter(window=Auto()) as limiter:  # a drop-in for your fixed semaphore
     async with limiter.slot():
         result = await your_send(payload)  # your client, unchanged
-    limiter.observe(ok=True, tokens=n)
+    limiter.observe(Attempt(ok=True, tokens=n, latency_s=took))
 ```
+
+Report every attempt as it ends, retries included (`retry=True`), and set `pressure=True` on a
+row's first 429/timeout only: the controller cuts on the share of rows under pressure.
 
 ## Scaling: fan out to storage
 

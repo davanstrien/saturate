@@ -15,6 +15,7 @@ from stub_server import StubLimiter
 
 from saturate import AdaptiveLimiter, Auto, Fixed, Stats, through
 from saturate.telemetry import advise_input, bound_by_counts, tick_record
+from saturate.transport import Attempt
 
 
 def tick(lim: AdaptiveLimiter, dt: float = 1.0) -> dict:
@@ -139,7 +140,7 @@ def test_full_window_with_a_high_engine_queue_still_steps_down_under_on_loop_pre
 
     async def go():
         async with lim.slot(), lim.slot(), lim.slot(), lim.slot():
-            lim.observe(ok=True, tokens=10)  # the first completion ever: gauges now count
+            lim.observe(Attempt(ok=True, tokens=10))  # the first completion ever: gauges now count
             lim._t_last -= 1.0
             await lim._tick()
             gauges.waiting = 40  # above hi

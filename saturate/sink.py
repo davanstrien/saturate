@@ -607,6 +607,7 @@ async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
     # A generic duck-typed sink (FileSink str()s its values) must not inherit Arrow's rules.
     probe = getattr(sink, "probe", None)
     demoted0 = getattr(sink, "rows_demoted", 0)  # rows flush demotes were counted as processed here
+    failed = False
     try:
         async for done in results:
             if done.error is None:
@@ -628,16 +629,28 @@ async def drain(results: AsyncIterator, sink, shard: tuple[int, int] = (0, 1),
             else:
                 stats.rows_failed += 1
             sink.append(rec)
+    except BaseException:
+        failed = True
+        raise
     finally:
-        sink.flush()  # a fatal abort must still land the rows already paid for
-        # reconcile: rows flush demoted landed as error rows, not successes. Capped at what this
-        # drain counted — rows buffered before it started were never in these stats
-        demoted = min(getattr(sink, "rows_demoted", 0) - demoted0, stats.rows_processed)
-        stats.rows_processed -= demoted
-        stats.rows_failed += demoted
-        aclose = getattr(results, "aclose", None)  # a sink error must stop the pipeline feeding it:
-        if aclose is not None:  # its requests would keep running with no consumer
-            await aclose()
+        try:
+            try:
+                sink.flush()  # a fatal abort must still land the rows already paid for
+            except Exception as e:
+                if not failed:
+                    raise
+                # the error that ended the run is the one to report; a sink that failed once
+                # often fails its flush too
+                _log(f"flush after a failed run also failed (the first error is raised): {e!r}")
+            # reconcile: rows flush demoted landed as error rows, not successes. Capped at what
+            # this drain counted — rows buffered before it started were never in these stats
+            demoted = min(getattr(sink, "rows_demoted", 0) - demoted0, stats.rows_processed)
+            stats.rows_processed -= demoted
+            stats.rows_failed += demoted
+        finally:
+            aclose = getattr(results, "aclose", None)  # a sink error must stop the pipeline feeding
+            if aclose is not None:  # it, whatever the flush did: its requests would keep running
+                await aclose()  # with no consumer
     return stats
 
 

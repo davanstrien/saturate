@@ -170,13 +170,12 @@ def _wait_for_threads(before: set[int], include_runtime: bool, timeout: float = 
     return _new_threads(before, include_runtime)
 
 
-def run_checked(make_coro, timeout: float = 30.0, *, leak_is_known_gap: bool = False):
+def run_checked(make_coro, timeout: float = 30.0):
     """Run `make_coro()` on a fresh loop that stays open afterwards, then check that nothing
     outlived it, before any cleanup of ours could hide it: no unfinished task, no library thread
     still alive (within 2 s), no error the loop was left to handle (a crashed task nobody
     awaited), and after the loop's executor shuts down, no thread at all. Then re-raise the
-    coroutine's own exception, so a test can expect an error and still require a clean teardown.
-    A leak raises AssertionError, or KnownGap when the leak is the gap the test documents."""
+    coroutine's own exception, so a test can expect an error and still require a clean teardown."""
     before = {t.ident for t in threading.enumerate()}
     loop = asyncio.new_event_loop()
     loop_errors: list[dict] = []
@@ -209,8 +208,6 @@ def run_checked(make_coro, timeout: float = 30.0, *, leak_is_known_gap: bool = F
     if threads:
         leaks.append(f"threads outlived the loop: {threads}")
     if leaks:
-        if leak_is_known_gap:
-            raise KnownGap("; ".join(leaks))
         raise AssertionError("; ".join(leaks))
     if error is not None:
         raise error
@@ -362,19 +359,13 @@ def test_a_sink_failure_raises_its_own_error_and_stops_the_requests(stub):
     assert sink.flushed == 1
 
 
-@known_gap("finding 1: drain's finally flush masks the sink error and skips aclose")
 def test_a_sink_failure_is_not_masked_by_a_failing_flush(stub):
+    """A sink that failed once often fails its flush too: the first error is the one raised,
+    and the pipeline still stops (no worker outlives the run)."""
     stub.latency_s = 0.01
     sink = RecordingSink(fail_append_at=3, fail_flush=True)
-    try:
-        # today the skipped aclose also leaks the workers: that leak is part of this gap
-        run_checked(lambda: pipeline(stub.endpoint, rows(500), sink), leak_is_known_gap=True)
-    except SinkBoom:
-        pass
-    except OSError as e:
-        raise KnownGap(f"the flush's {e!r} replaced the sink error") from e
-    else:
-        pytest.fail("the run did not raise")
+    with pytest.raises(SinkBoom):
+        run_checked(lambda: pipeline(stub.endpoint, rows(500), sink))
 
 
 @known_gap("#35: on cancel, results already completed but not yet consumed are discarded")
@@ -405,18 +396,20 @@ def test_caller_cancellation_lands_the_completed_rows_and_cleans_up(stub, tmp_pa
     gap(set(parsed) <= on_disk(tmp_path), f"{len(parsed)} parsed, {len(on_disk(tmp_path))} on disk")
 
 
-# --- known gaps in the transport and the sink ------------------------------------------------
+# --- the transport and the sink ------------------------------------------------
 
-@known_gap("finding 2: a 2xx other than 200 is classified as a 5xx")
 def test_any_2xx_is_a_success(stub, tmp_path, no_retries):
     stub.status_for = lambda request: 201
     stats = run_checked(lambda: pipeline(stub.endpoint, rows(3), ParquetSink(str(tmp_path)), fail_fast=0))
     gap((stats.rows_processed, stats.rows_failed) == (3, 0), f"{stats.rows_failed} of 3 rows failed")
 
 
-@known_gap("finding 3: a 200 whose body is not JSON counts as a success")
-def test_a_200_that_is_not_json_is_a_server_error_not_a_success(stub):
-    stub.raw_for = lambda request: b"<html>down for maintenance</html>"
+@pytest.mark.parametrize("status, body", [(200, b"<html>down for maintenance</html>"),
+                                          (200, b"[1, 2]"),  # JSON, but not an object
+                                          (204, b"")])
+def test_a_2xx_without_a_json_object_is_a_server_error_not_a_success(stub, no_retries, status, body):
+    stub.status_for = lambda request: status
+    stub.raw_for = lambda request: body
     ticks: list[dict] = []
 
     async def go():

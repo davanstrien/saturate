@@ -173,9 +173,9 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
     writer: asyncio.Task | None = None
     write_lines = getattr(sink, "write_telemetry", None)
 
-    async def write_telemetry(snapshot: list[str]) -> None:
+    async def write_telemetry(write: Callable, snapshot: list[str]) -> None:
         try:  # a remote rewrite is a commit (seconds): never on the loop, never overlapping
-            await asyncio.to_thread(write_lines, shard, snapshot)
+            await asyncio.to_thread(write, shard, snapshot)
         except Exception as e:
             _log(f"telemetry write failed (non-fatal): {e}")
 
@@ -183,7 +183,7 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
         nonlocal writer, next_at  # reader sees a partial run, not only a finished one (CONTRACT §6)
         lines.append(json.dumps(rec))
         if len(lines) >= next_at and write_lines is not None and (writer is None or writer.done()):
-            writer = asyncio.get_running_loop().create_task(write_telemetry(lines[:]))
+            writer = asyncio.get_running_loop().create_task(write_telemetry(write_lines, lines[:]))
             # every rewrite re-sends the whole trajectory: stretch the cadence with the run
             # (a quarter of its length so far) so total bytes stay under ~5x the final file
             next_at = len(lines) + max(every, len(lines) // 4)
@@ -210,7 +210,7 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
     stats.input_bound = stats.bound_by.get("source", 0) + stats.bound_by.get("prep", 0) > 0
     stats.cut_reasons = cut_reasons(limiter.ticks)
     if lines and write_lines is not None:
-        await write_telemetry(lines)  # final: the complete trajectory
+        await write_telemetry(write_lines, lines)  # final: the complete trajectory
     stats.hints = advise(limiter.ticks, dialect, stats.final_limit, CEILING_FLAG)
     stats.hints += advise_input(limiter.ticks, prepare_workers)
     if stats.rows_errored_prior:

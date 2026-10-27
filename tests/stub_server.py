@@ -26,6 +26,7 @@ import asyncio
 import json
 import sys
 import threading
+import time
 from collections.abc import Callable
 
 _HEAD_LIMIT = 1 << 20  # header bytes before we give up on a connection
@@ -67,6 +68,8 @@ class StubServer:
         self.probe_log: list[tuple[str, dict]] = []  # (path, body) of every circuit-breaker probe
         self.inflight = 0
         self.peak_inflight = 0
+        self.last_request_at: float | None = None  # diagnostics for a slow test (conftest.py)
+        self.longest_gap_s = 0.0  # the longest wait between two row requests
         self.prompt_tokens = 0  # usage reported on 200 responses only
         self.completion_tokens = 0
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -165,6 +168,10 @@ class StubServer:
             self.probe_log.append((path, request))
         else:
             self.requests += 1
+            now = time.monotonic()
+            if self.last_request_at is not None:
+                self.longest_gap_s = max(self.longest_gap_s, now - self.last_request_at)
+            self.last_request_at = now
         self.inflight += 1
         self.peak_inflight = max(self.peak_inflight, self.inflight)
         try:

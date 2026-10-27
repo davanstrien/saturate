@@ -8,7 +8,7 @@ import pytest
 
 import saturate.http as http
 from saturate.engine import _get
-from saturate.http import HttpClient, Timeout, Timeouts, TransportError, multipart
+from saturate.http import HttpClient, TimedOut, Timeouts, TransportError, multipart
 
 OK = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 12\r\n\r\n{\"ok\": true}"
 
@@ -91,7 +91,7 @@ def test_a_server_that_never_answers_times_out_at_the_read_limit():
         async with RawServer(silent) as server, HttpClient() as client:
             loop = asyncio.get_running_loop()
             t = loop.time()
-            with pytest.raises(Timeout):
+            with pytest.raises(TimedOut):
                 # the guard fails fast if the read limit is ignored (the server answers after 1 s)
                 await asyncio.wait_for(client.get(server.url, timeouts=Timeouts(read=0.2)), 0.8)
             return loop.time() - t
@@ -219,8 +219,58 @@ def test_a_server_that_stops_reading_an_upload_hits_the_total_limit():
         port = server.sockets[0].getsockname()[1]
         async with server, HttpClient() as client:
             limits = Timeouts(read=0.2, connect=1.0, pool=0.2, write=0.2)
-            with pytest.raises(Timeout):
+            with pytest.raises(TimedOut):
                 await asyncio.wait_for(client.post(f"http://127.0.0.1:{port}/v1/upload",
-                                                   json={"x": "a" * 50_000_000}, timeouts=limits), 3.0)
+                                                   json={"x": "a" * 5_000_000}, timeouts=limits), 3.0)
 
     run(go())
+
+
+def test_boot_checks_never_proxy_localhost_and_never_follow_redirects(monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")  # a proxy that refuses everything
+    http.environment_proxy.cache_clear()
+
+    async def moved(writer):
+        writer.write(b"HTTP/1.1 302 Found\r\nLocation: /elsewhere\r\nContent-Length: 0\r\n\r\n")
+        await writer.drain()
+
+    async def go():
+        async with RawServer(moved) as server:
+            reply = await asyncio.to_thread(_get, f"{server.url}/health", 5)
+            return reply.status_code, server.requests
+
+    try:
+        assert run(go()) == (302, 1)
+    finally:
+        http.environment_proxy.cache_clear()
+
+
+def test_a_multipart_file_goes_by_its_base_name_and_a_stream_is_not_rewound(tmp_path):
+    path = tmp_path / "page.png"
+    path.write_bytes(b"PNGDATA")
+
+    async def ok(writer):
+        writer.write(OK)
+        await writer.drain()
+
+    class Stream(io.RawIOBase):  # a pipe-like file: readable once, not seekable
+        def __init__(self):
+            self.data = io.BytesIO(b"STREAMED")
+
+        def readable(self):
+            return True
+
+        def readinto(self, buffer):
+            chunk = self.data.read(len(buffer))
+            buffer[: len(chunk)] = chunk
+            return len(chunk)
+
+    async def go():
+        async with RawServer(ok) as server, HttpClient() as client:
+            with open(path, "rb") as f:
+                await client.post(f"{server.url}/v1/upload", form=multipart(None, {"file": f}))
+            return server.received[0]
+
+    body = run(go())
+    assert b'filename="page.png"' in body and str(tmp_path).encode() not in body
+    multipart(None, {"file": ("s.bin", io.BufferedReader(Stream()))})  # no seek on a stream

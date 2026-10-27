@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 import sys
 
-from saturate.http import HttpClient, Timeouts
+from saturate.http import HttpClient, Timeouts, TransportError
 
 _PAT = re.compile(
     r"^(?:"
@@ -130,7 +130,7 @@ class HttpScrape:
         try:
             r = await self.client.get(self.url, timeouts=SCRAPE_TIMEOUTS)
             gauges = parse_gauges(r.text)
-        except Exception:
+        except TransportError:  # parse_gauges returns None for text it cannot read
             self._fails += 1
             return None
         if gauges is None:

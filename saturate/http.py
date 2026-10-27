@@ -3,10 +3,7 @@
 Everything else talks HTTP through this module: `HttpClient` sends a request and returns a
 `Reply` read in full; a request that gets no complete answer raises `TransportError`. The
 retry ladder, the breaker and the metrics scrape decide what a reply or a failure means.
-
-aiohttp, not httpx: httpx's connection pool does work proportional to every connection on each
-request, which at a few hundred requests in flight capped a real engine at about half of what
-it could serve (bench results in #55).
+Why aiohttp: bench/README.md, "The HTTP client".
 """
 
 from __future__ import annotations
@@ -15,13 +12,16 @@ import asyncio
 import dataclasses
 import functools
 import json as jsonlib
+import os
 import urllib.request
 from collections.abc import Mapping
 from urllib.parse import urlsplit
 
 import aiohttp
 
-MAX_CONNECTIONS = 1024  # the pool's size; the window is what limits requests in flight
+# The pool's size. The window limits requests in flight; a window above this queues the rest on
+# the pool, where each waits at most the `pool` limit (a timeout there counts as a failure).
+MAX_CONNECTIONS = 1024
 KEEPALIVE_S = 4.0  # below the usual server idle timeout (uvicorn: 5 s), so a reused connection is open
 
 
@@ -30,7 +30,7 @@ class TransportError(Exception):
     cut off, or a phase timed out."""
 
 
-class Timeout(TransportError):
+class TimedOut(TransportError):
     """A phase of the request took longer than its limit."""
 
 
@@ -61,6 +61,7 @@ class Timeouts:
     def for_aiohttp(self) -> aiohttp.ClientTimeout:
         limits = [limit for limit in (self.pool, self.write, self.read) if limit is not None]
         total = sum(limits) if len(limits) == 3 else None  # a phase without a limit: no total
+        # aiohttp's names differ: its `connect` is our pool wait, its `sock_connect` our connect
         return aiohttp.ClientTimeout(total=total, connect=self.pool, sock_connect=self.connect,
                                      sock_read=self.read)
 
@@ -134,7 +135,7 @@ class HttpClient:
         except aiohttp.InvalidURL:
             raise  # a caller's mistake, not the server's
         except asyncio.TimeoutError as e:  # aiohttp's own timeout errors are TimeoutErrors too
-            raise Timeout(f"{method} {url} timed out ({type(e).__name__})") from e
+            raise TimedOut(f"{method} {url} timed out ({type(e).__name__})") from e
         except aiohttp.ClientError as e:  # refused, dropped, cut off, or not HTTP
             raise TransportError(f"{type(e).__name__}: {e}") from e
 
@@ -178,10 +179,14 @@ def multipart(data: Mapping | None, files: Mapping) -> aiohttp.FormData:
     for name, value in (data or {}).items():
         form.add_field(name, str(value))
     for name, value in files.items():
-        filename, fileobj, *content_type = value if isinstance(value, tuple) else (
-            getattr(value, "name", name), value)
-        if hasattr(fileobj, "seek"):
+        if isinstance(value, tuple):
+            filename, fileobj = value[0], value[1]
+            content_type = value[2] if len(value) > 2 else None
+        else:
+            fileobj, content_type = value, None
+            path = getattr(fileobj, "name", None)
+            filename = os.path.basename(path) if isinstance(path, str) else name  # never the local path
+        if getattr(fileobj, "seekable", lambda: False)():
             fileobj.seek(0)
-        form.add_field(name, fileobj, filename=filename,
-                       content_type=content_type[0] if content_type else None)
+        form.add_field(name, fileobj, filename=filename, content_type=content_type)
     return form

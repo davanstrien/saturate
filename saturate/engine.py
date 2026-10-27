@@ -17,10 +17,11 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 
-from multidict import CIMultiDict
+from multidict import CIMultiDict  # aiohttp's case-insensitive headers (installed with it)
 
-from saturate.http import Reply
+from saturate.http import Reply, environment_proxy
 from saturate.transport import PROBE_HEADERS, probe_body
 
 
@@ -148,7 +149,8 @@ def wait_for_health(endpoint: str, timeout_s: int = 1800, proc: subprocess.Popen
     raise TimeoutError(f"engine not ready after {timeout_s}s")
 
 
-# Boot-time checks are a few synchronous requests: the standard library is enough.
+# Boot-time checks are a few synchronous requests: the standard library is enough. They follow
+# the same rules as HttpClient: the environment's proxy (never for localhost), no redirects.
 _UNANSWERED = (OSError, http.client.HTTPException)  # refused, timed out, dropped, not HTTP
 
 
@@ -162,10 +164,19 @@ def _post(url: str, body: dict, timeout: float, headers: dict | None = None) -> 
     return _send(request, timeout)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None  # urllib then raises HTTPError for the 3xx, which _send returns as a reply
+
+
 def _send(request: urllib.request.Request, timeout: float) -> Reply:
     """The server's reply; an error status is a reply too, not an exception."""
+    parts = urlsplit(request.full_url)
+    proxy = environment_proxy(parts.scheme, parts.hostname or "", parts.port)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({parts.scheme: proxy} if proxy else {}),
+                                         _NoRedirect)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as r:
+        with opener.open(request, timeout=timeout) as r:
             return Reply(r.status, CIMultiDict(r.headers.items()), r.read())
     except urllib.error.HTTPError as e:
         return Reply(e.code, CIMultiDict(e.headers.items()), e.read())

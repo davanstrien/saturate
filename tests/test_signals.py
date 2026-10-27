@@ -7,6 +7,7 @@ of `ghcr.io/huggingface/text-embeddings-inference:cpu-latest`
 not match.
 """
 
+from saturate.http import TransportError
 from saturate.signals import CEILING_FLAG, parse_gauges
 
 TEI_METRICS = """\
@@ -72,7 +73,7 @@ class _FlakyClient:
     async def get(self, url, timeouts=None):
         self.calls += 1
         if self.calls <= self.fail_first:
-            raise ConnectionError("metrics not up yet")
+            raise TransportError("metrics not up yet")
         return type("R", (), {"text": VLLM_METRICS})()
 
 

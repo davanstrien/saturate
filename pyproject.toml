@@ -27,6 +27,7 @@ dev = [
     "ruff>=0.6",
     "datasets>=5.0",
     "hypothesis>=6.100",
+    "pytest-timeout>=2.3",
 ]
 
 [build-system]
@@ -35,6 +36,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["saturate"]
+
+[tool.pytest.ini_options]
+# a deadlock fails one test instead of hanging the suite (the 0.3 refactor rewrites shutdown)
+timeout = 120
+markers = [
+    "internals: reaches into plumbing the 0.3 refactor replaces (Window, the events dict, through()'s hooks); rewritten with it, so `-m 'not internals'` is the suite that must pass unchanged",
+]
 
 [tool.ruff]
 line-length = 110

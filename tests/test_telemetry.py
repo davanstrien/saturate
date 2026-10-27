@@ -4,6 +4,7 @@ finalised at exit (CONTRACT §6)."""
 import asyncio
 import json
 
+import pytest
 from stub_server import StubLimiter
 
 import saturate
@@ -54,6 +55,7 @@ def test_telemetry_cadence_depends_on_the_store(tmp_path, monkeypatch):
     assert ParquetSink("hf://owner/name/out").telemetry_every_ticks == 150
 
 
+@pytest.mark.internals
 def test_pump_writes_telemetry_periodically_and_at_exit(tmp_path, monkeypatch):
     """pump() hands the controller an on_tick hook that rewrites the telemetry file
     every telemetry_every_ticks (30 on a local store), off the event loop; the final
@@ -101,6 +103,7 @@ def test_pump_writes_telemetry_periodically_and_at_exit(tmp_path, monkeypatch):
     assert [json.loads(line)["t"] for line in files[0].read_text().splitlines()] == [2 * i for i in range(60)]
 
 
+@pytest.mark.internals
 def test_pump_periodic_telemetry_failure_is_not_fatal(tmp_path, monkeypatch, capsys):
     """A failing periodic write is logged and the run continues (same rule as the final write)."""
     captured = {}

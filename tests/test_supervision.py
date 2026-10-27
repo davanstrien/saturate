@@ -11,6 +11,7 @@ from saturate import AdaptiveLimiter, Fixed, ParquetSink
 from saturate.sink import as_sink
 
 
+@pytest.mark.internals
 def test_crashed_tick_loop_surfaces(monkeypatch):
     monkeypatch.setattr(core, "TICK_S", 0.01)
 
@@ -26,6 +27,7 @@ def test_crashed_tick_loop_surfaces(monkeypatch):
         asyncio.run(go())
 
 
+@pytest.mark.internals
 def test_client_closed_when_tick_loop_crashed(monkeypatch):
     """Codex r4 blocker #6: surfacing a crashed tick loop at limiter exit must
     not leak the HTTP client."""
@@ -50,6 +52,7 @@ def test_client_closed_when_tick_loop_crashed(monkeypatch):
     assert holder[0]._client.is_closed
 
 
+@pytest.mark.internals
 def test_admission_fails_fast_after_tick_death(monkeypatch):
     """Codex r5 blocker #4a: a long run must not continue with a dead
     controller — the next admission raises run-fatally (never a row error)."""
@@ -71,6 +74,7 @@ def test_admission_fails_fast_after_tick_death(monkeypatch):
         asyncio.run(go())
 
 
+@pytest.mark.internals
 def test_blocked_admission_fails_after_tick_death(monkeypatch):
     """Codex r6 blocker #3: a waiter already queued behind a full window passed
     the pre-acquire check, then proceeded after the controller died. The check
@@ -96,6 +100,7 @@ def test_blocked_admission_fails_after_tick_death(monkeypatch):
         asyncio.run(go())
 
 
+@pytest.mark.internals
 def test_body_exception_wins_over_tick_crash(monkeypatch):
     """Codex r5 blocker #4b: a tick-loop exception at exit must not mask the
     primary body exception."""

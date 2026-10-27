@@ -1,13 +1,24 @@
 # Developing
 
-Python ≥3.10. CI runs exactly these three (plus an `[hf]` import check):
+Python ≥3.10; CI tests every supported version (3.14t, free-threaded, is informational). CI runs
+exactly these (plus an `[hf]` import check):
 
 ```bash
-uv sync
+uv sync --locked
 uv run ruff check .
 uv run pytest tests/ -q                  # unit + regression tests; -k name for one test
 uv run --with blacken-docs blacken-docs -l 100 README.md CONTRACT.md docs/*.md  # snippet formatting
 ```
+
+`uv.lock` is committed and CI refuses a stale one, or one that names any index other than public
+PyPI. Lock and run with user config off (`UV_NO_CONFIG=1 uv lock`, and the same for `uv run` and
+`uv sync`, which re-lock on their own): a user-level `index-url` (a private mirror) or
+`exclude-newer` otherwise lands in the lock.
+
+**Contract tests** (`tests/test_contract.py`) pin what each kind of failure does to a run and what
+the concurrency primitives guarantee, through public entry points only. Tests marked `internals`
+reach into plumbing that is expected to change; `pytest -m 'not internals'` is the suite a
+refactor must pass unchanged.
 
 **End-to-end tests** (`tests/test_pump_e2e.py`) run `pump()` over real HTTP against a local
 stub inference server (`tests/stub_server.py`: stdlib asyncio, keep-alive HTTP/1.1, serves

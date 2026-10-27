@@ -10,6 +10,7 @@ import asyncio
 import threading
 import time
 
+import pytest
 from stub_server import StubLimiter
 
 from saturate import AdaptiveLimiter, Auto, Fixed, Stats, through
@@ -23,6 +24,7 @@ def tick(lim: AdaptiveLimiter, dt: float = 1.0) -> dict:
     return lim.ticks[-1]
 
 
+@pytest.mark.internals
 def test_idle_limiter_with_a_trace_of_source_wait_is_not_input_bound():
     lim = AdaptiveLimiter(window=Fixed(4))
     lim.note_source_wait(1e-6)
@@ -31,6 +33,7 @@ def test_idle_limiter_with_a_trace_of_source_wait_is_not_input_bound():
     assert bound_by_counts(lim.ticks) == {}
 
 
+@pytest.mark.internals
 def test_prep_time_is_measured_and_named_when_the_window_sits_empty():
     lim = AdaptiveLimiter(window=Fixed(8))
     lim.note_prep(0.3)
@@ -43,6 +46,7 @@ def test_prep_time_is_measured_and_named_when_the_window_sits_empty():
     assert (nxt["prep_s"], nxt["prep_n"]) == (0.0, 0)  # the accumulators reset every tick
 
 
+@pytest.mark.internals
 def test_source_wait_names_the_source_when_it_takes_a_quarter_of_the_tick():
     lim = AdaptiveLimiter(window=Fixed(8))
     lim.note_source_wait(0.2)
@@ -53,6 +57,7 @@ def test_source_wait_names_the_source_when_it_takes_a_quarter_of_the_tick():
     assert (rec["bound_by"], rec["source_s"], rec["prep_s"]) == ("source", 0.26, 0.25)
 
 
+@pytest.mark.internals
 def test_full_window_or_dominant_admission_wait_names_the_engine():
     lim = AdaptiveLimiter(window=Fixed(2))
 
@@ -71,6 +76,7 @@ def test_full_window_or_dominant_admission_wait_names_the_engine():
     assert bound_by_counts(lim.ticks) == {"engine": 2}
 
 
+@pytest.mark.internals
 def test_on_loop_prep_that_eats_half_the_tick_is_prep_bound_but_not_input_bound():
     """to_request on the event loop blocks it: slots stay held because responses are not
     read, so the window looks full while the engine idles. Loop time names the culprit —
@@ -98,6 +104,7 @@ def test_on_loop_prep_that_eats_half_the_tick_is_prep_bound_but_not_input_bound(
     assert four["bound_by"] == "engine"
 
 
+@pytest.mark.internals
 def test_blocked_loop_with_a_full_window_reads_loop():
     """A slow parse or a synchronous sink flush blocks the loop exactly like on-loop
     to_request; the tick is late by that much, and the verdict says so."""
@@ -116,6 +123,7 @@ def test_blocked_loop_with_a_full_window_reads_loop():
     assert on_time["bound_by"] == "engine"
 
 
+@pytest.mark.internals
 def test_full_window_with_a_high_engine_queue_still_steps_down_under_on_loop_prep():
     """The `prep` verdict with a full window is not input-bound evidence: `Auto` must still
     see the queue and cut, not answer hold:input_bound."""
@@ -154,6 +162,7 @@ def test_stats_carry_ticks_per_verdict():
     assert bound_by_counts(ticks) == {"engine": 2, "prep": 1, "loop": 1}
 
 
+@pytest.mark.internals
 def test_tick_record_carries_the_verdict_and_stage_times():
     rec = tick_record(1.0, 8, 2, None, 0, 3, True, 10.0, "hold", bound_by="prep",
                       source_s=0.0123456, prep_s=0.5, prep_n=7, prep_workers=2, loop_lag_s=0.25)
@@ -205,6 +214,7 @@ class _EchoClient:
         return {"req": request}, None
 
 
+@pytest.mark.internals
 def test_prepare_workers_run_to_request_in_threads_and_errors_stay_row_errors():
     main = threading.get_ident()
     seen_threads = set()
@@ -231,6 +241,7 @@ def test_prepare_workers_run_to_request_in_threads_and_errors_stay_row_errors():
     assert {d.out["n"] for d in done if d.out} == {0, 1, 2, 4, 5, 6, 7}
 
 
+@pytest.mark.internals
 def test_a_limiter_without_prep_accounting_still_gets_every_row():
     """The embedder seam: a limiter that predates note_prep/prep_workers is not an error row."""
 

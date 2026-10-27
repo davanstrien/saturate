@@ -152,7 +152,7 @@ def test_full_window_with_a_high_engine_queue_still_steps_down_under_on_loop_pre
     lim = asyncio.run(go())
     rec = lim.ticks[-1]
     assert (rec["bound_by"], rec["input_bound"]) == ("prep", False)
-    assert rec["reason"] == "cut:queue" and lim.window.limit < 4
+    assert rec["reason"] == "cut:queue" and lim.limit < 4
 
 
 def test_stats_carry_ticks_per_verdict():
@@ -247,7 +247,7 @@ def test_a_limiter_without_prep_accounting_still_gets_every_row():
     """The embedder seam: a limiter that predates note_prep/prep_workers is not an error row."""
 
     class Bare:
-        window = type("W", (), {"limit": 4})()
+        limit = 4
 
         def note_source_wait(self, s):
             pass

@@ -2221,6 +2221,7 @@ name = "saturate"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "fsspec" },
     { name = "httpx2", version = "2.14.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "httpx2", version = "2.16.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -2249,6 +2250,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.15.1" },
     { name = "datasets", marker = "extra == 'hf'", specifier = ">=5.0" },
     { name = "fsspec", specifier = ">=2024.3" },
     { name = "httpx2", specifier = ">=2.9" },

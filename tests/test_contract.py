@@ -690,6 +690,143 @@ def test_the_controller_hears_backpressure_while_the_row_is_still_retrying(stub)
     assert run_checked(go)
 
 
+class Sequence:
+    """A controller that starts at `initial`, then asks for each limit in turn, then holds."""
+
+    last_reason = "test"
+
+    def __init__(self, initial: int, limits: list[int]):
+        self.initial, self.limits = initial, list(limits)
+
+    def decide(self, obs, limit):
+        return self.limits.pop(0) if self.limits else limit
+
+
+def test_a_cancellation_right_after_an_immediate_admission_leaks_no_slot():
+    """A task admitted at once and cancelled at its next await must give the slot back.
+    anyio <= 4.15.1 released the wrong borrower on this path (Codex review of #51)."""
+
+    async def go():
+        async with AdaptiveLimiter(Fixed(2)) as limiter:
+            async def hold():
+                async with limiter.slot():
+                    await asyncio.sleep(10)
+
+            task = asyncio.ensure_future(hold())
+            asyncio.get_running_loop().call_soon(task.cancel)  # lands on the first checkpoint
+            results = await asyncio.gather(task, return_exceptions=True)
+            assert isinstance(results[0], asyncio.CancelledError), results
+            assert limiter.inflight == 0
+            async with limiter.slot(), limiter.slot():  # both slots are usable again
+                assert limiter.inflight == 2
+
+    run_checked(go)
+
+
+def test_growing_after_a_shrink_admits_only_up_to_the_new_limit():
+    """Four held at limit 4; shrink to 2, then grow to 3: three would still be too many with
+    four in flight, so the queued waiter stays queued (anyio 4.10 admitted it)."""
+    ticks: list[dict] = []
+
+    async def go():
+        async with AdaptiveLimiter(Sequence(4, [2, 3]), on_tick=ticks.append) as limiter:
+            holders = [limiter.slot() for _ in range(4)]
+            for slot in holders:
+                await slot.__aenter__()
+            queued = limiter.slot()
+            waiter = asyncio.ensure_future(queued.acquire())
+            await until(lambda: any(t["limit"] == 3 for t in ticks), "the grow to 3")
+            await asyncio.sleep(0.05)
+            assert not waiter.done() and limiter.inflight == 4
+            for slot in holders:
+                await slot.__aexit__(None, None, None)
+            await asyncio.wait_for(waiter, 2.0)
+            queued.release()
+            assert limiter.inflight == 0
+
+    run_checked(go)
+
+
+def test_a_release_and_immediate_reentry_does_not_jump_a_queued_waiter():
+    """At limit 1 with a waiter queued, a holder that leaves and asks again in the same step
+    (no await between) goes behind the waiter: never two holders at limit 1 (anyio 4.10 handed
+    the freed token to both)."""
+
+    async def go():
+        async with AdaptiveLimiter(Fixed(1)) as limiter:
+            first = limiter.slot()
+            await first.__aenter__()
+            queued = limiter.slot()
+            waiter = asyncio.ensure_future(queued.acquire())
+            await until(lambda: limiter.inflight == 1 and not waiter.done(), "the waiter queued")
+            await asyncio.sleep(0.01)
+            again_slot = limiter.slot()
+
+            async def leave_and_ask_again():
+                await first.__aexit__(None, None, None)  # frees the token: the waiter's turn...
+                await again_slot.__aenter__()  # ...asked for again before the waiter has run
+
+            again = asyncio.ensure_future(leave_and_ask_again())
+            await asyncio.sleep(0.05)
+            assert limiter.inflight == 1, limiter.inflight
+            assert waiter.done() and not again.done()
+            again.cancel()
+            await asyncio.gather(again, return_exceptions=True)
+            queued.release()
+            assert limiter.inflight == 0
+
+    run_checked(go)
+
+
+def test_one_task_may_hold_several_slots_and_another_may_release_them():
+    """Slots are the borrowers, not tasks: one task can hold two, and a slot acquired in one task
+    can be released in another (the hand-off from an admission task to a worker)."""
+
+    async def go():
+        async with AdaptiveLimiter(Fixed(3)) as limiter:
+            first, second = limiter.slot(), limiter.slot()
+            await first.acquire()
+            await second.acquire()
+            assert limiter.inflight == 2
+            done = asyncio.get_running_loop().create_future()
+
+            async def worker():
+                second.release()  # another task gives it back
+                done.set_result(None)
+
+            await asyncio.ensure_future(worker())
+            await done
+            assert limiter.inflight == 1
+            first.release()
+            assert limiter.inflight == 0
+
+    run_checked(go)
+
+
+def test_a_slot_is_entered_once():
+    async def go():
+        async with AdaptiveLimiter(Fixed(1)) as limiter:
+            slot = limiter.slot()
+            async with slot:  # held: entering it again raises
+                with pytest.raises(RuntimeError, match="entered once"):
+                    await slot.__aenter__()
+            assert limiter.inflight == 0
+
+            holder, queued = limiter.slot(), limiter.slot()
+            await holder.acquire()
+            first_wait = asyncio.ensure_future(queued.acquire())
+            await until(lambda: not first_wait.done(), "the slot queued")
+            await asyncio.sleep(0.01)
+            with pytest.raises(RuntimeError, match="entered once"):  # queued: a second wait raises
+                await queued.acquire()
+            holder.release()
+            await asyncio.wait_for(first_wait, 2.0)  # the first wait was not stranded
+            queued.release()
+            assert limiter.inflight == 0
+
+    run_checked(go)
+
+
 class CountingClient(httpx.AsyncClient):
     """Counts the breaker's probes in flight on the client side. The stub's own count would
     also include a cancelled probe the server is still answering, which the client has

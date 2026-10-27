@@ -139,6 +139,8 @@ def test_a_closed_client_refuses_requests():
 
 
 def test_the_environment_proxy_applies_to_remote_hosts_only(monkeypatch):
+    for name in ("ALL_PROXY", "all_proxy", "https_proxy", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
     monkeypatch.setenv("NO_PROXY", "internal.example")
     http.environment_proxy.cache_clear()
@@ -149,6 +151,13 @@ def test_the_environment_proxy_applies_to_remote_hosts_only(monkeypatch):
         assert client._proxy_for("https://127.0.0.1:8000/v1") is None
         assert client._proxy_for("https://internal.example/v1") is None
         assert HttpClient(proxy=False)._proxy_for("https://api.example/v1") is None
+        monkeypatch.setenv("NO_PROXY", "api.example:8443")
+        http.environment_proxy.cache_clear()
+        assert client._proxy_for("https://api.example:8443/v1") is None  # NO_PROXY with a port
+        monkeypatch.delenv("HTTPS_PROXY")
+        monkeypatch.setenv("ALL_PROXY", "http://all.example:3128")
+        http.environment_proxy.cache_clear()
+        assert client._proxy_for("https://api.example/v1") == "http://all.example:3128"
         assert HttpClient(proxy="http://mine:1")._proxy_for("http://localhost/v1") == "http://mine:1"
     finally:
         http.environment_proxy.cache_clear()
@@ -161,7 +170,9 @@ def test_a_multipart_form_carries_its_fields_and_files():
 
     async def go():
         async with RawServer(ok) as server, HttpClient() as client:
-            form = multipart({"model": "m"}, {"file": ("page.png", io.BytesIO(b"PNGDATA"), "image/png")})
+            image = io.BytesIO()
+            image.write(b"PNGDATA")  # left at its end, as after encoding an image into it
+            form = multipart({"model": "m"}, {"file": ("page.png", image, "image/png")})
             await client.post(f"{server.url}/v1/upload", form=form)
             return server.received[0]
 
@@ -179,3 +190,37 @@ def test_a_boot_check_reads_an_error_status_as_a_reply():
             return await asyncio.to_thread(_get, f"{server.url}/health", 5)
 
     assert run(go()).status_code == 404
+
+
+def test_a_redirect_is_the_answer_not_followed():
+    """A 3xx reaches the retry ladder, which rejects it; following it could turn a POST into a
+    GET whose reply would be taken as the result."""
+    async def moved(writer):
+        writer.write(b"HTTP/1.1 302 Found\r\nLocation: /elsewhere\r\nContent-Length: 0\r\n\r\n")
+        await writer.drain()
+
+    async def go():
+        async with RawServer(moved) as server, HttpClient() as client:
+            reply = await client.post(f"{server.url}/v1/chat/completions", json={})
+            return reply.status_code, server.requests
+
+    assert run(go()) == (302, 1)
+
+
+def test_a_server_that_stops_reading_an_upload_hits_the_total_limit():
+    """aiohttp times reading the reply only after the body is sent; a server that never reads
+    the body is stopped by the total limit (pool + write + read)."""
+    async def never_reads(reader, writer):
+        await asyncio.sleep(1.5)  # longer than the 0.6 s total
+        writer.close()
+
+    async def go():
+        server = await asyncio.start_server(never_reads, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        async with server, HttpClient() as client:
+            limits = Timeouts(read=0.2, connect=1.0, pool=0.2, write=0.2)
+            with pytest.raises(Timeout):
+                await asyncio.wait_for(client.post(f"http://127.0.0.1:{port}/v1/upload",
+                                                   json={"x": "a" * 50_000_000}, timeouts=limits), 3.0)
+
+    run(go())

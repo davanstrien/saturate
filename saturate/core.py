@@ -308,11 +308,10 @@ class AdaptiveClient:
         # so by default it grows with the read timeout (300 s floor: 3600 s at the default 1800)
         self.retry_budget_s = (retry_budget_s if retry_budget_s is not None
                                else max(transport.RETRY_BUDGET_S, 2 * read_timeout))
-        unknown = set(timeouts or {}) - {"connect", "pool"}
+        unknown = set(timeouts or {}) - {"connect", "write", "pool"}
         if unknown:
             raise ValueError(f"timeouts: unknown phase(s) {sorted(unknown)}; the read timeout is "
-                             "read_timeout=, the others are 'connect' and 'pool' (there is no write "
-                             "timeout: a retry's wall-clock is capped by the row's budget)")
+                             "read_timeout=, the others are 'connect', 'write' and 'pool'")
         self._timeouts = Timeouts(read=read_timeout, **(timeouts or {}))
         self._headers, self._proxy = headers or {}, proxy
         self._signal_source, self._window, self._on_tick = signal_source, window, on_tick

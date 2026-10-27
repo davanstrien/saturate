@@ -76,7 +76,7 @@ def test_retry_attempts_get_budget_capped_timeouts(monkeypatch):
         Breaker(), _Observed()))
     assert body is None and "500" in err
     assert client.sent[0] == "absent"  # first attempt: client default window
-    assert all(max(t.connect, t.read, t.pool) <= 1.0 for t in client.sent[1:])
+    assert all(max(t.connect, t.read, t.write, t.pool) <= 1.0 for t in client.sent[1:])
     assert len(client.sent) >= 2  # it did retry, with capped windows
 
 
@@ -85,12 +85,12 @@ def test_a_retry_keeps_the_configured_phase_timeouts_under_its_budget(monkeypatc
     """A retry's timeout caps each phase at the remaining budget; it does not replace a short
     connect or pool timeout with the whole budget (up to an hour by default)."""
     monkeypatch.setattr(transport, "BACKOFF_BASE_S", 0.01)
-    configured = Timeouts(read=1800.0, connect=1.5, pool=7.0)
+    configured = Timeouts(read=1800.0, connect=1.5, pool=7.0, write=2.0)
     client = _Client(_Resp(500), timeouts=configured)
     asyncio.run(call_endpoint(client, "http://x", make_json_request("/chat/completions", {}),
                               Breaker(), _Observed(), budget_s=1000.0))
     retry = client.sent[1]
-    assert (retry.connect, retry.pool) == (1.5, 7.0)
+    assert (retry.connect, retry.write, retry.pool) == (1.5, 2.0, 7.0)
     assert 990.0 < retry.read <= 1000.0  # the 1800 s read window, capped to what is left
 
 
@@ -104,7 +104,7 @@ def test_no_timeout_floor_below_budget(monkeypatch):
         client, "http://x", make_json_request("/chat/completions", {}),
         Breaker(), _Observed()))
     assert body is None
-    assert all(max(t.connect, t.read, t.pool) <= 0.05 for t in client.sent[1:])
+    assert all(max(t.connect, t.read, t.write, t.pool) <= 0.05 for t in client.sent[1:])
 
 
 @pytest.mark.internals

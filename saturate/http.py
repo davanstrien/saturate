@@ -40,11 +40,14 @@ class Timeouts:
 
     `read` is the longest wait for the next part of the reply, so a long generation is one long
     wait for its first byte. `connect` is opening a connection. `pool` is the whole wait for a
-    connection to send on: a free one from the pool, or a new one opened."""
+    connection to send on: a free one from the pool, or a new one opened. `write` is sending the
+    request body; aiohttp cannot time sending on its own, so it is enforced as part of the
+    request's total limit, pool + write + read, which also means no request waits forever."""
 
     read: float | None = 1800.0
     connect: float | None = 30.0
     pool: float | None = 30.0
+    write: float | None = 30.0
 
     def capped(self, cap: float) -> Timeouts:
         """Each phase limited to `cap` seconds, a phase without a limit included."""
@@ -52,10 +55,13 @@ class Timeouts:
         def phase(limit: float | None) -> float:
             return cap if limit is None else min(limit, cap)
 
-        return Timeouts(read=phase(self.read), connect=phase(self.connect), pool=phase(self.pool))
+        return Timeouts(read=phase(self.read), connect=phase(self.connect), pool=phase(self.pool),
+                        write=phase(self.write))
 
     def for_aiohttp(self) -> aiohttp.ClientTimeout:
-        return aiohttp.ClientTimeout(total=None, connect=self.pool, sock_connect=self.connect,
+        limits = [limit for limit in (self.pool, self.write, self.read) if limit is not None]
+        total = sum(limits) if len(limits) == 3 else None  # a phase without a limit: no total
+        return aiohttp.ClientTimeout(total=total, connect=self.pool, sock_connect=self.connect,
                                      sock_read=self.read)
 
 
@@ -121,8 +127,9 @@ class HttpClient:
         session = self._open()
         limits = (timeouts or self.timeouts).for_aiohttp()
         try:
+            # no redirects: a 3xx is the server's answer, which the retry ladder rejects as poison
             async with session.request(method, url, timeout=limits, headers=headers,
-                                       proxy=self._proxy_for(url), **body) as r:
+                                       proxy=self._proxy_for(url), allow_redirects=False, **body) as r:
                 return Reply(r.status, r.headers, await r.read())
         except aiohttp.InvalidURL:
             raise  # a caller's mistake, not the server's
@@ -148,28 +155,33 @@ class HttpClient:
         if isinstance(self._proxy, str):
             return self._proxy
         parts = urlsplit(url)
-        return environment_proxy(parts.scheme, parts.hostname or "")
+        return environment_proxy(parts.scheme, parts.hostname or "", parts.port)
 
 
 @functools.cache
-def environment_proxy(scheme: str, host: str) -> str | None:
-    """The proxy the environment sets for `host`, or None (always None for localhost)."""
-    if host in ("localhost", "127.0.0.1", "::1") or urllib.request.proxy_bypass(host):
+def environment_proxy(scheme: str, host: str, port: int | None = None) -> str | None:
+    """The proxy the environment sets for this host and port (the scheme's proxy, else
+    ALL_PROXY), or None: always None for localhost, and None when NO_PROXY names the host."""
+    if host in ("localhost", "127.0.0.1", "::1"):
         return None
-    return urllib.request.getproxies().get(scheme)
+    if urllib.request.proxy_bypass(host if port is None else f"{host}:{port}"):
+        return None
+    proxies = urllib.request.getproxies()
+    return proxies.get(scheme) or proxies.get("all")
 
 
 def multipart(data: Mapping | None, files: Mapping) -> aiohttp.FormData:
     """Form fields and files as one multipart body. A file is a file object or a
-    (filename, file[, content type]) tuple."""
+    (filename, file[, content type]) tuple. A file object is sent from its start, wherever it was
+    left (a BytesIO just written to sits at its end)."""
     form = aiohttp.FormData()
     for name, value in (data or {}).items():
         form.add_field(name, str(value))
     for name, value in files.items():
-        if isinstance(value, tuple):
-            filename, fileobj, *content_type = value
-            form.add_field(name, fileobj, filename=filename,
-                           content_type=content_type[0] if content_type else None)
-        else:
-            form.add_field(name, value, filename=getattr(value, "name", name))
+        filename, fileobj, *content_type = value if isinstance(value, tuple) else (
+            getattr(value, "name", name), value)
+        if hasattr(fileobj, "seek"):
+            fileobj.seek(0)
+        form.add_field(name, fileobj, filename=filename,
+                       content_type=content_type[0] if content_type else None)
     return form

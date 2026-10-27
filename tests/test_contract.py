@@ -943,10 +943,9 @@ def test_timeouts_reach_the_http_client_and_unknown_phases_are_refused():
             return http_client_timeouts(client)
 
     timeout = run_checked(go)
-    assert (timeout.connect, timeout.pool, timeout.read) == (1.5, 7.0, 99.0)
-    for phase in ("read", "write"):  # read has its own parameter; aiohttp has no write timeout
-        with pytest.raises(ValueError, match="unknown phase"):
-            AdaptiveClient("http://127.0.0.1:1/v1", timeouts={phase: 5.0})
+    assert (timeout.connect, timeout.write, timeout.pool, timeout.read) == (1.5, 30.0, 7.0, 99.0)
+    with pytest.raises(ValueError, match="unknown phase"):
+        AdaptiveClient("http://127.0.0.1:1/v1", timeouts={"read": 5.0})
 
 
 def test_a_resume_check_never_creates_the_output(tmp_path):

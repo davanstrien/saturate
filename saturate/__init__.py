@@ -138,8 +138,9 @@ def pump(
         can outlive it while the run waits for the server. None (default) = max(300, 2 *
         read_timeout): a retry must be able to wait as long as the first attempt did. Each
         retry's phase timeouts are capped to what is left of it.
-    timeouts: the other HTTP phases, "connect" and "pool", in seconds (30 each by default).
-        "pool" is the whole wait for a connection to send on, opening a new one included.
+    timeouts: the other HTTP phases, any of {"connect", "write", "pool"} in seconds (30 each by
+        default). "pool" is the whole wait for a connection to send on, opening a new one
+        included. A request's total limit is pool + write + read_timeout.
     proxy: None (default) uses the proxy the environment sets for the endpoint's host
         (HTTPS_PROXY, NO_PROXY; never for localhost); False uses none; a URL uses that proxy.
     route: path appended to `endpoint` when to_request returns a plain dict.

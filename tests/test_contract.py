@@ -518,6 +518,35 @@ def test_the_default_retry_budget_holds_a_retry_of_a_slow_request(stub, tmp_path
     assert attempts == (2 if lands else 1)
 
 
+def test_a_row_whose_attempts_fail_differently_keeps_the_first_failure(stub, tmp_path, scaled_retry_budget):
+    """The first failure is often the root cause (a 500 from the engine) and the last only what
+    the retries ran into (a 400 once the server was restarted with other limits)."""
+    attempts = 0
+
+    def status(request):
+        nonlocal attempts
+        attempts += 1
+        return 503 if attempts == 1 else 400
+
+    stub.status_for = status
+    stats = pump([{"text": "row 0"}], default_to_request, default_parse, endpoint=stub.endpoint,
+                 output=str(tmp_path), window=Fixed(1), retry_budget_s=10.0, fail_fast=0)
+    assert stats.rows_failed == 1
+    (error,) = [e for e in pq.read_table(next(tmp_path.glob("part-*.parquet")))["error"].to_pylist() if e]
+    assert error.startswith("http 400") and "(first attempt: http 503" in error
+
+
+def test_a_response_with_malformed_usage_lands_its_row(stub, tmp_path):
+    """A server that sends null token counts: the row's output is fine, so it lands; the counts
+    are taken as 0 in the stats."""
+    stub.raw_for = lambda request: (b'{"choices": [{"message": {"content": "hi"}}], '
+                                    b'"usage": {"prompt_tokens": null, "completion_tokens": 3}}')
+    stats = pump([{"text": "row 0"}], default_to_request, default_parse, endpoint=stub.endpoint,
+                 output=str(tmp_path), window=Fixed(1), fail_fast=0)
+    assert (stats.rows_processed, stats.rows_failed) == (1, 0)
+    assert (stats.prompt_tokens, stats.completion_tokens) == (0, 3)
+
+
 def test_timeouts_reach_the_http_client_and_unknown_phases_are_refused():
     async def go():
         async with AdaptiveClient("http://127.0.0.1:1/v1", signal_source="none", read_timeout=99.0,

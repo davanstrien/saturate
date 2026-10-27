@@ -26,10 +26,16 @@ from saturate.sink import FileSink, ParquetSink, as_sink, drain, read_output
 from saturate.source import content_id, prepare_ahead, shard_select, skip_done, stream
 from saturate.sources import bucket_rows, dataset_rows
 from saturate.telemetry import advise, advise_input, bound_by_counts, cut_reasons
-from saturate.transport import FatalTransportError, Request, make_json_request, make_multipart_request
+from saturate.transport import (
+    Attempt,
+    FatalTransportError,
+    Request,
+    make_json_request,
+    make_multipart_request,
+)
 
 __all__ = [
-    "pump", "Stats", "Fixed", "Auto", "Obs", "Engine", "wait_for_health",
+    "pump", "Stats", "Fixed", "Auto", "Obs", "Attempt", "Engine", "wait_for_health",
     "Request", "make_json_request", "make_multipart_request", "existing_ids",
     "AdaptiveClient", "AdaptiveLimiter", "Done", "through", "stream", "skip_done",
     "drain", "read_output", "ParquetSink", "FileSink", "shard_select", "content_id", "prepare_ahead",
@@ -215,9 +221,7 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
         await writer  # never two writers on one file
     stats.elapsed_s = round(time.monotonic() - t0, 2)
     stats.final_limit = limiter.window.limit
-    # retries since the last tick have not been folded into the total yet; an embedder's own
-    # limiter may count none of this
-    stats.retries = getattr(limiter, "retries_total", 0) + getattr(limiter, "events", {}).get("retries", 0)
+    stats.retries = getattr(limiter, "retries_total", 0)  # an embedder's own limiter may count none
     stats.bound_by = bound_by_counts(limiter.ticks)
     stats.input_bound = stats.bound_by.get("source", 0) + stats.bound_by.get("prep", 0) > 0
     stats.cut_reasons = cut_reasons(limiter.ticks)

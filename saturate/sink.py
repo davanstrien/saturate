@@ -26,6 +26,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from saturate.transport import usage_tokens
+
 
 def _log(msg: str) -> None:
     print(f"[pump] {msg}", file=sys.stderr, flush=True)
@@ -659,8 +661,9 @@ def _record(done, probe, stats) -> dict:
         except UNSTORABLE as e:
             rec = _error_row(done.id, e)
     # tokens were spent even when the sink rejects the output
-    stats.prompt_tokens += done.usage.get("prompt_tokens", 0)
-    stats.completion_tokens += done.usage.get("completion_tokens", 0)
+    prompt, completion = usage_tokens({"usage": done.usage})
+    stats.prompt_tokens += prompt
+    stats.completion_tokens += completion
     if rec["error"] is None:
         stats.rows_processed += 1
     else:

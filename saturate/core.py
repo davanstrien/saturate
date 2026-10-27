@@ -29,11 +29,21 @@ from saturate import transport
 from saturate.controller import TICK_S, Auto, Fixed, Obs
 from saturate.signals import HttpScrape, Null
 from saturate.telemetry import tick_record
-from saturate.transport import Breaker, FatalTransportError, Request, call_endpoint, coerce_request
+from saturate.transport import Attempt, Breaker, FatalTransportError, Request, call_endpoint, coerce_request
 from saturate.window import Window
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
+class _TickCounts:
+    """What the attempts reported since the last tick."""
+
+    successes: int = 0
+    backpressure: int = 0  # rows, not attempts: each row reports its pressure once
+    retries: int = 0
+    latencies: list[float] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass(slots=True)
 class Done:
     """One completed row: out is the parse result on success, None on error."""
 
@@ -85,7 +95,7 @@ class AdaptiveLimiter:
         self.signals = signals or Null()
         self.on_tick = on_tick
         self.window = Window(getattr(self.controller, "initial", 16))
-        self.events = {"backpressure": 0, "successes": 0, "retries": 0, "latencies": []}
+        self._counts = _TickCounts()
         self.retries_total = 0  # retry attempts over the run (backpressure counts rows, not attempts)
         self.ticks: list[dict] = []
         self.tokens_total = 0
@@ -101,20 +111,23 @@ class AdaptiveLimiter:
     def slot(self) -> _Slot:
         return _Slot(self)
 
-    def observe(self, ok: bool, tokens: int = 0, rate_limited: bool = False,
-                latency_s: float | None = None) -> None:
-        """Outcome feedback for embedders driving their own transport. `latency_s` is the
-        duration of the successful attempt alone (no retries, backoff or breaker waits).
-        Report `rate_limited` at most once per row, even across its retries: the controller
-        cuts on the share of rows under pressure, and per-attempt reports let one row that
-        always fails cut the window on every retry."""
-        if ok:
-            self.events["successes"] += 1
-            self.tokens_total += tokens
-            if latency_s is not None:
-                self.events["latencies"].append(latency_s)
-        if rate_limited:
-            self.events["backpressure"] += 1
+    def observe(self, attempt: Attempt) -> None:
+        """The one way outcomes reach the controller: AdaptiveClient's transport calls it after
+        every attempt, and an embedder driving its own transport does the same. Report each
+        attempt as it ends, not when the row is done, and set `pressure` at most once per row,
+        even across its retries: the controller cuts on the share of rows under pressure, and
+        per-attempt pressure would let one row that always fails cut the window on every retry."""
+        counts = self._counts
+        if attempt.ok:
+            counts.successes += 1
+            self.tokens_total += attempt.tokens
+            if attempt.latency_s is not None:
+                counts.latencies.append(attempt.latency_s)
+        if attempt.pressure:
+            counts.backpressure += 1
+        if attempt.retry:
+            counts.retries += 1
+            self.retries_total += 1
 
     def note_source_wait(self, seconds: float) -> None:
         """Time the source iterator took to yield a row."""
@@ -186,10 +199,12 @@ class AdaptiveLimiter:
             await self._tick()
 
     async def _tick(self):
-        self._latencies.extend(self.events["latencies"])
-        self.events["latencies"].clear()
         t_scrape = time.monotonic()
         gauges = await self.signals.read()
+        # everything since the last tick, read together with no await in between: reports that
+        # arrived during the scrape count in this decision, and a cancelled scrape loses none
+        counts, self._counts = self._counts, _TickCounts()
+        self._latencies.extend(counts.latencies)
         now = time.monotonic()  # actual elapsed, not TICK_S: scrape latency skews the rate
         dt = now - self._t_last
         tok_s = (self.tokens_total - self._last_tokens) / dt if dt > 0 else 0.0
@@ -203,23 +218,21 @@ class AdaptiveLimiter:
         observable = self.window.inflight > 0 and self.tokens_total > 0
         latency_s = self.latency_s
         obs = Obs(waiting=g.get("waiting"), running=g.get("running"),
-                  inflight=self.window.inflight, backpressure=self.events["backpressure"],
-                  successes=self.events["successes"], input_bound=input_bound,
+                  inflight=self.window.inflight, backpressure=counts.backpressure,
+                  successes=counts.successes, input_bound=input_bound,
                   kv=g.get("kv"), hits=g.get("hits"), tok_s=tok_s if tok_s or observable else None,
                   preempts=g.get("preempts"), latency_s=latency_s, oldest_s=self.oldest_s,
                   tick_s=dt if dt > 0 else None)
         new_limit = self.controller.decide(obs, self.window.limit)
         rec = tick_record(now - self._t0, self.window.limit, self.window.inflight, gauges,
-                          self.events["backpressure"], self.events["successes"], input_bound, tok_s,
+                          counts.backpressure, counts.successes, input_bound, tok_s,
                           self.controller.last_reason, latency_s, bound_by=bound_by,
                           source_s=self._wait["source"], prep_s=self._wait["prep"],
                           prep_n=self._prep_n, prep_workers=self.prep_workers, loop_lag_s=loop_lag_s,
-                          retries=self.events["retries"])
+                          retries=counts.retries)
         self.ticks.append(rec)
         if self.on_tick:
             self.on_tick(rec)
-        self.retries_total += self.events["retries"]
-        self.events["backpressure"] = self.events["successes"] = self.events["retries"] = 0
         self._wait["source"] = self._wait["acquire"] = self._wait["prep"] = 0.0
         self._prep_n = 0
         await self.window.set_limit(new_limit)
@@ -283,13 +296,8 @@ class AdaptiveClient:
         async with self.limiter.slot():
             if on_admit is not None:
                 on_admit()
-            body, err = await call_endpoint(self._client, self.base, req,
-                                            self.limiter.events, self.breaker, self.retry_budget_s)
-        if err is None:
-            usage = body.get("usage") or {}
-            self.limiter.tokens_total += (usage.get("prompt_tokens", 0)
-                                          + usage.get("completion_tokens", 0))
-        return body, err
+            return await call_endpoint(self._client, self.base, req, self.breaker,
+                                       self.limiter.observe, self.retry_budget_s)
 
 
 def adapt_parse(parse: Callable) -> Callable[[dict, dict], dict]:

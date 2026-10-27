@@ -57,8 +57,14 @@ class _Slot:
         self._entered = False  # a slot is entered once: the limiter keys its waiters by slot
 
     def _check(self):
-        task = self._l._task  # r5: a dead controller fails admissions run-fatally, never row errors
-        if task and task.done() and not task.cancelled() and task.exception() is not None:
+        """A controller loop that has ended while the limiter is open fails admissions for the
+        whole run (never as row errors): crashed, or cancelled by someone other than __aexit__."""
+        task = self._l._task
+        if task is None or not task.done() or self._l._closing:
+            return
+        if task.cancelled():
+            raise FatalTransportError("controller loop was cancelled while the run was going")
+        if task.exception() is not None:
             raise FatalTransportError(f"controller loop died: {task.exception()!r}")
 
     async def __aenter__(self):
@@ -133,6 +139,7 @@ class AdaptiveLimiter:
         self._admitted: dict[_Slot, float] = {}  # admission time of every request in flight
         self._latencies: deque[float] = deque(maxlen=128)  # successful attempts only; recent is what matters
         self._task: asyncio.Task | None = None
+        self._closing = False  # __aexit__ has begun: the controller loop is being stopped
         self._t0 = self._t_last = time.monotonic()
         self._last_tokens = 0
 
@@ -233,17 +240,22 @@ class AdaptiveLimiter:
         return self
 
     async def __aexit__(self, *exc):
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task  # a crashed tick loop surfaces here, never dies silently
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                if not exc or exc[0] is None:
-                    raise
-                print("[pump] controller loop also failed (primary exception wins)",
-                      file=sys.stderr, flush=True)  # r5: never mask the body's exception
+        if self._task is None:
+            return
+        self._closing = True
+        self._task.cancel()
+        # asyncio.wait returns when the loop ends and never raises the loop's own cancellation;
+        # a cancel of the caller itself still propagates from here
+        await asyncio.wait({self._task})
+        if self._task.cancelled():
+            return
+        failure = self._task.exception()  # a crashed tick loop surfaces here, never dies silently
+        if failure is None:
+            return
+        if not exc or exc[0] is None:
+            raise failure
+        print("[pump] controller loop also failed (primary exception wins)",
+              file=sys.stderr, flush=True)  # never mask the body's exception
 
     async def _loop(self):
         while True:

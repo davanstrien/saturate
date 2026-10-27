@@ -1284,3 +1284,44 @@ def test_a_cancelled_prober_hands_over_and_the_waiters_pass_only_when_it_closes(
     breaker, peak = run_checked(go)
     assert breaker.opens == 2  # re-opened by a waiter, not left unattended
     assert peak == 1
+
+
+def test_an_open_breaker_gives_up_on_time_whatever_the_probe_interval(stub):
+    """max_open_s bounds the whole outage: probes and the sleeps between them are cut to it."""
+    import time
+
+    from saturate.http import HttpClient
+    from saturate.transport import Breaker, FatalTransportError
+
+    stub.status_for = lambda request: 503
+
+    async def go():
+        breaker = Breaker(threshold=1, probe_interval=30.0, max_open_s=0.3)
+        breaker.fail()
+        async with HttpClient() as client:
+            t = time.monotonic()
+            with pytest.raises(FatalTransportError):
+                await breaker.gate(client, f"{stub.endpoint}/chat/completions", "stub")
+            return time.monotonic() - t
+
+    assert asyncio.run(go()) < 2.0
+
+
+def test_an_open_breaker_gives_up_on_time_when_a_probe_hangs(stub):
+    import time
+
+    from saturate.http import HttpClient
+    from saturate.transport import Breaker, FatalTransportError
+
+    stub.latency_s = 10.0  # every probe hangs longer than the breaker may stay open
+
+    async def go():
+        breaker = Breaker(threshold=1, probe_interval=0.01, max_open_s=0.3)
+        breaker.fail()
+        async with HttpClient() as client:
+            t = time.monotonic()
+            with pytest.raises(FatalTransportError):
+                await breaker.gate(client, f"{stub.endpoint}/chat/completions", "stub")
+            return time.monotonic() - t
+
+    assert asyncio.run(go()) < 2.0

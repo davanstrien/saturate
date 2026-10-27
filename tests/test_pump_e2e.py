@@ -433,3 +433,48 @@ def test_duplicate_rows_are_named_in_the_log(stub, tmp_path, capsys):
                  output=str(tmp_path), window=Fixed(2))
     assert (stats.rows_processed, stats.rows_deduped) == (1, 4)
     assert "dedup: 4 rows had the id of an earlier row" in capsys.readouterr().err
+
+
+# --- fan-out: shard= selects input (CONTRACT §2) ---------------------------------------------
+
+def test_shard_processes_only_its_own_rows(stub, tmp_path):
+    """pump(shard=(k, n)) labelled output but processed every row: an 8-Job fan-out paid for
+    the whole input 8 times (#19). Each shard must process a disjoint slice, and the slices
+    together must cover the input exactly once."""
+    per_shard = []
+    for rank in range(3):  # one output per shard, so a resume cannot hide an overlap
+        stats = pump(rows(60), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path / str(rank)),
+                     window=Fixed(4), shard=(rank, 3))
+        per_shard.append(existing_ids(str(tmp_path / str(rank))))
+        assert stats.rows_total == stats.rows_processed == len(per_shard[-1])
+    assert stub.requests == 60  # no row paid twice
+    assert len(set.union(*per_shard)) == 60 and sum(len(ids) for ids in per_shard) == 60
+    from saturate import shard_of
+
+    for rank, ids in enumerate(per_shard):
+        assert ids and {shard_of(i, 3) for i in ids} == {rank}
+
+
+def test_rows_sharded_for_another_shard_are_refused(tmp_path):
+    """A source sharded for (1, 4) handed to pump(shard=(2, 4)) would process nothing and
+    look finished: refused before any request."""
+    from saturate import shard_select, stream
+
+    with pytest.raises(ValueError, match="sharded for"):
+        pump(shard_select(stream(rows(8)), 1, 4), to_request, parse, endpoint="http://127.0.0.1:9",
+             output=str(tmp_path), shard=(2, 4))
+
+
+def test_pre_sharded_input_is_taken_as_is(stub, tmp_path):
+    """The escape hatch for a caller who shards the input another way: shard= only labels."""
+    stats = pump(rows(20), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path),
+                 window=Fixed(4), shard=(1, 4), pre_sharded=True)
+    assert stats.rows_processed == 20
+    assert (tmp_path / "completions" / "shard-1.done").exists()
+
+
+def test_invalid_shard_raises(tmp_path):
+    for bad in [(4, 4), (-1, 2), (0, 0)]:
+        with pytest.raises(ValueError, match="shard"):
+            pump(rows(1), to_request, parse, endpoint="http://127.0.0.1:9", output=str(tmp_path),
+                 shard=bad)

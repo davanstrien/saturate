@@ -5,7 +5,8 @@ disk-death lesson: a naive load_dataset killed a Job on disk). Works with any
 iterable of dicts, including a streaming HF `IterableDataset`.
 
 The v1 default id is a content hash (CONTRACT §2): order-independent,
-re-shard-safe, no cleverness.
+re-shard-safe, no cleverness. Fan-out assigns each id to a shard by a hash of
+the id (`shard_of`), never by position.
 """
 
 from __future__ import annotations
@@ -148,10 +149,49 @@ def prepare_ahead(rows: Iterable[tuple[str, dict]], fn: Callable[[dict], dict], 
         pool.shutdown(wait=False, cancel_futures=True)
 
 
-def shard_select(rows: Iterable[tuple[str, dict]], rank: int = 0, world: int = 1,
-                 skip: int = 0) -> Iterator[tuple[str, dict]]:
-    """Strided fan-out assignment over the global stream (CONTRACT §2):
-    keep(idx) = (idx - skip) % world == rank."""
-    for idx, pair in enumerate(rows):
-        if idx >= skip and (idx - skip) % world == rank:
-            yield pair
+def check_shard(shard) -> tuple[int, int]:
+    """`shard` as a validated (rank, world) pair: world >= 1 and 0 <= rank < world."""
+    rank, world = shard
+    if world < 1 or not 0 <= rank < world:
+        raise ValueError(f"shard must be (rank, world) with 0 <= rank < world, got {tuple(shard)!r}")
+    return int(rank), int(world)
+
+
+def shard_of(row_id: str, world: int) -> int:
+    """The shard that owns `row_id` in a fan-out over `world` shards (CONTRACT §2): the first
+    8 bytes of sha1(row_id as UTF-8), read as a big-endian integer, modulo `world`.
+
+    It depends on the id alone, so a row keeps its shard across re-runs, input order, resume
+    filtering and widened inputs, and a source can shard before it reads or decodes a row."""
+    digest = hashlib.sha1(row_id.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % world
+
+
+class ShardedRows:
+    """An (id, row) iterator that holds only the rows of one shard. `shard` is that
+    (rank, world). pump() reads it to skip a second selection, and to refuse rows that were
+    sharded for another shard than the one it runs."""
+
+    def __init__(self, rows: Iterable[tuple[str, dict]], shard: tuple[int, int]):
+        self._rows = iter(rows)
+        self.shard = shard
+
+    def __iter__(self) -> ShardedRows:
+        return self
+
+    def __next__(self) -> tuple[str, dict]:
+        return next(self._rows)
+
+
+def _rows_of_shard(rows: Iterable[tuple[str, dict]], rank: int, world: int) -> Iterator[tuple[str, dict]]:
+    for id_, row in rows:
+        if shard_of(id_, world) == rank:
+            yield id_, row
+
+
+def shard_select(rows: Iterable[tuple[str, dict]], rank: int = 0, world: int = 1) -> ShardedRows:
+    """The (id, row) pairs that belong to shard `rank` of `world`: those with
+    `shard_of(id, world) == rank` (CONTRACT §2). Selecting twice with the same shard keeps
+    the same rows, so a slice can pass through here again without losing any."""
+    rank, world = check_shard((rank, world))
+    return ShardedRows(_rows_of_shard(rows, rank, world), (rank, world))

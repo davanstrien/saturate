@@ -772,6 +772,31 @@ def test_a_release_and_immediate_reentry_does_not_jump_a_queued_waiter():
     run_checked(go)
 
 
+def test_one_task_may_hold_several_slots_and_another_may_release_them():
+    """Slots are the borrowers, not tasks: one task can hold two, and a slot acquired in one task
+    can be released in another (the hand-off from an admission task to a worker)."""
+
+    async def go():
+        async with AdaptiveLimiter(Fixed(3)) as limiter:
+            first, second = limiter.slot(), limiter.slot()
+            await first.acquire()
+            await second.acquire()
+            assert limiter.inflight == 2
+            done = asyncio.get_running_loop().create_future()
+
+            async def worker():
+                second.release()  # another task gives it back
+                done.set_result(None)
+
+            await asyncio.ensure_future(worker())
+            await done
+            assert limiter.inflight == 1
+            first.release()
+            assert limiter.inflight == 0
+
+    run_checked(go)
+
+
 def test_a_slot_is_entered_once():
     async def go():
         async with AdaptiveLimiter(Fixed(2)) as limiter:

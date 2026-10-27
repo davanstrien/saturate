@@ -65,6 +65,14 @@ class _Slot:
             raise FatalTransportError(f"controller loop died: {task.exception()!r}")
 
     async def __aenter__(self):
+        await self.acquire()
+
+    async def __aexit__(self, *exc):
+        self.release()
+
+    async def acquire(self) -> None:
+        """Wait for a free slot. `async with limiter.slot():` calls this and release() for you;
+        call them directly to hand a slot from the task that acquired it to another task."""
         if self._entered:
             raise RuntimeError("a limiter slot is entered once; take a new one with limiter.slot()")
         self._check()  # before queueing on the window...
@@ -88,16 +96,17 @@ class _Slot:
         try:
             self._check()  # ...and after (r6): the controller may have died while we were queued
         except BaseException:
-            self._release()
+            self._give_back()
             raise
         self._l._admitted[self] = admitted
 
-    async def __aexit__(self, *exc):
+    def release(self) -> None:
+        """Give the slot back; any task may call it. Synchronous: no cancellation can interrupt it."""
         self._l._admitted.pop(self, None)  # never in the way of the release: a leaked count wedges admission
-        self._release()
+        self._give_back()
 
-    def _release(self) -> None:
-        self._l._capacity.release_on_behalf_of(self)  # synchronous: no cancellation can interrupt it
+    def _give_back(self) -> None:
+        self._l._capacity.release_on_behalf_of(self)
         self._entered = False
 
 

@@ -733,13 +733,16 @@ def test_growing_after_a_shrink_admits_only_up_to_the_new_limit():
             holders = [limiter.slot() for _ in range(4)]
             for slot in holders:
                 await slot.__aenter__()
-            waiter = asyncio.ensure_future(limiter.slot().__aenter__())
+            queued = limiter.slot()
+            waiter = asyncio.ensure_future(queued.acquire())
             await until(lambda: any(t["limit"] == 3 for t in ticks), "the grow to 3")
             await asyncio.sleep(0.05)
             assert not waiter.done() and limiter.inflight == 4
             for slot in holders:
                 await slot.__aexit__(None, None, None)
             await asyncio.wait_for(waiter, 2.0)
+            queued.release()
+            assert limiter.inflight == 0
 
     run_checked(go)
 
@@ -753,7 +756,8 @@ def test_a_release_and_immediate_reentry_does_not_jump_a_queued_waiter():
         async with AdaptiveLimiter(Fixed(1)) as limiter:
             first = limiter.slot()
             await first.__aenter__()
-            waiter = asyncio.ensure_future(limiter.slot().__aenter__())
+            queued = limiter.slot()
+            waiter = asyncio.ensure_future(queued.acquire())
             await until(lambda: limiter.inflight == 1 and not waiter.done(), "the waiter queued")
             await asyncio.sleep(0.01)
             again_slot = limiter.slot()
@@ -768,6 +772,8 @@ def test_a_release_and_immediate_reentry_does_not_jump_a_queued_waiter():
             assert waiter.done() and not again.done()
             again.cancel()
             await asyncio.gather(again, return_exceptions=True)
+            queued.release()
+            assert limiter.inflight == 0
 
     run_checked(go)
 
@@ -799,11 +805,23 @@ def test_one_task_may_hold_several_slots_and_another_may_release_them():
 
 def test_a_slot_is_entered_once():
     async def go():
-        async with AdaptiveLimiter(Fixed(2)) as limiter:
+        async with AdaptiveLimiter(Fixed(1)) as limiter:
             slot = limiter.slot()
-            async with slot:
+            async with slot:  # held: entering it again raises
                 with pytest.raises(RuntimeError, match="entered once"):
                     await slot.__aenter__()
+            assert limiter.inflight == 0
+
+            holder, queued = limiter.slot(), limiter.slot()
+            await holder.acquire()
+            first_wait = asyncio.ensure_future(queued.acquire())
+            await until(lambda: not first_wait.done(), "the slot queued")
+            await asyncio.sleep(0.01)
+            with pytest.raises(RuntimeError, match="entered once"):  # queued: a second wait raises
+                await queued.acquire()
+            holder.release()
+            await asyncio.wait_for(first_wait, 2.0)  # the first wait was not stranded
+            queued.release()
             assert limiter.inflight == 0
 
     run_checked(go)

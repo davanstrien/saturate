@@ -83,7 +83,7 @@ class _Slot:
         try:
             # A free token is taken without awaiting. anyio <= 4.15.1 releases the wrong borrower
             # when a native asyncio cancellation lands right after an immediate acquisition
-            # (fixed upstream in anyio 9e6b71e, not yet released): never take that path.
+            # (fixed upstream in anyio 9e6b71e, not yet released; removal tracked in #52).
             capacity.acquire_on_behalf_of_nowait(self)
         except anyio.WouldBlock:
             try:

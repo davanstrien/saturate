@@ -1,6 +1,6 @@
 """A local stand-in for an OpenAI-compatible inference server, stdlib only.
 
-Speaks enough HTTP/1.1 (keep-alive, Content-Length bodies) for httpx to treat
+Speaks enough HTTP/1.1 (keep-alive, Content-Length bodies) for an HTTP client to treat
 it as a real endpoint: `POST /v1/chat/completions` answers OpenAI-shaped JSON
 with `usage`, `POST /v1/embeddings` answers an embeddings list, `GET /health`
 answers 200, and `GET /metrics` publishes vLLM-shaped gauges so the scrape path

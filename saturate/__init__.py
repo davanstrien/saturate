@@ -116,6 +116,7 @@ def pump(
     fail_fast: int = 32,
     retry_budget_s: float | None = None,
     timeouts: dict[str, float] | None = None,
+    proxy: str | bool | None = None,
 ) -> Stats:
     """Run every row through the endpoint and land the results; safe to re-run (resumes).
 
@@ -137,9 +138,10 @@ def pump(
         can outlive it while the run waits for the server. None (default) = max(300, 2 *
         read_timeout): a retry must be able to wait as long as the first attempt did. Each
         retry's phase timeouts are capped to what is left of it.
-    timeouts: the other HTTP phases, any of {"connect", "write", "pool"} in seconds (30 each by
-        default). "pool" is the wait for a free connection when more requests are in flight
-        than the client's 1024 connections.
+    timeouts: the other HTTP phases, "connect" and "pool", in seconds (30 each by default).
+        "pool" is the whole wait for a connection to send on, opening a new one included.
+    proxy: None (default) uses the proxy the environment sets for the endpoint's host
+        (HTTPS_PROXY, NO_PROXY; never for localhost); False uses none; a URL uses that proxy.
     route: path appended to `endpoint` when to_request returns a plain dict.
     headers: extra HTTP headers merged over the default User-Agent.
     retry_errors: re-run rows whose stored record carries an error instead of skipping them.
@@ -166,13 +168,13 @@ def pump(
     return asyncio.run(_pump(rows, to_request, parse, endpoint, output, window, shard,
                              flush_every, read_timeout, route, headers, retry_errors,
                              id_key, id_fn, signal_source, schema, prepare_workers,
-                             fail_fast, retry_budget_s, timeouts))
+                             fail_fast, retry_budget_s, timeouts, proxy))
 
 
 async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_every,
                 read_timeout, route, extra_headers, retry_errors, id_key, id_fn,
                 signal_source, schema=None, prepare_workers=0, fail_fast=32,
-                retry_budget_s=None, timeouts=None) -> Stats:
+                retry_budget_s=None, timeouts=None, proxy=None) -> Stats:
     stats = Stats()
     if shard[1] > 1:
         _log(f"shard={tuple(shard)}: labels output only — input must be pre-sharded with "
@@ -212,7 +214,8 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
     async with AdaptiveClient(endpoint, window=window, headers=hdrs,
                               read_timeout=read_timeout,
                               signal_source=signal_source, on_tick=on_tick,
-                              retry_budget_s=retry_budget_s, timeouts=timeouts) as client:
+                              retry_budget_s=retry_budget_s, timeouts=timeouts,
+                              proxy=proxy) as client:
         async with through(client, pending, to_request, parse, route=route,
                            prepare_workers=prepare_workers,
                            fail_fast=0 if retry_errors else fail_fast) as results:

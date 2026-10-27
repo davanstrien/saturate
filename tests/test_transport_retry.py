@@ -5,10 +5,10 @@ never retry (their file objects are consumed — a re-send posts empty bodies)."
 import asyncio
 import time
 
-import httpx2 as httpx
 import pytest
 
 import saturate.transport as transport
+from saturate.http import Timeouts
 from saturate.transport import Breaker, call_endpoint, make_json_request, make_multipart_request
 
 
@@ -35,15 +35,15 @@ class _Observed(list):
 
 
 class _Client:
-    def __init__(self, resp: _Resp, timeout: httpx.Timeout | None = None):
+    def __init__(self, resp: _Resp, timeouts: Timeouts | None = None):
         self.resp = resp
         self.posts = 0
-        self.timeouts: list = []
-        self.timeout = timeout or httpx.Timeout(30.0, read=1800.0)  # what AdaptiveClient configures
+        self.sent: list = []  # each attempt's timeouts argument
+        self.timeouts = timeouts or Timeouts()  # what AdaptiveClient configures
 
-    async def post(self, url, data=None, files=None, json=None, timeout="absent"):
+    async def post(self, url, form=None, json=None, timeouts="absent", headers=None):
         self.posts += 1
-        self.timeouts.append(timeout)
+        self.sent.append(timeouts)
         return self.resp
 
 
@@ -75,9 +75,9 @@ def test_retry_attempts_get_budget_capped_timeouts(monkeypatch):
         client, "http://x", make_json_request("/chat/completions", {}),
         Breaker(), _Observed()))
     assert body is None and "500" in err
-    assert client.timeouts[0] == "absent"  # first attempt: client default window
-    assert all(max(t.connect, t.read, t.write, t.pool) <= 1.0 for t in client.timeouts[1:])
-    assert len(client.timeouts) >= 2  # it did retry, with capped windows
+    assert client.sent[0] == "absent"  # first attempt: client default window
+    assert all(max(t.connect, t.read, t.pool) <= 1.0 for t in client.sent[1:])
+    assert len(client.sent) >= 2  # it did retry, with capped windows
 
 
 @pytest.mark.internals
@@ -85,12 +85,12 @@ def test_a_retry_keeps_the_configured_phase_timeouts_under_its_budget(monkeypatc
     """A retry's timeout caps each phase at the remaining budget; it does not replace a short
     connect or pool timeout with the whole budget (up to an hour by default)."""
     monkeypatch.setattr(transport, "BACKOFF_BASE_S", 0.01)
-    configured = httpx.Timeout(connect=1.5, read=1800.0, write=2.0, pool=7.0)
-    client = _Client(_Resp(500), timeout=configured)
+    configured = Timeouts(read=1800.0, connect=1.5, pool=7.0)
+    client = _Client(_Resp(500), timeouts=configured)
     asyncio.run(call_endpoint(client, "http://x", make_json_request("/chat/completions", {}),
                               Breaker(), _Observed(), budget_s=1000.0))
-    retry = client.timeouts[1]
-    assert (retry.connect, retry.write, retry.pool) == (1.5, 2.0, 7.0)
+    retry = client.sent[1]
+    assert (retry.connect, retry.pool) == (1.5, 7.0)
     assert 990.0 < retry.read <= 1000.0  # the 1800 s read window, capped to what is left
 
 
@@ -104,7 +104,7 @@ def test_no_timeout_floor_below_budget(monkeypatch):
         client, "http://x", make_json_request("/chat/completions", {}),
         Breaker(), _Observed()))
     assert body is None
-    assert all(max(t.connect, t.read, t.write, t.pool) <= 0.05 for t in client.timeouts[1:])
+    assert all(max(t.connect, t.read, t.pool) <= 0.05 for t in client.sent[1:])
 
 
 @pytest.mark.internals
@@ -118,10 +118,12 @@ def test_breaker_open_time_credited_back_to_budget(monkeypatch):
             await asyncio.sleep(0.1)  # longer than the entire budget
 
     class _SeqClient:
+        timeouts = Timeouts()
+
         def __init__(self):
             self.resps = [_Resp(429, {"retry-after": "0"}), _Resp(200)]
 
-        async def post(self, url, data=None, files=None, json=None, timeout="absent"):
+        async def post(self, url, form=None, json=None, timeouts="absent", headers=None):
             r = self.resps.pop(0)
             r.json = lambda: {"ok": True}
             return r
@@ -152,10 +154,12 @@ def test_latency_is_the_successful_attempt_alone():
             return {"ok": True}
 
     class _SlowThenFast:
+        timeouts = Timeouts()
+
         def __init__(self):
             self.posts = 0
 
-        async def post(self, url, data=None, files=None, json=None, timeout="absent"):
+        async def post(self, url, form=None, json=None, timeouts="absent", headers=None):
             self.posts += 1
             if self.posts == 1:
                 await asyncio.sleep(0.05)  # a slow attempt that fails...
@@ -364,7 +368,7 @@ def test_a_retry_cancelled_mid_flight_still_counts():
     import saturate.transport as t
 
     class FailThenHang:
-        timeout = httpx.Timeout(30.0, read=1800.0)
+        timeouts = Timeouts()
 
         def __init__(self):
             self.posts = 0

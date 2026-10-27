@@ -1,9 +1,9 @@
-"""Live checks against a real engine, for one HTTP client: does a run write every row, once?
+"""Live checks against a real engine: does a run write every row, once?
 
     ENGINE_START="vllm serve M --port 8000" python bench/live_checks.py \\
         --endpoint http://127.0.0.1:8000/v1 --model M
 
-Runs four checks and prints one JSON line per check. SATURATE_HTTP_CLIENT picks the client.
+Runs four checks and prints one JSON line per check.
 The engine runs in its own process group, whose id is in ENGINE_PGID_FILE; the restart check
 stops that group and starts ENGINE_START in a new one (an engine's worker processes go with it).
 
@@ -84,8 +84,8 @@ def wait_healthy(endpoint: str, deadline_s: float = 900) -> None:
 def report(check: str, rows: int, t0: float, result: dict, output: str) -> None:
     w = written(output)
     ok = w["rows"] == rows and w["distinct_ids"] == rows and w["error_rows"] == 0 and result.get("exit") == 0
-    print(json.dumps({"check": check, "client": os.environ.get("SATURATE_HTTP_CLIENT", "aiohttp"),
-                      "pass": ok, "wall_s": round(time.time() - t0, 1), **w, **result}), flush=True)
+    record = {"check": check, "pass": ok, "wall_s": round(time.time() - t0, 1), **w, **result}
+    print(json.dumps(record), flush=True)
 
 
 def checks(args) -> None:

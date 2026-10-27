@@ -30,8 +30,8 @@ def test_accept_validator_gates_readiness(monkeypatch):
         def __init__(self, code):
             self.status_code = code
 
-    monkeypatch.setattr(engmod.httpx, "get", lambda *a, **k: R(200))
-    monkeypatch.setattr(engmod.httpx, "post", lambda *a, **k: R(404))
+    monkeypatch.setattr(engmod, "_get", lambda *a, **k: R(200))
+    monkeypatch.setattr(engmod, "_post", lambda *a, **k: R(404))
     with pytest.raises(TimeoutError):  # strict: 404 on the workload route is NOT ready
         wait_for_health("http://x/v1", timeout_s=1, poll_interval=0.05,
                         route="/embeddings", payload={"input": "hi"},

@@ -36,7 +36,6 @@ import threading
 import time
 
 import fsspec
-import httpx2 as httpx
 import pyarrow.parquet as pq
 import pytest
 from fsspec.implementations.memory import MemoryFileSystem
@@ -58,6 +57,7 @@ from saturate import (
     through,
 )
 from saturate.core import Done
+from saturate.http import HttpClient, Timeouts
 from saturate.source import skip_done
 from saturate.transport import Breaker
 from saturate.writer import sink_hooks
@@ -105,11 +105,11 @@ def quick_breaker(monkeypatch):
 
 
 def http_client_closed(client: AdaptiveClient) -> bool:
-    return client._client.is_closed
+    return client._client.closed
 
 
-def http_client_timeout(client: AdaptiveClient) -> httpx.Timeout:
-    return client._client.timeout
+def http_client_timeouts(client: AdaptiveClient) -> Timeouts:
+    return client._client.timeouts
 
 
 @pytest.fixture
@@ -940,12 +940,13 @@ def test_timeouts_reach_the_http_client_and_unknown_phases_are_refused():
     async def go():
         async with AdaptiveClient("http://127.0.0.1:1/v1", signal_source="none", read_timeout=99.0,
                                   timeouts={"connect": 1.5, "pool": 7.0}) as client:
-            return http_client_timeout(client)
+            return http_client_timeouts(client)
 
     timeout = run_checked(go)
-    assert (timeout.connect, timeout.write, timeout.pool, timeout.read) == (1.5, 30.0, 7.0, 99.0)
-    with pytest.raises(ValueError, match="unknown phase"):
-        AdaptiveClient("http://127.0.0.1:1/v1", timeouts={"read": 5.0})
+    assert (timeout.connect, timeout.pool, timeout.read) == (1.5, 7.0, 99.0)
+    for phase in ("read", "write"):  # read has its own parameter; aiohttp has no write timeout
+        with pytest.raises(ValueError, match="unknown phase"):
+            AdaptiveClient("http://127.0.0.1:1/v1", timeouts={phase: 5.0})
 
 
 def test_a_resume_check_never_creates_the_output(tmp_path):
@@ -1218,7 +1219,7 @@ def test_a_slot_is_entered_once():
     run_checked(go)
 
 
-class CountingClient(httpx.AsyncClient):
+class CountingClient(HttpClient):
     """Counts the breaker's probes in flight on the client side. The stub's own count would
     also include a cancelled probe the server is still answering, which the client has
     already dropped."""

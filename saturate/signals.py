@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 import sys
 
-import httpx2 as httpx
+from saturate.http import HttpClient, Timeouts
 
 _PAT = re.compile(
     r"^(?:"
@@ -96,13 +96,16 @@ def _log(msg: str) -> None:
     print(f"[pump] {msg}", file=sys.stderr, flush=True)
 
 
+SCRAPE_TIMEOUTS = Timeouts(read=5.0, connect=5.0, pool=5.0)
+
+
 class HttpScrape:
     """Poll the engine's /metrics. After `max_fails` consecutive failures the
     controller runs blind (metrics are opt-in on SGLang/llama.cpp, and an
     exporter can come up after /health does), but one probe every `retry_every`
     reads keeps the door open; the skipped reads cost no request."""
 
-    def __init__(self, client: httpx.AsyncClient, endpoint: str, max_fails: int = 5,
+    def __init__(self, client: HttpClient, endpoint: str, max_fails: int = 5,
                  retry_every: int = 30):
         base = endpoint.rsplit("/v1", 1)[0]
         self.url = f"{base}/metrics"
@@ -125,7 +128,7 @@ class HttpScrape:
                 return None
             self._skipped = 0
         try:
-            r = await self.client.get(self.url, timeout=5)
+            r = await self.client.get(self.url, timeouts=SCRAPE_TIMEOUTS)
             gauges = parse_gauges(r.text)
         except Exception:
             self._fails += 1

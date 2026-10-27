@@ -14,19 +14,17 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import os
 import statistics
 import sys
 import time
 from collections import deque
 from collections.abc import Callable
-from typing import cast
 
 import anyio
-import httpx2 as httpx
 
-from saturate import aiohttp_client, transport
+from saturate import transport
 from saturate.controller import TICK_S, Auto, Fixed, Obs
+from saturate.http import HttpClient, Timeouts
 from saturate.signals import HttpScrape, Null
 from saturate.telemetry import tick_record
 from saturate.transport import Attempt, Breaker, FatalTransportError, Request, call_endpoint, coerce_request
@@ -303,39 +301,33 @@ class AdaptiveClient:
                  signal_source: str = "auto",
                  on_tick: Callable[[dict], None] | None = None,
                  retry_budget_s: float | None = None,
-                 timeouts: dict[str, float] | None = None):
+                 timeouts: dict[str, float] | None = None,
+                 proxy: str | bool | None = None):
         self.base = endpoint.rstrip("/")
         # a row's attempts share one wall-clock budget; it must hold a retry of a long request,
         # so by default it grows with the read timeout (300 s floor: 3600 s at the default 1800)
         self.retry_budget_s = (retry_budget_s if retry_budget_s is not None
                                else max(transport.RETRY_BUDGET_S, 2 * read_timeout))
-        unknown = set(timeouts or {}) - {"connect", "write", "pool"}
+        unknown = set(timeouts or {}) - {"connect", "pool"}
         if unknown:
             raise ValueError(f"timeouts: unknown phase(s) {sorted(unknown)}; the read timeout is "
-                             "read_timeout=, the others are 'connect', 'write' and 'pool'")
-        self._timeout = httpx.Timeout(read=read_timeout,
-                                      **{"connect": 30.0, "write": 30.0, "pool": 30.0, **(timeouts or {})})
-        self._headers = headers or {}
+                             "read_timeout=, the others are 'connect' and 'pool' (there is no write "
+                             "timeout: a retry's wall-clock is capped by the row's budget)")
+        self._timeouts = Timeouts(read=read_timeout, **(timeouts or {}))
+        self._headers, self._proxy = headers or {}, proxy
         self._signal_source, self._window, self._on_tick = signal_source, window, on_tick
         self.breaker = Breaker()
         self._client, self.limiter = self._build()
 
-    def _build(self) -> tuple[httpx.AsyncClient, AdaptiveLimiter]:
+    def _build(self) -> tuple[HttpClient, AdaptiveLimiter]:
         """A fresh HTTP client and limiter. Built at construction, so neither is ever None; the
         client opens no connection and the limiter starts no tick loop until `async with`."""
-        if os.environ.get("SATURATE_HTTP_CLIENT", "aiohttp") == "aiohttp":  # transport A/B (#55)
-            # prototype: same surface as httpx's client for the A/B; a real swap would type it
-            client = cast(httpx.AsyncClient,
-                          aiohttp_client.AsyncClient(1024, timeout=self._timeout, headers=self._headers))
-        else:
-            client = httpx.AsyncClient(
-                limits=httpx.Limits(max_connections=1024, max_keepalive_connections=1024),
-                timeout=self._timeout, headers=self._headers)
+        client = HttpClient(headers=self._headers, timeouts=self._timeouts, proxy=self._proxy)
         signals = Null() if self._signal_source == "none" else HttpScrape(client, self.base)
         return client, AdaptiveLimiter(self._window, signals=signals, on_tick=self._on_tick)
 
     async def __aenter__(self):
-        if self._client.is_closed:  # entered again after an earlier `async with`: start fresh
+        if self._client.closed:  # entered again after an earlier `async with`: start fresh
             self._client, self.limiter = self._build()
         await self.limiter.__aenter__()
         return self

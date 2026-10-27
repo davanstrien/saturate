@@ -69,7 +69,7 @@ class _FlakyClient:
         self.fail_first = fail_first
         self.calls = 0
 
-    async def get(self, url, timeout=None):
+    async def get(self, url, timeouts=None):
         self.calls += 1
         if self.calls <= self.fail_first:
             raise ConnectionError("metrics not up yet")

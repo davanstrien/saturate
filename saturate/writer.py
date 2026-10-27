@@ -20,7 +20,7 @@ from typing import Protocol
 import anyio
 
 from saturate.core import Done
-from saturate.sink import UNSTORABLE, _error_row
+from saturate.sink import UNSTORABLE, error_row
 from saturate.transport import usage_tokens
 
 WRITER_QUEUE = 256  # finished rows waiting for the writer; a full queue makes drain wait
@@ -266,7 +266,7 @@ def _record(done: Done, probe, stats) -> dict:
         try:  # validate against the sink's ACTUAL schema before buffering —
             probe(rec)  # a bad value must become an error row, not a flush crash
         except UNSTORABLE as e:
-            rec = _error_row(done.id, e)
+            rec = error_row(done.id, e)
     # tokens were spent even when the sink rejects the output
     prompt, completion = usage_tokens({"usage": done.usage})
     stats.prompt_tokens += prompt

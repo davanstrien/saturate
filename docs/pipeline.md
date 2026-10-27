@@ -66,7 +66,9 @@ Finished rows (step 6) are always written. What happens to the others depends on
 | you cancelled (Ctrl-C) | cancelled | written | the cancellation continues |
 
 If two things fail, the first one is the error you see; later ones are logged. A second Ctrl-C
-stops waiting for the final write.
+stops waiting: finished rows not yet handed to the writer are logged as lost, and a write already
+in progress finishes in the background (never half a file). Rows cancelled in flight were still
+work for the engine; the policy trades that for stopping promptly.
 
 ## What gets simpler
 
@@ -147,9 +149,10 @@ holds up exit; an input left behind like that must not be reused (a resume uses 
 the stored ids, as today).
 
 **Output protocol.** A `typing.Protocol` with `existing_ids`, `append` and `flush`; the optional
-features (`probe`, `flush_interval_s`, `rows_demoted`, `begin_run`, `write_telemetry`,
-`write_stats`, `write_marker`, `error_only_ids`, `telemetry_every_ticks`) are read in one function.
-No base class.
+features (`probe`, `flush_interval_s`, `begin_run`, `write_telemetry`, `write_stats`,
+`write_marker`, `telemetry_every_ticks`) are read in one function, `sink_hooks()`. Two counters the
+sink updates as it goes, `rows_demoted` and `error_only_ids`, are read where they are used. No base
+class.
 
 **The one contract-test change.** `test_fatal_lands_every_row_that_completed_before_it` let a row
 finish *after* the fatal error and expected it to be written, but the policy cancels rows in flight

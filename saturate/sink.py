@@ -53,7 +53,7 @@ def _list_parts(fs, root: str) -> list[str]:
 UNSTORABLE = (TypeError, ValueError, OverflowError, pa.ArrowException)
 
 
-def _error_row(id_, exc: BaseException) -> dict:
+def error_row(id_, exc: BaseException) -> dict:
     """The record a row that cannot be stored leaves behind (CONTRACT §4)."""
     return {"id": str(id_), "error": f"parse output not storable: {exc}"}
 
@@ -510,7 +510,7 @@ class ParquetSink:
                 running = (t.schema if running is None else
                            pa.unify_schemas([running, t.schema], promote_options="permissive"))
             except UNSTORABLE as e:
-                self._buf[i] = _error_row(rec.get("id"), e)
+                self._buf[i] = error_row(rec.get("id"), e)
                 t = None
                 bad += 1
             tables.append(t)
@@ -524,7 +524,7 @@ class ParquetSink:
                         t = t.set_column(j, pa.field(f.name, to), t.column(j).cast(to))
                 tables[i] = t
             except UNSTORABLE as e:
-                self._buf[i] = _error_row(self._buf[i].get("id"), e)
+                self._buf[i] = error_row(self._buf[i].get("id"), e)
                 tables[i] = None
                 bad += 1
         tables = [pa.Table.from_pylist([self._buf[i]]) if t is None else t for i, t in enumerate(tables)]

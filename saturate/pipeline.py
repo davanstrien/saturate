@@ -28,18 +28,6 @@ from saturate.transport import FatalTransportError
 READ_AHEAD = 64  # rows the reader may read before the feeder has taken them
 
 
-def adapt_parse(parse: Callable) -> Callable[[dict, dict], dict]:
-    """parse(row, resp) with row passthrough; a parse with one REQUIRED positional parameter
-    is parse(resp). Parameters with defaults do not count: `lambda body, model=M: ...` takes
-    the response, not the row."""
-    try:
-        sig = inspect.signature(parse)
-    except (TypeError, ValueError):  # a callable with no introspectable signature: the documented form
-        return parse
-    params = [p for p in sig.parameters.values()
-              if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) and p.default is p.empty]
-    return parse if len(params) >= 2 else (lambda row, resp: parse(resp))
-
 
 _END = object()  # put in the queue after the last finished row
 
@@ -113,7 +101,7 @@ class _Run:
         """Record the run's first failure and stop the row tasks; later failures are logged."""
         if self.failure is None:
             self.failure = error
-        else:
+        elif repr(error) != repr(self.failure):  # rows in flight often hit the same error: say it once
             print(f"[pump] after the first failure, also: {error!r}", file=sys.stderr, flush=True)
         self.stop()
 
@@ -179,7 +167,7 @@ async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]], to_r
     endpoint is gone, fail_fast), every row that already finished can still be read, and the
     failure is raised when the `async with` is left."""
     limiter = client.limiter
-    if limiter is None:
+    if not getattr(limiter, "running", True):  # a stand-in limiter without one is trusted
         raise RuntimeError("through() needs the client entered: `async with AdaptiveClient(...) as client:`")
     fail_fast = max(0, fail_fast)
     room = backlog or _default_backlog(limiter, fail_fast)
@@ -208,7 +196,11 @@ def raise_first_failure(caller_error: BaseException | None, run_failure: BaseExc
     caller's error (the caller's error stops the run at once), so it wins, except over a
     cancellation, which always goes on as itself."""
     if caller_error is not None:
-        if run_failure is None or isinstance(caller_error, anyio.get_cancelled_exc_class()):
+        if isinstance(caller_error, anyio.get_cancelled_exc_class()):
+            if run_failure is not None:
+                print(f"[pump] the run had also failed: {run_failure!r}", file=sys.stderr, flush=True)
+            raise caller_error
+        if run_failure is None:
             raise caller_error
         print(f"[pump] after the first failure, also: {caller_error!r}", file=sys.stderr, flush=True)
     if run_failure is not None:
@@ -373,3 +365,16 @@ async def _build_request(run: _Run, row: dict):
                                                        abandon_on_cancel=True)
     run.limiter.note_prep(took)
     return request
+
+def adapt_parse(parse: Callable) -> Callable[[dict, dict], dict]:
+    """parse(row, resp) with row passthrough; a parse with one REQUIRED positional parameter
+    is parse(resp). Parameters with defaults do not count: `lambda body, model=M: ...` takes
+    the response, not the row."""
+    try:
+        sig = inspect.signature(parse)
+    except (TypeError, ValueError):  # a callable with no introspectable signature: the documented form
+        return parse
+    params = [p for p in sig.parameters.values()
+              if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) and p.default is p.empty]
+    return parse if len(params) >= 2 else (lambda row, resp: parse(resp))
+

@@ -43,6 +43,7 @@ from fsspec.implementations.memory import MemoryFileSystem
 from stub_server import StubServer
 
 import saturate.core
+import saturate.pipeline
 import saturate.transport
 import saturate.writer
 from saturate import (
@@ -647,6 +648,39 @@ def test_a_client_can_be_entered_again(stub):
     for _ in range(2):
         body, error = asyncio.run(use(client))
         assert error is None and body["choices"]
+
+
+def test_through_needs_the_client_entered(stub):
+    async def go():
+        client = AdaptiveClient(stub.endpoint, signal_source="none")  # never entered
+        async with through(client, stream(rows(1)), default_to_request, default_parse):
+            pass
+
+    with pytest.raises(RuntimeError, match="needs the client entered"):
+        run_checked(go)
+
+
+def test_the_reader_reads_at_most_read_ahead_rows_beyond_what_was_taken(stub):
+    """Nobody reads the results and the backlog is 2: the feeder stops after a few rows. The
+    reader may run READ_AHEAD rows ahead of what the feeder took, and no further."""
+    read = 0
+
+    def counting_source():
+        nonlocal read
+        for item in rows(1000):
+            read += 1
+            yield item
+
+    async def go():
+        async with AdaptiveClient(stub.endpoint, window=Fixed(1), signal_source="none") as client:
+            async with through(client, counting_source(), default_to_request, default_parse,
+                               backlog=2, fail_fast=0) as results:
+                await asyncio.sleep(0.5)  # the feeder is stuck on the backlog; the reader runs ahead
+                await results.stop()
+
+    run_checked(go)
+    ahead = saturate.pipeline.READ_AHEAD
+    assert ahead <= read <= ahead + 3, read  # the feeder took at most 3 (2 placed, 1 waiting)
 
 
 # --- the transport and the sink ------------------------------------------------

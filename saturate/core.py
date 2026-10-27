@@ -140,6 +140,11 @@ class AdaptiveLimiter:
         return _Slot(self)
 
     @property
+    def running(self) -> bool:
+        """Whether the tick loop is on: the limiter is inside its `async with`."""
+        return self._task is not None and not self._task.done()
+
+    @property
     def limit(self) -> int:
         """The admission window: requests that may be in flight at once."""
         return int(self._capacity.total_tokens)

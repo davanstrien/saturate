@@ -21,7 +21,8 @@ SUITE="${SUITE:-vllm}"
 REPO_URL="${REPO_URL:-https://github.com/davanstrien/saturate}"
 RESULTS_URI="${RESULTS_URI:-hf://buckets/davanstrien/saturate-bench}"
 
-python3 -m pip install -q uv huggingface_hub
+command -v git >/dev/null || { apt-get update -qq && apt-get install -y -qq git >/dev/null; }  # not in the vllm image
+python3 -m pip install -q --root-user-action=ignore uv huggingface_hub
 git clone -q "$REPO_URL" /work/saturate
 cd /work/saturate
 git fetch -q origin '+refs/heads/*:refs/remotes/origin/*'

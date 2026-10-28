@@ -11,7 +11,7 @@ from __future__ import annotations
 import dataclasses
 
 TICK_S = 2.0  # nominal tick period: the loop sleeps this long, and tick-count floors are multiples of it
-BP_CEILING_RELEASE_S = 300.0  # backpressure-free seconds after which the backpressure ceiling rises a step
+BP_CEILING_RELEASE_S = 300.0  # backpressure-free seconds before the backpressure ceiling is released
 
 
 @dataclasses.dataclass
@@ -69,8 +69,10 @@ class Auto:
     2. cut:bp — backpressure (429/timeout/5xx) on at least `bp_frac` of this tick's
        outcomes (backpressure + successes, both counted per row): halve, and remember the
        window as a ceiling: growth and probes stop an eighth below the lowest window that
-       met backpressure, so a hosted API's rate limit is met once, not on every climb. The
-       ceiling rises a step after BP_CEILING_RELEASE_S without backpressure. A share, not any
+       met backpressure, so a hosted API's rate limit is met once, not on every climb. After
+       BP_CEILING_RELEASE_S without backpressure the ceiling is released, because a provider's
+       limit can rise; meeting the old limit again steps just under it instead of halving,
+       and doubles the wait before the next release. A share, not any
        event: one row that always fails (a 500 on one bad image) is not overload, and at a
        large window it would otherwise halve it every tick. Overload keeps failing NEW rows,
        so it keeps meeting the share; a fixed set of failing rows counts once and then only
@@ -152,7 +154,9 @@ class Auto:
         self.lo, self.hi = max(1, target_waiting // 4), target_waiting * 2
         self.min, self.max, self.step = min_limit, max_limit, step
         self._bp_ceiling: int | None = None  # the lowest window that met backpressure (None = none)
+        self._bp_seen: int | None = None  # the last ceiling, kept after it is released
         self._clean_s = 0.0  # seconds since the last backpressure cut
+        self._release_s = BP_CEILING_RELEASE_S  # clean seconds before the ceiling rises; doubles on a re-meet
         self.initial = self._clamp(initial)
         self.kv_hi, self.hits_lo, self.improve, self.stall_ticks = kv_hi, hits_lo, improve, stall_ticks
         self.bp_frac = bp_frac
@@ -178,7 +182,7 @@ class Auto:
         self._probe_down = False  # the pending probe is a trim: a smaller window on trial
         self._trim_floor: int | None = None  # a trim to this window lost throughput: none at or below it
         self._last_avg = 0.0  # throughput of the last evidence window
-        self._trim_ref = 0.0  # throughput just before the pending trim
+        self._probe_ref = 0.0  # throughput just before the pending plateau probe or trim
         self._trim_failed_at: int | None = None  # a trim to this window lost throughput once
         self._latency_s: float | None = None  # the last request latency seen (timeouts report none)
         self._rules = (self._cooling, self._backpressure, self._kv_pressure, self._stall,
@@ -204,10 +208,11 @@ class Auto:
             self._latency_s = obs.latency_s
         self._since_cut_s += tick
         self._clean_s += tick
-        if self._bp_ceiling is not None and self._clean_s >= BP_CEILING_RELEASE_S:
-            # a provider's limit can rise during a run: let the window try one step higher
-            self._bp_ceiling += max(1, self._bp_ceiling // 8)
-            self._clean_s = 0.0
+        if self._bp_ceiling is not None and self._clean_s >= self._release_s:
+            # a provider's limit can rise during a run: grow freely again, and if the old limit
+            # is still there, meeting it steps under it rather than halving (_backpressure)
+            self._bp_seen, self._bp_ceiling = self._bp_ceiling, None
+            self._reopen_search()
         draining = obs.oldest_s is not None and obs.oldest_s > self._since_cut_s  # oldest predates the cut
         self._settling = bool(self._hold_s) and (self._since_cut_s <= self._hold_s or (
             draining and self._since_cut_s <= self._patience_s(obs)))
@@ -285,10 +290,18 @@ class Auto:
         self._probe_blind, self._probe_trial = blind, trial
         return new, reason
 
+    def _reopen_search(self) -> None:
+        """Blind: search wider windows again from 2x, and let trims go as low as before."""
+        self._blind_reach, self._failed_probe_to = 2, None
+        self._trim_floor = self._trim_failed_at = None
+
+    def _ceiling_below(self, ceiling: int) -> int:
+        return max(self.min, ceiling - max(1, ceiling // 8))
+
     def _clamp(self, n: int) -> int:
         top = self.max
         if self._bp_ceiling is not None:  # stay an eighth below where backpressure began
-            top = min(top, max(self.min, self._bp_ceiling - max(1, self._bp_ceiling // 8)))
+            top = min(top, self._ceiling_below(self._bp_ceiling))
         return min(top, max(self.min, n))
 
     def _arm_cooldown(self, obs: Obs) -> None:
@@ -332,8 +345,17 @@ class Auto:
         if obs.backpressure and obs.backpressure >= self.bp_frac * (obs.backpressure + obs.successes):
             # a hosted API's rate limit is a wall: remember it, so growth stops below it instead
             # of meeting it again and halving each time
+            # back at a limit met before (the window climbed to just below it): step under it
+            # again rather than halve; anywhere lower, this is fresh overload and halves
+            known = self._bp_ceiling if self._bp_ceiling is not None else self._bp_seen
+            at_known = known is not None and limit >= self._ceiling_below(known)
             self._bp_ceiling = limit if self._bp_ceiling is None else min(self._bp_ceiling, limit)
             self._clean_s = 0.0
+            below = self._ceiling_below(self._bp_ceiling)
+            if at_known:
+                self._release_s *= 2  # the limit held: look for a higher one less often
+            if at_known and below < limit:
+                return self._shrink(obs, limit, below, "cut:bp")
             return self._cut(obs, limit, "cut:bp")
 
     def _kv_pressure(self, obs: Obs, limit: int):
@@ -355,20 +377,22 @@ class Auto:
 
     def _widen(self, obs: Obs, limit: int):
         due, grew = self._evaluate(limit)
+        if grew is True:  # a gain, whatever was pending: there may be more above
+            self._reopen_search()
         if self._probe_from is not None:  # a probe is settling: confirm or revert
             # the trial window's own completions take a latency to arrive, and readings until then
             # describe the old window: wait two latencies, the longest seen since the probe began
             settled = self._probe_age >= 3 and self._probe_age_s >= 2 * self._probe_latency_s
             if self._probe_down:  # a trim: kept unless throughput fell
                 # against the reading just before the trim, not the best ever: noise lifts the best
-                held = self._last_avg * self.improve >= self._trim_ref
+                held = self._last_avg * self.improve >= self._probe_ref
                 held = held and self._last_avg * self.improve ** 2 >= self._best_tok  # no creeping
-                if due and settled and (grew is True or held):
+                if due and settled and grew is not None and (grew is True or held):
                     self._void_probe()
                     self._probe_cooldown = 2  # trim again soon: the window may still be oversized
                     return limit, "hold:trimmed"
-                if due and settled:  # one noisy reading is not proof: block only a second failure
-                    back = self._probe_from
+                if due and settled and grew is not None:  # one noisy reading is not proof:
+                    back = self._probe_from  # block trims only on a second failure here
                     if self._trim_failed_at == limit:
                         self._trim_floor = limit
                     self._trim_failed_at = limit
@@ -377,9 +401,14 @@ class Auto:
                     self._arm_cooldown(obs)
                     return self._clamp(back), "revert"
                 return limit, "hold:ack"
-            if grew is True:
+            # a slow-start trial confirms on any gain at once (a fast ramp); a plateau probe is
+            # judged once settled, against the reading just before it (noise lifts the best)
+            fresh = due and settled and grew is not None
+            paired_gain = fresh and self._last_avg >= self._probe_ref * self.improve
+            if (self._probe_trial and grew is True) or (not self._probe_trial and paired_gain):
                 self._probe_cooldown = 4  # confirmed
                 self._void_probe()
+                self._reopen_search()
             elif due and settled:  # the trial window's own completions have arrived: revert
                 back = self._probe_from
                 self._probe_cooldown = min(self._probe_cooldown * 2, 32)
@@ -397,8 +426,6 @@ class Auto:
         if not due:
             return limit, "hold:ack"
         blind = obs.waiting is None
-        if grew is True:  # a gain: search again from 2x, and trims may go lower again
-            self._blind_reach, self._failed_probe_to, self._trim_floor = 2, None, None
         if grew is not False:
             if blind and self._slow_start and grew is True and self._probe_from is None:
                 # no queue to see: double on trial, so a doubling into a full engine reverts
@@ -412,18 +439,25 @@ class Auto:
             self._probe_wait += 1
             smaller = limit - max(1, limit // 8)
             floor = max(self.min, self._trim_floor or 0)
-            if self._probe_wait >= self._probe_cooldown and smaller > floor:
+            # at a backpressure ceiling nothing waits in a queue: a trim could only lose rows
+            at_ceiling = self._bp_ceiling is not None and limit >= self._ceiling_below(self._bp_ceiling)
+            if self._probe_wait >= self._probe_cooldown and smaller > floor and not at_ceiling:
                 result = self._open_probe(limit, smaller, blind=True, reason="trim")
-                self._probe_down, self._trim_ref = True, self._last_avg
+                self._probe_down, self._probe_ref = True, self._last_avg
                 self._reset_evidence()  # a trim is judged on the smaller window's readings only
                 return result
         elif self._probe_from is None:  # probe on backoff
             self._probe_wait += 1
             if self._probe_wait >= self._probe_cooldown:
                 # blind, a flat stretch can be wider than any step: try a multiple of the window
+                ref = self._last_avg  # the reading the probe is judged against
                 new = limit * self._blind_reach if blind else limit + self.step
-                if blind and self._failed_probe_to is not None and self._clamp(new) <= self._failed_probe_to:
-                    self._blind_reach = 0  # clamped back onto a window that already failed
-                    return limit, "hold:plateau"
+                at_top = self._clamp(new) <= limit
+                if blind and (at_top or (self._failed_probe_to is not None
+                                         and self._clamp(new) <= self._failed_probe_to)):
+                    self._blind_reach = 0  # nothing new to try above: search down (trims)
+                    return limit, "hold:ceiling" if at_top else "hold:plateau"
+                self._probe_ref = ref
+                self._reset_evidence()  # judged on the probe window's own readings
                 return self._open_probe(limit, new, blind, "probe")
         return limit, "hold:plateau"

@@ -508,7 +508,7 @@ def test_a_reverted_slow_start_trial_leaves_the_first_plateau_probe_at_2x():
 
 
 def test_a_measured_gain_outside_a_probe_restarts_the_search_at_2x():
-    """The search had ended (reach 0) and probing stopped for good, even after a real gain."""
+    """With the search for a wider window ended, a measured gain starts it again at 2x."""
     ctrl = Auto(initial=16)
     ctrl._slow_start, ctrl._blind_reach, ctrl._best_tok = False, 0, 1000.0
     limit = 16
@@ -520,7 +520,8 @@ def test_a_measured_gain_outside_a_probe_restarts_the_search_at_2x():
 
 
 def test_backpressure_during_a_blind_probe_returns_to_where_the_probe_began():
-    """Halving from a 4x probe window left a flat engine at twice its useful window."""
+    """A probe that meets backpressure goes back to the window it started from, not to half the
+    probe window."""
     ctrl = Auto(initial=32, max_limit=1024)
     ctrl._slow_start, ctrl._blind_reach, ctrl._best_tok = False, 4, 1000.0
     before, after = flat_until(ctrl, 32, "probe")

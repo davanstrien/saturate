@@ -7,7 +7,16 @@ import math
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
-from sim_engine import LINEAR, PREEMPTING, SGLANG_LIKE, Engine, run, share_of_best, share_past_useful
+from sim_engine import (
+    LINEAR,
+    PREEMPTING,
+    SGLANG_LIKE,
+    Engine,
+    failed_share,
+    run,
+    share_of_best,
+    share_past_useful,
+)
 
 from saturate.controller import Auto
 
@@ -51,14 +60,23 @@ def test_blind_auto_trims_a_window_past_what_the_engine_uses(name):
 
 
 @pytest.mark.parametrize("rate_limit", [64, 100, 127, 200])
-def test_a_hosted_api_rate_limit_is_met_once_not_on_every_climb(rate_limit):
+def test_a_hosted_api_rate_limit_is_met_without_halving(rate_limit):
     """A hosted API rejects requests past its concurrency limit with 429s. Auto remembers the
-    window that met them and grows no closer than an eighth below it, so it uses at least 90%
-    of the limit instead of halving and climbing back again and again."""
+    window that met them and grows no closer than an eighth below it. After a clean stretch it
+    looks again (a provider's limit can rise); meeting the same limit then steps just under it,
+    so after warm-up the window never halves, and few rows are rejected."""
     engine = Engine(curve=[(1024, 400.0)], cap=1024, rate_limit=rate_limit, gauges=False, noise=0.05)
     ticks = run(Auto(), engine, 600)
-    assert share_of_best(ticks[100:], engine) >= 0.9, [t.limit for t in ticks[-10:]]
-    assert sum(t.reason == "cut:bp" for t in ticks[200:]) <= 2, [t.reason for t in ticks if "cut" in t.reason]
+    assert share_of_best(ticks[100:]) >= 0.95, [t.limit for t in ticks[-10:]]
+    assert min(t.limit for t in ticks[200:]) >= rate_limit * 3 // 4, [t.limit for t in ticks[200:]]
+    assert failed_share(ticks) <= 0.04  # main: about 2%, halving and climbing back
+
+
+def test_a_hosted_api_limit_that_rises_mid_run_is_found():
+    """The limit doubles from 100 to 200 at tick 300: released ceilings let Auto find it."""
+    kw = dict(curve=[(1024, 400.0)], cap=1024, gauges=False, noise=0.05)
+    ticks = run(Auto(), Engine(rate_limit=100, **kw), 900, then=(300, Engine(rate_limit=200, **kw)))
+    assert share_of_best(ticks[300:]) >= 0.85, [t.limit for t in ticks[-10:]]
 
 
 def test_long_generations_survive_a_trial_past_the_read_timeout():
@@ -68,7 +86,7 @@ def test_long_generations_survive_a_trial_past_the_read_timeout():
     engine = Engine(curve=[(100, 8.0)], cap=100, gauges=False, noise=0.05, read_timeout_s=60)
     ticks = run(Auto(), engine, 600)
     assert share_of_best(ticks[100:], engine) >= 0.9, [t.limit for t in ticks[-10:]]
-    assert sum(t.reason == "cut:bp" for t in ticks) <= 2, [t.reason for t in ticks if "cut" in t.reason]
+    assert failed_share(ticks) <= 0.1  # one trial past the timeout: Auto does not know the timeout
 
 
 def test_preemption_past_a_batch_size_is_not_worse_than_a_fixed_middle_window():

@@ -183,9 +183,9 @@ class Auto:
       rarely but never given up on, so a later rise in capacity is found.
     The x4 move crosses a stretch where throughput is flat (SGLang's from 32 to 64) that a
     doubling cannot see past; x7/8 trims a window that overshot the engine's cap. The window
-    starts at `initial` (64), so most of a short run is not spent ramping. On an engine with
-    a few slots and no metrics (llama.cpp without --metrics) that start queues requests and
-    raises latency: pass a smaller `initial`.
+    starts at `initial` if given; else at the engine's reported capacity when the engine
+    reports one (start_at_capacity: SGLang, llama.cpp, TEI); else at 64, so most of a short run
+    is not spent ramping.
 
     A trial's readings arrive one request latency late, and a wider window has a longer latency
     at flat throughput (Little's law), so a trial is judged only after two latencies at its
@@ -228,7 +228,9 @@ class Auto:
     MOVES: tuple[float, ...] = (2.0, 4.0, 1.5, 1.25, 0.875)
     MAX_BACKOFF = 32  # evidence windows between trials on a long plateau
 
-    def __init__(self, target_waiting: int = 8, initial: int = 64, min_limit: int = 2,
+    DEFAULT_INITIAL = 64  # the start when neither the caller nor the engine says otherwise
+
+    def __init__(self, target_waiting: int = 8, initial: int | None = None, min_limit: int = 2,
                  max_limit: int = 512, step: int = 8, kv_hi: float = 0.9,
                  hits_lo: float = 0.5, improve: float = 1.05, stall_ticks: int = 3,
                  bp_frac: float = 0.05):
@@ -242,7 +244,8 @@ class Auto:
         self.min, self.max, self.step = min_limit, max_limit, step
         self.kv_hi, self.hits_lo, self.improve = kv_hi, hits_lo, improve
         self.stall_ticks, self.bp_frac = stall_ticks, bp_frac
-        self.initial = min(max_limit, max(min_limit, initial))
+        self.initial_given = initial is not None  # the caller's start wins over an engine's capacity
+        self.initial = min(max_limit, max(min_limit, self.DEFAULT_INITIAL if initial is None else initial))
         self.state = State()
         self.last_reason = "hold"
 
@@ -255,6 +258,20 @@ class Auto:
                 new, self.last_reason, self.state = decision
                 return new
         raise AssertionError("RULES must end in a rule that always applies")
+
+    def start_at_capacity(self, requests: int, queues: bool) -> None:
+        """Start at the engine's reported capacity (`requests` it runs at once), unless the caller
+        chose `initial`. An engine that queues the rest starts a little above it: a few waiting
+        requests refill a slot as soon as it frees, which a window of exactly the capacity does
+        not (measured on llama.cpp: 8 slots, a window of 16 beat 8 by 9%). An engine that
+        rejects the rest (TEI: 429s) starts at the capacity, and growth stops there."""
+        if requests < 1:
+            return
+        if not queues:
+            self.max = max(self.min, min(self.max, requests))
+        if not self.initial_given:
+            start = requests + max(requests // 8, min(requests, 8)) if queues else requests
+            self.initial = min(self.max, max(self.min, start))
 
     # --- helpers ----------------------------------------------------------------------------------
 

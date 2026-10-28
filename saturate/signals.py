@@ -20,6 +20,7 @@ returns a partial dict and the controller runs on the one real signal.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import sys
 
@@ -143,3 +144,54 @@ class HttpScrape:
             self._blind = False
             _log(f"metrics scrape recovered ({self.dialect})")
         return gauges
+
+
+@dataclasses.dataclass(frozen=True)
+class Capacity:
+    """How many requests an engine runs at once, and whether it queues the rest (else it
+    rejects them, as TEI does with 429s)."""
+
+    requests: int
+    queues: bool
+    engine: str
+
+
+# where each engine reports its capacity: (path from the server root, JSON key, engine, queues).
+# Checked on live servers 2026-10-28; vLLM reports none (max_num_seqs is not exposed).
+CAPACITY_SOURCES = (
+    ("/v1/loads", "max_running_requests", "sglang", True),
+    ("/get_server_info", "max_running_requests", "sglang", True),
+    ("/props", "total_slots", "llamacpp", True),
+    ("/info", "max_concurrent_requests", "tei", False),
+)
+
+
+def _find_key(obj, key: str):
+    """The first value under `key` anywhere in a JSON document."""
+    if isinstance(obj, dict):
+        if key in obj:
+            return obj[key]
+        obj = list(obj.values())
+    if isinstance(obj, list):
+        for item in obj:
+            found = _find_key(item, key)
+            if found is not None:
+                return found
+    return None
+
+
+async def read_capacity(client: HttpClient, endpoint: str) -> Capacity | None:
+    """The engine's capacity from the first source that reports one, or None (vLLM, a hosted
+    API, a proxy). A one-off read before the run: a failure costs a few fast requests."""
+    base = endpoint.rsplit("/v1", 1)[0]
+    for path, key, engine, queues in CAPACITY_SOURCES:
+        try:
+            reply = await client.get(f"{base}{path}", timeouts=SCRAPE_TIMEOUTS)
+            if reply.status_code != 200:
+                continue
+            value = _find_key(reply.json(), key)
+        except (TransportError, ValueError):  # unreachable, or not JSON
+            continue
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return Capacity(value, queues, engine)
+    return None

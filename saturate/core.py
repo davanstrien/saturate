@@ -25,7 +25,7 @@ import anyio
 from saturate import transport
 from saturate.controller import TICK_S, Auto, Fixed, Obs
 from saturate.http import HttpClient, Timeouts
-from saturate.signals import HttpScrape, Null
+from saturate.signals import HttpScrape, Null, read_capacity
 from saturate.telemetry import tick_record
 from saturate.transport import Attempt, Breaker, FatalTransportError, Request, call_endpoint, coerce_request
 
@@ -174,6 +174,10 @@ class AdaptiveLimiter:
     def limit(self) -> int:
         """The admission window: requests that may be in flight at once."""
         return int(self._capacity.total_tokens)
+
+    def set_limit(self, limit: int) -> None:
+        """Resize the admission window (before the run: a start the engine reported)."""
+        self._capacity.total_tokens = int(limit)
 
     @property
     def inflight(self) -> int:
@@ -362,8 +366,24 @@ class AdaptiveClient:
     async def __aenter__(self):
         if self._client.closed:  # entered again after an earlier `async with`: start fresh
             self._client, self.limiter = self._build()
+        await self._start_at_capacity()
         await self.limiter.__aenter__()
         return self
+
+    async def _start_at_capacity(self) -> None:
+        """Read the engine's capacity once, before the first request, and start Auto there (unless
+        the caller chose its start, or signals are off)."""
+        controller = self.limiter.controller
+        if self._signal_source == "none" or not isinstance(controller, Auto):
+            return
+        capacity = await read_capacity(self._client, self.base)
+        if capacity is None:
+            return
+        controller.start_at_capacity(capacity.requests, capacity.queues)
+        self.limiter.set_limit(controller.initial)
+        print(f"[pump] {capacity.engine} reports {capacity.requests} requests at once"
+              f"{'' if capacity.queues else ' (and rejects the rest)'}: starting at {controller.initial}",
+              file=sys.stderr, flush=True)
 
     async def __aexit__(self, *exc):
         try:

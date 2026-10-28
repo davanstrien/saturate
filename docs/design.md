@@ -148,6 +148,13 @@ poison rows are excluded — and waits are integrated in seconds from the measur
 best fixed window: past a flat stretch that starts below the initial window, a gain just over
 `improve` can read as flat, and the climber stays below it.
 
+Before the first request, `AdaptiveClient` reads the engine's capacity once
+(`signals.read_capacity`: SGLang `/v1/loads` or `/get_server_info` `max_running_requests`,
+llama.cpp `/props` `total_slots`, TEI `/info` `max_concurrent_requests`; vLLM reports none).
+Unless the caller set `initial`, `Auto` starts there: a little above it for an engine that
+queues the rest, so a waiting request refills a free slot; exactly there, and no higher, for
+TEI, which rejects the rest with 429s.
+
 `Fixed(n)` bypasses all of it. Defaults: `Auto(target_waiting=8, initial=64,
 max_limit=512, step=8)`; cap `max_limit` (~128) for vision workloads — in-flight
 images live in host RAM.

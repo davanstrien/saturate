@@ -64,6 +64,7 @@ class StubServer:
         self.status_for = status_for
         self.drop_for: Callable[[dict], bool] | None = None  # True: close without answering
         self.raw_for: Callable[[dict], bytes | None] | None = None  # a raw body for this status, e.g. HTML
+        self.json_routes: dict[str, dict] = {}  # extra GET paths answered with JSON (capacity reads)
         self.port = 0
         self.requests = 0  # completion requests served (any status), probes excluded
         self.probe_log: list[tuple[str, dict]] = []  # (path, body) of every circuit-breaker probe
@@ -179,6 +180,8 @@ class StubServer:
                        ) -> tuple[int, str, bytes]:
         if method == "GET" and path == "/health":
             return 200, "text/plain", b"ok"
+        if method == "GET" and path in self.json_routes:
+            return 200, "application/json", json.dumps(self.json_routes[path]).encode()
         if method == "GET" and path == "/metrics":
             text = (f'vllm:num_requests_waiting{{model="stub"}} 0\n'
                     f'vllm:num_requests_running{{model="stub"}} {self.inflight}\n'

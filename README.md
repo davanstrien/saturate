@@ -58,8 +58,12 @@ out/
     └── telemetry/telemetry-shard0-….jsonl       # per-tick controller records
 ```
 
-`load_dataset("out")` and `pq.read_table("out")` read the parts as they are, error rows
-included. `read_output("out")` gives the successful rows, one per id; ids that only failed are left out.
+`read_output("out")` gives the successful rows, one per id; ids that only failed are left out.
+With a declared `schema=`, every part has the same columns and `load_dataset("out")` and
+`pq.read_table("out")` load the output too. They read the parts raw: error rows included,
+and a row that failed and later succeeded appears twice. Without `schema=`, a column can first
+appear in a later part, and those loaders fail or drop it (CONTRACT §1). saturate writes no
+dataset card; the Hub finds the parts.
 
 ```python
 # a success row and an error row from the same output (your parse() columns + id/error):

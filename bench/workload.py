@@ -119,7 +119,7 @@ class FirstPartWatcher:
 
 def read_ticks(fs, root: str) -> list[dict]:
     ticks = []
-    # __saturate/telemetry/ from 0.3; the output root before (the bench measures any version)
+    # telemetry lives under __saturate/telemetry/; outputs in the old layout keep it at the root
     paths = fs.glob(f"{root}/__saturate/telemetry/telemetry-*.jsonl") + fs.glob(f"{root}/telemetry-*.jsonl")
     for path in paths:
         with fs.open(path, "rb") as f:

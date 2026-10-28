@@ -15,7 +15,8 @@ expected = int(sys.argv[2]) if len(sys.argv) > 2 else None
 api = HfApi()
 files = api.list_repo_files(repo, repo_type="dataset")
 parts = [f for f in files if f.startswith("data/part-") and f.endswith(".parquet")]
-manifests = [f for f in files if f.startswith("data/_manifest/ids-") and f.endswith(".parquet")]
+manifests = [f for f in files if f.startswith(("data/__saturate/manifest/ids-", "data/_manifest/ids-"))
+             and f.endswith(".parquet")]
 markers = sorted(f for f in files if "/completions/" in f and f.endswith(".done"))
 telemetry = [f for f in files if "telemetry-shard" in f]
 

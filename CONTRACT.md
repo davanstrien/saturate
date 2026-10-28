@@ -44,9 +44,21 @@ out/
 ```
 
 The data parts are the only files outside `__saturate/`. `datasets` and pyarrow skip paths
-that start with `__`, so `load_dataset(out)`, `pq.read_table(out)` and `pyarrow.dataset`
-read the parts alone. They read them raw: error rows are included, and a row that failed and
-later succeeded appears twice. `read_output` applies the reader rule (§4.2).
+that start with `__`, so their loaders see the parts alone. What they can load depends on
+the schema:
+
+- **Declared schema** (`schema=`): every part has the same columns, so `load_dataset`,
+  `pq.read_table` and `pyarrow.dataset` load the whole output.
+- **Inferred schema** (the default): a column can first appear in a later part (§1
+  Columns). `load_dataset` then fails, and `pq.read_table` takes the first part's columns and
+  drops the later ones without an error. `read_output` reads every column.
+
+Either way the loaders read the parts raw: error rows are included, and a row that failed
+and later succeeded appears twice. `read_output` applies the reader rule (§4). For an
+`hf://datasets` output in a subdirectory, load the repo with `data_dir=`
+(`load_dataset("org/repo", data_dir="data")`). An output written before 0.3 keeps its
+`_manifest/`, `completions/` and telemetry at the root, also after a 0.3 resume; move them
+under `__saturate/` before loading it with these tools.
 
 `out` is a single fsspec URI (local path, `hf://datasets/...`, `hf://buckets/...`).
 Part names are globally unique across shards and re-runs without coordination and carry no
@@ -178,7 +190,7 @@ rest. The check covers the pipeline, not the sink's own storage.
 
 ## 6. Telemetry (frozen keys)
 
-One `telemetry-…jsonl` per run; one object per controller tick (~2s). The file is rewritten
+One `__saturate/telemetry/telemetry-…jsonl` per run; one object per controller tick (~2s). The file is rewritten
 periodically during the run (about every minute locally, every five minutes on remote
 stores, stretching as the run grows — each rewrite re-sends the whole trajectory, so the
 interval is a quarter of the run so far) and finalised at exit; readers may see a partial trajectory mid-run.

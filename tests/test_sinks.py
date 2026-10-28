@@ -1431,14 +1431,22 @@ def _finished_output(tmp_path):
     return sink
 
 
-def test_an_output_loads_with_load_dataset_and_read_table(tmp_path):
-    """The manifests were read as data (load_dataset took its schema from {id, error} and then
-    failed on the parts), and pq.read_table failed on completions/shard-0.done (#31). The
-    loaders see the raw parts: error rows included."""
+def test_a_declared_output_loads_with_load_dataset_and_read_table(tmp_path):
+    """Nothing beside the parts is read as data. With a declared schema every part has the same
+    columns, even a part of error rows only, so the loaders see the raw parts whole."""
     import datasets
     import pyarrow.dataset as ds
 
-    _finished_output(tmp_path)
+    from saturate import ParquetSink
+
+    schema = pa.schema([("id", pa.string()), ("text", pa.string()), ("error", pa.string())])
+    sink = ParquetSink(str(tmp_path), flush_every=1, schema=schema)
+    sink.append({"id": "bad", "error": "HTTP 400"})  # the first part: an error row
+    for i in range(4):
+        sink.append({"id": f"r{i}", "text": f"row {i}", "error": None})
+    sink.write_telemetry((0, 1), ['{"t": 1}'])
+    sink.write_stats((0, 1), "{}")
+    sink.write_marker((0, 1))
     loaded = datasets.load_dataset(str(tmp_path), split="train")
     assert sorted(loaded["id"]) == ["bad", "r0", "r1", "r2", "r3"]
     assert set(loaded.column_names) == {"id", "text", "error"}
@@ -1452,6 +1460,22 @@ def test_an_output_in_the_old_layout_resumes(tmp_path):
 
     _finished_output(tmp_path)
     (tmp_path / "__saturate" / "manifest").rename(tmp_path / "_manifest")
+    resumed = ParquetSink(str(tmp_path))
+    assert resumed.existing_ids() == {"r0", "r1", "r2", "r3", "bad"}
+    assert resumed.existing_ids(retry_errors=True) == {"r0", "r1", "r2", "r3"}
+
+
+def test_an_output_with_manifests_in_both_layouts_resumes(tmp_path):
+    """An old output resumed by 0.3 holds manifests in _manifest/ and __saturate/manifest/."""
+    from saturate import ParquetSink
+
+    _finished_output(tmp_path)
+    old = tmp_path / "_manifest"
+    old.mkdir()
+    moved = sorted((tmp_path / "__saturate" / "manifest").glob("ids-*.parquet"))[:2]
+    for path in moved:
+        path.rename(old / path.name)
+    assert moved and list((tmp_path / "__saturate" / "manifest").glob("ids-*.parquet"))
     resumed = ParquetSink(str(tmp_path))
     assert resumed.existing_ids() == {"r0", "r1", "r2", "r3", "bad"}
     assert resumed.existing_ids(retry_errors=True) == {"r0", "r1", "r2", "r3"}

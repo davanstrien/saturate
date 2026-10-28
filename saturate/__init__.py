@@ -157,9 +157,9 @@ def pump(
         and give each Job its own output.
     flush_every: rows buffered before a parquet part is written. None (default) = 1000 rows,
         or sooner once the oldest buffered row is 10 s old (60 s for a remote output, hf://,
-        s3://..., where each write is slow), whichever comes first. The age is checked as rows
-        arrive; a crash loses at most that long of rows, which a resume re-requests. Rows are
-        counted, not bytes: lower it if parse returns large payloads.
+        s3://..., where each write is slow), whichever comes first: a row's output appears
+        within that long, and a crash loses at most that long of rows, which a resume
+        re-requests. Rows are counted, not bytes: lower it if parse returns large payloads.
     read_timeout: seconds to wait for a single response (long generations are legitimate).
     retry_budget_s: active-work budget for one row's attempts, retries and backoff included.
         Time paused on an open circuit breaker does not count, so it is not a deadline: a row

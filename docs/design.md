@@ -45,7 +45,7 @@ source (any iterable / dataset_rows / bucket_rows)
       circuit breaker)
   → parse(row, response) → success or error record   core.py
   → buffered append → parquet part + manifest        sink.py
-      sidecar (flush_every rows)
+      sidecar (flush_every rows or the flush age)
 ```
 
 Failures become durable *error rows* (never gaps); a re-run skips done ids exactly and

@@ -85,9 +85,9 @@ class ParquetSink:
         # a flush writes two objects (a part and its manifest): ~1 s per write on hf://, and
         # 10-row local flushes capped a fast run (embeddings) at ~1,100 rows/s. Outputs flush
         # by size or age: 1000 rows, or the oldest buffered row 10 s old locally (60 s remotely,
-        # where every write is slow). The age is checked when a row is appended, so while rows
-        # keep arriving a crash loses at most that many seconds of them (resume re-requests
-        # them); if the stream stalls, the buffer waits for the next row or the final flush.
+        # where every write is slow), counted from the oldest buffered row whether or not rows
+        # keep arriving (the writer flushes a quiet buffer on the same clock): a crash loses at
+        # most that many seconds of rows, which a resume re-requests.
         # Rows are counted, not bytes: if parse returns large payloads (images), pass a smaller
         # flush_every.
         self.flush_every = flush_every if flush_every is not None else 1000
@@ -208,7 +208,7 @@ class ParquetSink:
             return set()
         if len(manifests) > 1000:
             _log(f"resume: reading {len(manifests)} manifest files "
-                 "(consider larger flush_every for remote outputs)")
+                 "(fewer, larger parts: a larger flush_every, or flush_interval_s on ParquetSink)")
         read = self._read_many(manifests)
         covered = {path.rsplit("/", 1)[-1][4:] for path in read}
         self._parts = _list_parts(self.fs, self.root)  # one listing serves the seed too

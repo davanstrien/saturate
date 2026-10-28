@@ -119,7 +119,9 @@ class FirstPartWatcher:
 
 def read_ticks(fs, root: str) -> list[dict]:
     ticks = []
-    for path in fs.glob(f"{root}/telemetry-*.jsonl"):
+    # telemetry lives under __saturate/telemetry/; outputs in the old layout keep it at the root
+    paths = fs.glob(f"{root}/__saturate/telemetry/telemetry-*.jsonl") + fs.glob(f"{root}/telemetry-*.jsonl")
+    for path in paths:
         with fs.open(path, "rb") as f:
             ticks += [json.loads(line) for line in f.read().decode().splitlines() if line]
     return ticks

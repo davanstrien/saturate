@@ -23,11 +23,11 @@ def test_write_telemetry_rewrites_one_file_per_run(tmp_path):
     sink = ParquetSink(str(tmp_path))
     sink.write_telemetry((0, 1), ['{"t": 2}'])
     sink.write_telemetry((0, 1), ['{"t": 2}', '{"t": 4}'])
-    files = list(tmp_path.glob("telemetry-shard0-*.jsonl"))
+    files = list(tmp_path.glob("__saturate/telemetry/telemetry-shard0-*.jsonl"))
     assert len(files) == 1
     assert files[0].read_text().splitlines() == ['{"t": 2}', '{"t": 4}']
     ParquetSink(str(tmp_path)).write_telemetry((0, 1), ['{"t": 2}'])
-    assert len(list(tmp_path.glob("telemetry-shard0-*.jsonl"))) == 2
+    assert len(list(tmp_path.glob("__saturate/telemetry/telemetry-shard0-*.jsonl"))) == 2
 
 
 def test_telemetry_file_is_per_shard_and_per_run(tmp_path):
@@ -36,12 +36,12 @@ def test_telemetry_file_is_per_shard_and_per_run(tmp_path):
     sink = ParquetSink(str(tmp_path))
     sink.write_telemetry((0, 2), ['{"t": 2}'])
     sink.write_telemetry((1, 2), ['{"t": 2}'])
-    assert len(list(tmp_path.glob("telemetry-shard0-*.jsonl"))) == 1
-    assert len(list(tmp_path.glob("telemetry-shard1-*.jsonl"))) == 1
+    assert len(list(tmp_path.glob("__saturate/telemetry/telemetry-shard0-*.jsonl"))) == 1
+    assert len(list(tmp_path.glob("__saturate/telemetry/telemetry-shard1-*.jsonl"))) == 1
     sink.write_marker((0, 2))
     sink.write_telemetry((0, 2), ['{"t": 2}'])
-    assert len(list(tmp_path.glob("telemetry-shard0-*.jsonl"))) == 2
-    assert len(list(tmp_path.glob("telemetry-shard*.jsonl"))) == 3
+    assert len(list(tmp_path.glob("__saturate/telemetry/telemetry-shard0-*.jsonl"))) == 2
+    assert len(list(tmp_path.glob("__saturate/telemetry/telemetry-shard*.jsonl"))) == 3
 
 
 def test_telemetry_cadence_depends_on_the_store(tmp_path, monkeypatch):
@@ -104,7 +104,7 @@ def test_pump_writes_telemetry_periodically_and_at_exit(tmp_path, monkeypatch):
                                10, 1.0, "/chat/completions", None, False, None, None, "none"))
     assert captured["on_tick"] is not None
     assert writes == [30, 60, 60]  # tick 30, tick 60, final
-    files = list(tmp_path.glob("telemetry-shard0-*.jsonl"))
+    files = list(tmp_path.glob("__saturate/telemetry/telemetry-shard0-*.jsonl"))
     assert len(files) == 1
     assert [json.loads(line)["t"] for line in files[0].read_text().splitlines()] == [2 * i for i in range(60)]
 
@@ -143,5 +143,5 @@ def test_pump_periodic_telemetry_failure_is_not_fatal(tmp_path, monkeypatch, cap
     stats = asyncio.run(saturate._pump([], lambda r: r, lambda r: r, "http://x", BrokenSink(str(tmp_path)),
                                        None, (0, 1), 10, 1.0, "/chat/completions", None, False, None,
                                        None, "none"))
-    assert stats.rows_processed == 0 and (tmp_path / "completions" / "shard-0.done").exists()
+    assert stats.rows_processed == 0 and (tmp_path / "__saturate" / "completions" / "shard-0.done").exists()
     assert capsys.readouterr().err.count("telemetry write failed (non-fatal)") == 2  # periodic + final

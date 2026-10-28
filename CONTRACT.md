@@ -23,7 +23,9 @@ Plus one discipline: **record, never guess** — every written value is an obser
 Stability: additive changes are allowed within v1 (new columns, sidecar files, keys);
 renames, retypes and removals are not. One exception before 0.3.0: §2 replaced strided
 fan-out with the id-hash rule and changed the `dataset_rows` and `bucket_rows` id formats,
-so an output written by 0.2 with those ids is not resumed by 0.3 (its rows run again). The controller, transport and engine lifecycle are
+so an output written by 0.2 with those ids is not resumed by 0.3 (its rows run again); and
+§1 moved every sidecar under `__saturate/` (0.3 still reads manifests from `_manifest/` on
+resume). The controller, transport and engine lifecycle are
 implementation — free to change.
 
 ## 1. Output layout
@@ -31,13 +33,32 @@ implementation — free to change.
 ```
 out/
 ├── part-{ms}-{seq}-{uuid8}.parquet        # append-only data parts, zstd
-├── _manifest/
-│   └── ids-part-….parquet                 # [id, error] sidecar, 1:1 with its part
-├── completions/
-│   ├── shard-{rank}.done                  # advisory completion marker per shard
-│   └── stats-{rank}.json                  # exact run summary (Stats + rank/world)
-└── telemetry-shard{rank}-….jsonl          # per-tick controller trajectory
+└── __saturate/
+    ├── manifest/
+    │   └── ids-part-….parquet             # [id, error] sidecar, 1:1 with its part
+    ├── completions/
+    │   ├── shard-{rank}.done              # advisory completion marker per shard
+    │   └── stats-{rank}.json              # exact run summary (Stats + rank/world)
+    └── telemetry/
+        └── telemetry-shard{rank}-….jsonl  # per-tick controller trajectory
 ```
+
+The data parts are the only files outside `__saturate/`. `datasets` and pyarrow skip paths
+that start with `__`, so their loaders see the parts alone. What they can load depends on
+the schema:
+
+- **Declared schema** (`schema=`): every part has the same columns, so `load_dataset`,
+  `pq.read_table` and `pyarrow.dataset` load the whole output.
+- **Inferred schema** (the default): a column can first appear in a later part (§1
+  Columns). `load_dataset` then fails, and `pq.read_table` takes the first part's columns and
+  drops the later ones without an error. `read_output` reads every column.
+
+Either way the loaders read the parts raw: error rows are included, and a row that failed
+and later succeeded appears twice. `read_output` applies the reader rule (§4). For an
+`hf://datasets` output in a subdirectory, load the repo with `data_dir=`
+(`load_dataset("org/repo", data_dir="data")`). An output written before 0.3 keeps its
+`_manifest/`, `completions/` and telemetry at the root, also after a 0.3 resume; move them
+under `__saturate/` before loading it with these tools.
 
 `out` is a single fsspec URI (local path, `hf://datasets/...`, `hf://buckets/...`).
 Part names are globally unique across shards and re-runs without coordination and carry no
@@ -152,7 +173,7 @@ writing them as errors would make resume skip them forever.
 
 ## 5. Completion markers and stats
 
-`completions/shard-{rank}.done` (payload: the fixed sentinel `done`) is written last, when
+`__saturate/completions/shard-{rank}.done` (payload: the fixed sentinel `done`) is written last, when
 a shard's run returns normally. Markers are **advisory** (datatrove's convention — a
 coordinator can watch the directory); resume never depends on them, they don't certify
 row-level success, and they are sticky across re-runs of one output dir. Coordinators
@@ -169,7 +190,7 @@ rest. The check covers the pipeline, not the sink's own storage.
 
 ## 6. Telemetry (frozen keys)
 
-One `telemetry-…jsonl` per run; one object per controller tick (~2s). The file is rewritten
+One `__saturate/telemetry/telemetry-…jsonl` per run; one object per controller tick (~2s). The file is rewritten
 periodically during the run (about every minute locally, every five minutes on remote
 stores, stretching as the run grows — each rewrite re-sends the whole trajectory, so the
 interval is a quarter of the run so far) and finalised at exit; readers may see a partial trajectory mid-run.

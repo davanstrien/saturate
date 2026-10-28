@@ -52,10 +52,18 @@ What lands on disk (real rows from a live run):
 ```
 out/
 ├── part-1785318644693-000000-5b670c82.parquet   # append-only parts
-├── _manifest/ids-part-…parquet                  # [id, error] sidecar per part
-├── completions/shard-0.done                     # marker when a shard finishes
-└── telemetry-shard0-….jsonl                     # per-tick controller records
+└── __saturate/                                  # saturate's own files; loaders skip them
+    ├── manifest/ids-part-…parquet               # [id, error] sidecar per part
+    ├── completions/shard-0.done                 # marker when a shard finishes
+    └── telemetry/telemetry-shard0-….jsonl       # per-tick controller records
 ```
+
+`read_output("out")` gives the successful rows, one per id; ids that only failed are left out.
+With a declared `schema=`, every part has the same columns and `load_dataset("out")` and
+`pq.read_table("out")` load the output too. They read the parts raw: error rows included,
+and a row that failed and later succeeded appears twice. Without `schema=`, a column can first
+appear in a later part, and those loaders fail or drop it (CONTRACT §1). saturate writes no
+dataset card; the Hub finds the parts.
 
 ```python
 # a success row and an error row from the same output (your parse() columns + id/error):
@@ -261,7 +269,7 @@ To split the input yourself, split it by `shard_of` (or
 way (for example `datasets.distributed.split_dataset_by_node`, which splits by position), pass
 no `shard` and give each Job its own output.
 
-Each shard adapts to its own node independently and writes `completions/shard-{rank}.done`
+Each shard adapts to its own node independently and writes `__saturate/completions/shard-{rank}.done`
 when finished (datatrove's marker convention — a coordinator can watch the directory).
 
 A check for any fan-out: the rows written across all shards must not be more than the

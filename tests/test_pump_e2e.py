@@ -40,7 +40,7 @@ def rows(n, start=0):
 
 def read_ticks(out):
     """The run's telemetry: one dict per controller tick (CONTRACT §6)."""
-    (telemetry,) = list(out.glob("telemetry-shard0-*.jsonl"))
+    (telemetry,) = list(out.glob("__saturate/telemetry/telemetry-shard0-*.jsonl"))
     return [json.loads(line) for line in telemetry.read_text().splitlines()]
 
 
@@ -68,9 +68,10 @@ def test_pump_happy_path(stub, tmp_path):
 
     parts = sorted(p.name for p in tmp_path.glob("part-*.parquet"))
     assert parts
-    assert sorted(p.name[4:] for p in (tmp_path / "_manifest").glob("ids-part-*.parquet")) == parts
-    assert (tmp_path / "completions" / "shard-0.done").read_bytes() == b"done"
-    written = json.loads((tmp_path / "completions" / "stats-0.json").read_text())
+    manifests = (tmp_path / "__saturate" / "manifest").glob("ids-part-*.parquet")
+    assert sorted(p.name[4:] for p in manifests) == parts
+    assert (tmp_path / "__saturate" / "completions" / "shard-0.done").read_bytes() == b"done"
+    written = json.loads((tmp_path / "__saturate" / "completions" / "stats-0.json").read_text())
     assert written["rows_processed"] == 200 and (written["rank"], written["world"]) == (0, 1)
     assert STATS_KEYS <= written.keys()
 
@@ -160,7 +161,7 @@ def test_breaker_aborts_run_when_server_dies(stub, tmp_path, monkeypatch):
     assert stub.probes >= 1  # the open circuit probed and never saw a live server
     assert existing_ids(str(tmp_path)) == set()  # nothing durable: every row is re-admitted next run
     assert not list(tmp_path.glob("part-*.parquet"))
-    assert not os.path.exists(tmp_path / "completions" / "shard-0.done")
+    assert not os.path.exists(tmp_path / "__saturate" / "completions" / "shard-0.done")
 
 
 @pytest.fixture
@@ -471,4 +472,4 @@ def test_input_split_by_shard_select_runs_every_row_of_the_shard(stub, tmp_path)
     stats = pump(iter(mine), to_request, parse, endpoint=stub.endpoint,
                  output=str(tmp_path), window=Fixed(4), shard=(1, 4))
     assert mine and stats.rows_processed == len(mine)
-    assert (tmp_path / "completions" / "shard-1.done").exists()
+    assert (tmp_path / "__saturate" / "completions" / "shard-1.done").exists()

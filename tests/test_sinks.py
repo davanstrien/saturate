@@ -3,6 +3,7 @@ healing rule, skip_done with an external done-set."""
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from saturate import FileSink, Stats, read_output, skip_done
 
@@ -558,7 +559,7 @@ def test_begin_run_gives_each_run_its_own_telemetry_file(tmp_path):
     sink.write_telemetry((0, 1), ["{}"])  # run 1 crashes before its marker
     sink.begin_run((0, 1))
     sink.write_telemetry((0, 1), ["{}"])
-    assert len(list(tmp_path.glob("telemetry-shard0-*.jsonl"))) == 2
+    assert len(list(tmp_path.glob("__saturate/telemetry/telemetry-shard0-*.jsonl"))) == 2
 
 
 def test_manifest_read_retries_transient_errors(tmp_path, monkeypatch):
@@ -717,7 +718,7 @@ def test_reserved_columns_win_over_parse(tmp_path):
     # stats sidecar (CONTRACT §5): exact counts + geometry for storage-only readers
     import json as _json
     sink.write_stats((2, 4), _json.dumps({"rows_processed": 1, "rows_failed": 0}))
-    got = _json.loads((tmp_path / "completions" / "stats-2.json").read_text())
+    got = _json.loads((tmp_path / "__saturate" / "completions" / "stats-2.json").read_text())
     assert (got["rank"], got["world"], got["rows_processed"]) == (2, 4, 1)
 
 
@@ -824,7 +825,7 @@ def test_existing_ids_concurrent_reads_match_sequential(tmp_path):
     ids = {f"row-{i:03d}" for i in range(200)}
     for i, id_ in enumerate(sorted(ids)):
         sink.append({"id": id_, "error": "http 500: nope" if i % 7 == 0 else None})
-    manifests = sorted((tmp_path / "_manifest").glob("ids-part-*.parquet"))
+    manifests = sorted((tmp_path / "__saturate" / "manifest").glob("ids-part-*.parquet"))
     assert len(manifests) == 200
     manifests[3].unlink()  # uncovered part: scanned individually
     manifests[150].write_bytes(b"not parquet")  # unreadable sidecar: its part is scanned
@@ -840,8 +841,8 @@ def test_existing_ids_warns_on_many_manifest_files(tmp_path, capsys):
     say so once and point at the knob (flush_every)."""
     from saturate import ParquetSink
 
-    mdir = tmp_path / "_manifest"
-    mdir.mkdir()
+    mdir = tmp_path / "__saturate" / "manifest"
+    mdir.mkdir(parents=True)
     table = pa.Table.from_pylist([{"id": "x", "error": None}])
     for i in range(1001):
         pq.write_table(table, mdir / f"ids-part-{i:05d}.parquet")
@@ -1413,3 +1414,140 @@ def test_a_struct_with_a_repeated_field_name_is_an_error_row(tmp_path):
     assert rows["repeated"]["m"] is None
     assert "repeated field name" in rows["repeated"]["error"]
     assert sink.rows_demoted == 1
+
+
+def _finished_output(tmp_path):
+    """An output with every kind of file a run writes: parts, manifests, a marker, stats and
+    telemetry."""
+    from saturate import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=2)
+    for i in range(4):
+        sink.append({"id": f"r{i}", "text": f"row {i}", "error": None})
+    sink.append({"id": "bad", "error": "HTTP 400"})
+    sink.flush()
+    sink.write_telemetry((0, 1), ['{"t": 1}'])
+    sink.write_stats((0, 1), "{}")
+    sink.write_marker((0, 1))
+    return sink
+
+
+def test_a_declared_output_loads_with_load_dataset_and_read_table(tmp_path):
+    """Nothing beside the parts is read as data. With a declared schema every part has the same
+    columns, even a part of error rows only, so the loaders see the raw parts whole."""
+    datasets = pytest.importorskip("datasets")
+    import pyarrow.dataset as ds
+
+    from saturate import ParquetSink
+
+    schema = pa.schema([("id", pa.string()), ("text", pa.string()), ("error", pa.string())])
+    sink = ParquetSink(str(tmp_path), flush_every=1, schema=schema)
+    sink.append({"id": "bad", "error": "HTTP 400"})  # the first part: an error row
+    for i in range(4):
+        sink.append({"id": f"r{i}", "text": f"row {i}", "error": None})
+    sink.write_telemetry((0, 1), ['{"t": 1}'])
+    sink.write_stats((0, 1), "{}")
+    sink.write_marker((0, 1))
+    loaded = datasets.load_dataset(str(tmp_path), split="train")
+    assert sorted(loaded["id"]) == ["bad", "r0", "r1", "r2", "r3"]
+    assert set(loaded.column_names) == {"id", "text", "error"}
+    assert pq.read_table(str(tmp_path)).num_rows == 5
+    assert ds.dataset(str(tmp_path), format="parquet").count_rows() == 5
+
+
+def test_an_output_in_the_old_layout_resumes(tmp_path):
+    """Outputs written before 0.3 keep their manifests in _manifest/: resume still reads them."""
+    from saturate import ParquetSink
+
+    _finished_output(tmp_path)
+    (tmp_path / "__saturate" / "manifest").rename(tmp_path / "_manifest")
+    resumed = ParquetSink(str(tmp_path))
+    assert resumed.existing_ids() == {"r0", "r1", "r2", "r3", "bad"}
+    assert resumed.existing_ids(retry_errors=True) == {"r0", "r1", "r2", "r3"}
+
+
+def test_an_output_with_manifests_in_both_layouts_resumes(tmp_path):
+    """An old output resumed by 0.3 holds manifests in _manifest/ and __saturate/manifest/."""
+    from saturate import ParquetSink
+
+    _finished_output(tmp_path)
+    old = tmp_path / "_manifest"
+    old.mkdir()
+    moved = sorted((tmp_path / "__saturate" / "manifest").glob("ids-*.parquet"))[:2]
+    for path in moved:
+        path.rename(old / path.name)
+    assert moved and list((tmp_path / "__saturate" / "manifest").glob("ids-*.parquet"))
+    resumed = ParquetSink(str(tmp_path))
+    assert resumed.existing_ids() == {"r0", "r1", "r2", "r3", "bad"}
+    assert resumed.existing_ids(retry_errors=True) == {"r0", "r1", "r2", "r3"}
+
+
+def test_an_inferred_schema_that_grows_is_read_whole_by_read_output_only(tmp_path):
+    """The documented limit (CONTRACT §1): with an inferred schema, a column first seen in a
+    later part is dropped by pq.read_table and fails load_dataset; read_output keeps it.
+    If a pyarrow or datasets release changes either behaviour, this test says so."""
+    datasets = pytest.importorskip("datasets")
+
+    from saturate import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "bad", "error": "HTTP 500"})  # the first part has {id, error} only
+    sink.append({"id": "ok", "text": "hi", "error": None})
+    assert sorted(pq.read_table(str(tmp_path)).column_names) == ["error", "id"]  # text dropped
+    with pytest.raises(datasets.exceptions.DatasetGenerationError):
+        datasets.load_dataset(str(tmp_path), split="train")
+    assert dict(read_output(str(tmp_path))) == {"ok": {"text": "hi"}}
+
+
+def test_an_output_in_a_subdirectory_loads_with_data_dir(tmp_path):
+    """The README writes to .../data inside a dataset repo; load_dataset takes data_dir=."""
+    datasets = pytest.importorskip("datasets")
+
+    from saturate import ParquetSink
+
+    schema = pa.schema([("id", pa.string()), ("text", pa.string()), ("error", pa.string())])
+    sink = ParquetSink(str(tmp_path / "data"), flush_every=1, schema=schema)
+    sink.append({"id": "r0", "text": "row 0", "error": None})
+    sink.write_marker((0, 1))
+    (tmp_path / "README.md").write_text("# results\n")
+    loaded = datasets.load_dataset(str(tmp_path), data_dir="data", split="train")
+    assert loaded["id"] == ["r0"]
+
+
+def test_a_resumed_old_output_writes_its_sidecars_in_the_new_layout(tmp_path):
+    """0.3 never writes the old locations and never moves or deletes the old files."""
+    from saturate import ParquetSink
+
+    old = _finished_output(tmp_path)
+    (tmp_path / "__saturate" / "manifest").rename(tmp_path / "_manifest")
+    (tmp_path / "__saturate" / "completions").rename(tmp_path / "completions")
+    old_manifests = sorted(p.name for p in (tmp_path / "_manifest").iterdir())
+    resumed = ParquetSink(str(tmp_path), flush_every=1)
+    assert "r0" in resumed.existing_ids()
+    resumed.append({"id": "r9", "text": "row 9", "error": None})
+    resumed.write_marker((0, 1))
+    assert sorted(p.name for p in (tmp_path / "_manifest").iterdir()) == old_manifests
+    assert (tmp_path / "completions" / "shard-0.done").exists()  # left in place
+    assert (tmp_path / "__saturate" / "completions" / "shard-0.done").exists()
+    assert len(list((tmp_path / "__saturate" / "manifest").glob("ids-*.parquet"))) == 1
+    assert old.rows_written == 5
+
+
+def test_a_remote_style_output_round_trips(tmp_path):
+    """Object stores have no directories: a glob of a missing prefix returns nothing, and the
+    nested __saturate/ paths need no makedirs. memory:// behaves that way."""
+    import fsspec
+
+    from saturate import ParquetSink
+
+    out = f"memory://saturate-{tmp_path.name}"
+    sink = ParquetSink(out, flush_every=1)
+    assert sink.existing_ids() == set()  # no output yet
+    sink.append({"id": "r0", "text": "row 0", "error": None})
+    sink.write_telemetry((0, 1), ['{"t": 1}'])
+    sink.write_marker((0, 1))
+    fs = fsspec.filesystem("memory")
+    root = out.removeprefix("memory://")
+    assert fs.glob(f"{root}/__saturate/manifest/ids-*.parquet")
+    assert fs.glob(f"{root}/__saturate/telemetry/telemetry-*.jsonl")
+    assert ParquetSink(out).existing_ids() == {"r0"}

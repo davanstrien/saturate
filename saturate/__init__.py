@@ -88,7 +88,7 @@ class Stats:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     elapsed_s: float = 0.0
-    final_limit: int = 0
+    final_limit: int = 0  # the window at the end (maybe mid-trial); Auto(initial=final_limit) starts near it
     input_bound: bool = False
     breaker_opens: int = 0
     retries: int = 0  # retry attempts over the run (a row that failed three times and then succeeded: 3)

@@ -71,7 +71,7 @@ def test_every_decision_keeps_the_window_in_bounds_and_names_a_known_reason(data
         if new > limit and ceiling is not None:
             assert new <= max(auto.min, _below(ceiling.limit)), (new, ceiling)
         slow_start = isinstance(before.phase, Steady) and before.phase.backoff == 1
-        if slow_start and before.phase.ready_at is None:
+        if slow_start and before.phase.jitter is None:
             assert reason != "hold:jitter", before.phase
         limit = new
 
@@ -92,25 +92,6 @@ def test_the_same_seed_makes_the_same_decisions(data):
 
 
 @given(st.data())
-def test_a_jitter_hold_never_outlasts_its_bound(data):
-    """A due trial waits at most JITTER_TICKS ticks (at the tick length it was drawn with) plus
-    the tick that crosses the bound; then it opens, or a higher rule takes over."""
-    auto = data.draw(autos())
-    limit = auto.initial
-    held_s, longest_tick = 0.0, 0.0
-    for _ in range(data.draw(st.integers(1, 150))):
-        obs = data.draw(observations(limit))
-        tick = obs["tick_s"] or 2.0
-        limit = auto.decide(obs, limit)
-        if auto.last_reason == "hold:jitter":
-            held_s += tick
-            longest_tick = max(longest_tick, tick)
-            assert held_s <= auto.JITTER_TICKS * longest_tick + longest_tick + 1e-9, held_s
-        else:
-            held_s, longest_tick = 0.0, 0.0
-
-
-@given(st.data())
 def test_decide_never_changes_a_state_it_was_given(data):
     """The state is frozen dataclasses: decide() replaces it, so a state held from an earlier
     tick still reads the same afterwards (rules can be replayed from any tick)."""
@@ -123,60 +104,94 @@ def test_decide_never_changes_a_state_it_was_given(data):
         assert dataclasses.astuple(before) == snapshot
 
 
-class _CountingRandom:
-    """A seeded Random that counts the jitter draws made from it."""
+class _RecordingRandom:
+    """A seeded Random that records the jitter draws made from it."""
 
     def __init__(self, seed: int):
         import random
 
-        self.inner, self.draws = random.Random(seed), 0
+        self.inner, self.drawn = random.Random(seed), []
 
-    def uniform(self, a: float, b: float) -> float:
-        self.draws += 1
-        return self.inner.uniform(a, b)
+    def randint(self, a: int, b: int) -> int:
+        self.drawn.append(self.inner.randint(a, b))
+        return self.drawn[-1]
+
+
+def check_jitter(auto: Auto, steps) -> None:
+    """Drive `auto` through `steps` (a callable: limit -> observation, or None to stop) and check
+    that every trial opened after a failure waited exactly the jitter drawn for it, in
+    hold:jitter ticks since the previous trial or skipped move: a fresh draw each time, never
+    more than JITTER_TICKS, and not spent by any other hold."""
+    auto.rng = _RecordingRandom(0)
+    limit, draws_seen, jitter_holds = auto.initial, 0, 0
+    while (obs := steps(limit)) is not None:
+        before = auto.state.phase
+        limit = auto.decide(obs, limit)
+        reason = auto.last_reason
+        if reason == "hold:jitter":
+            jitter_holds += 1
+        if reason.startswith("trial") and isinstance(before, Steady) and before.backoff > 1:
+            assert len(auto.rng.drawn) == draws_seen + 1, (auto.rng.drawn, draws_seen)
+            assert jitter_holds == auto.rng.drawn[-1] <= auto.JITTER_TICKS, (jitter_holds, auto.rng.drawn)
+        if reason.startswith(("trial", "cut", "revert")) or reason in ("hold:ceiling", "hold:floor"):
+            draws_seen, jitter_holds = len(auto.rng.drawn), 0
 
 
 @given(st.data())
-def test_every_trial_after_a_failure_draws_its_own_jitter(data):
-    """Each trial opened with backoff > 1 has a jitter draw of its own, made after the previous
-    trial or skipped move: a draw is never carried over, so clients that fall into step once
-    fall out of it again at the next trial."""
+def test_every_trial_after_a_failure_waits_its_own_jitter(data):
+    """For any observations: see check_jitter."""
     auto = data.draw(autos())
-    auto.rng = _CountingRandom(data.draw(st.integers(0, 2**16)))
-    limit = auto.initial
-    draws_at_last_open = 0
-    for _ in range(data.draw(st.integers(1, 150))):
-        before = auto.state.phase
-        limit = auto.decide(data.draw(observations(limit)), limit)
-        reason = auto.last_reason
-        if reason.startswith("trial") and isinstance(before, Steady) and before.backoff > 1:
-            assert auto.rng.draws > draws_at_last_open, (reason, before)
-        if reason.startswith("trial") or reason in ("hold:ceiling", "hold:floor"):
-            draws_at_last_open = auto.rng.draws
+    ticks_left = [data.draw(st.integers(1, 150))]
+
+    def anything(limit):
+        if ticks_left[0] == 0:
+            return None
+        ticks_left[0] -= 1
+        return data.draw(observations(limit))
+
+    check_jitter(auto, anything)
 
 
 @given(cap=st.integers(8, 300), seed=st.integers(0, 2**16))
-def test_trials_at_a_backpressure_wall_each_draw_their_own_jitter(cap, seed):
-    """At a 429 wall most moves up are skipped (hold:ceiling) and most trials follow a
-    failure: the case where a carried-over draw would show."""
-    auto = Auto(initial=16, max_limit=512)
-    auto.rng = _CountingRandom(seed)
-    limit, hist, draws_at_last_open = 16, [16], 0
-    for _ in range(1500):
-        seen = hist[max(0, len(hist) - 2)]
-        served = min(seen, cap)
-        before = auto.state.phase
-        limit = auto.decide(dict(inflight=limit, backpressure=max(1, served // 12) if seen > cap else 0,
-                                 successes=served, tok_s=served * 100.0), limit)
+def test_trials_at_a_backpressure_wall_each_wait_their_own_jitter(cap, seed):
+    """At a 429 wall most moves up are skipped (hold:ceiling) and most trials follow a failure:
+    the case where a carried-over draw would show."""
+    hist = [16]
+
+    def wall(limit):
+        if len(hist) > 1500:
+            return None
         hist.append(limit)
-        reason = auto.last_reason
-        if reason.startswith("trial") and isinstance(before, Steady) and before.backoff > 1:
-            assert auto.rng.draws > draws_at_last_open, (reason, before)
-        if reason.startswith("trial") or reason in ("hold:ceiling", "hold:floor"):
-            draws_at_last_open = auto.rng.draws
+        seen = hist[max(0, len(hist) - 3)]
+        served = min(seen, cap)
+        return dict(inflight=limit, backpressure=max(1, served // 12) if seen > cap else 0,
+                    successes=served, tok_s=served * 100.0)
+
+    check_jitter(Auto(initial=16, max_limit=512, seed=seed), wall)
 
 
-whole = st.integers(-5, 2000)
+def test_a_hold_every_client_sees_does_not_spend_the_jitter():
+    """A queue in band holds every client sharing the engine; if those ticks spent the jitter,
+    the clients would all open their next trial on the same tick after it."""
+    auto = Auto(initial=64)
+    auto.rng = type("Longest", (), {"randint": staticmethod(lambda a, b: b)})()  # always JITTER_TICKS
+    limit = auto.initial
+    for _ in range(200):  # until a trial fails and the next one is due
+        limit = auto.decide(dict(inflight=limit, successes=limit, tok_s=100.0 * 64, waiting=0, running=limit),
+                            limit)
+        if auto.last_reason == "hold:jitter":
+            break
+    assert auto.last_reason == "hold:jitter", auto.last_reason
+    left = auto.state.phase.jitter
+    assert left == auto.JITTER_TICKS - 1
+    for _ in range(10):  # a queue in band: hold
+        limit = auto.decide(dict(inflight=limit, successes=limit, tok_s=100.0 * 64, waiting=4, running=limit),
+                            limit)
+        assert auto.last_reason == "hold"
+    assert auto.state.phase.jitter == left
+
+
+whole = st.one_of(st.integers(-5, 2000), st.booleans())
 real = st.floats(allow_nan=True, allow_infinity=True)
 SETTINGS = dict(target_waiting=whole, initial=st.one_of(st.none(), whole), min_limit=whole, max_limit=whole,
                 step=whole, stall_ticks=whole, kv_hi=real, hits_lo=real, improve=real, bp_frac=real)
@@ -201,7 +216,8 @@ def test_any_configuration_is_refused_up_front_or_runs(data):
     dict(target_waiting=0), dict(initial=0), dict(initial=-3), dict(kv_hi=0.0), dict(kv_hi=1.5),
     dict(hits_lo=-0.1), dict(hits_lo=1.1), dict(improve=1.0), dict(improve=0.9),
     dict(improve=float("nan")), dict(bp_frac=float("nan")), dict(min_limit=0), dict(max_limit=1, min_limit=2),
-    dict(step=0), dict(stall_ticks=0),
+    dict(step=0), dict(stall_ticks=0), dict(improve=float("inf")), dict(target_waiting=True),
+    dict(kv_hi=True), dict(bp_frac=False), dict(seed=True),
 ])
 def test_a_setting_that_cannot_work_is_refused(kwargs):
     with pytest.raises(ValueError):

@@ -103,7 +103,10 @@ def score(auto, kwargs: dict, after: dict | None = None) -> tuple[float, float, 
     for seed in range(3):
         engine = Engine(**params, seed=seed)
         then = None if after is None else (300, Engine(**{**params, **after}, seed=seed))
-        controller = auto()
+        try:  # a version with trial jitter: the same schedule on every run of the table
+            controller = auto(seed=seed)
+        except TypeError:
+            controller = auto()
         if reports and hasattr(controller, "begin"):
             controller.begin(SimpleNamespace(requests=engine.cap, queues=True))
         ticks = run(controller, engine, 600, then=then)

@@ -100,57 +100,22 @@ class Tick:
     engine: Engine  # the engine this tick ran against
 
 
-def run(ctrl, engine: Engine, ticks: int, limit: int | None = None,
-        then: tuple[int, Engine] | None = None) -> list[Tick]:
+def run(ctrl, engine: Engine, ticks: int, then: tuple[int, Engine] | None = None) -> list[Tick]:
     """Drive `ctrl` for `ticks` ticks against `engine`, the source never starving the window.
     A tick's reading describes the window from about one request latency before. Completions
     are counted with their fractions carried, so a slow engine still reports some."""
-    rng = random.Random(engine.seed)
-    limit = ctrl.initial if limit is None else limit
-    history = [limit]
-    out = []
-    carry = timeout_carry = 0.0
-    for i in range(ticks):
-        if then is not None and i == then[0]:
-            engine = then[1]
-        lag = max(1, math.ceil(engine.latency_s(history[-1]) / TICK_S))
-        seen = history[max(0, len(history) - 1 - lag)]
-        delivered = engine.rows_per_s(seen)
-        jitter = rng.gauss(1.0, engine.noise) if engine.noise else 1.0
-        rate = delivered * max(0.0, jitter)
-        carry += rate * TICK_S
-        successes, carry = int(carry), carry - int(carry)
-        rejected = 0
-        if engine.rate_limit is not None and seen > engine.rate_limit:
-            rejected = round((seen - engine.rate_limit) / engine.latency_s(seen) * TICK_S) or 1
-        # past the timeout each request fails once per read timeout, not once per tick
-        if delivered == 0.0 and seen > 0:
-            timeout_carry += seen * TICK_S / engine.read_timeout_s
-        timed_out, timeout_carry = int(timeout_carry), timeout_carry - int(timeout_carry)
-        queued = max(0, limit - engine.cap)
-        obs = dict(
-            waiting=queued if engine.gauges else None,
-            running=min(limit, engine.cap) if engine.gauges else None,
-            inflight=limit, backpressure=rejected + timed_out,
-            successes=successes, input_bound=False,
-            kv=0.3 if engine.gauges else None, hits=0.9 if engine.gauges else None,
-            tok_s=rate * engine.tokens_per_row,
-            latency_s=engine.latency_s(seen) if rate else None,
-        )
-        limit = ctrl.decide(obs, limit)
-        history.append(limit)
-        out.append(Tick(limit, ctrl.last_reason, delivered, engine.latency_s(seen), rejected + timed_out,
-                        engine))
-    return out
+    return run_shared([ctrl], engine, ticks, then=then)[0]
 
 
-def run_shared(ctrls: list, engine: Engine, ticks: int, starts: list[int] | None = None) -> list[list[Tick]]:
+def run_shared(ctrls: list, engine: Engine, ticks: int, starts: list[int] | None = None,
+               then: tuple[int, Engine] | None = None) -> list[list[Tick]]:
     """Drive several controllers against one engine, as sharded Jobs pumping one endpoint do.
     Client i joins at tick `starts[i]` (default: all at once). Everything admitted shares the
     engine: the running cap, the queue, the throughput (split by each client's share of what is
     in flight) and a hosted API's 429 limit (rejections split the same way). Each client sees
     its own completions, the shared queue gauges and the shared latency; each reading has its
-    own noise. Returns each client's ticks; a tick before it joins has limit 0."""
+    own noise. `then=(tick, engine)` switches engine mid-run. Returns each client's ticks; a tick
+    before a client joins has limit 0."""
     starts = starts or [0] * len(ctrls)
     rngs = [random.Random(engine.seed + 1000 * i) for i in range(len(ctrls))]  # client 0 draws as run() does
     histories = [[0] for _ in ctrls]
@@ -159,6 +124,8 @@ def run_shared(ctrls: list, engine: Engine, ticks: int, starts: list[int] | None
     timeout_carries = [0.0] * len(ctrls)
     out: list[list[Tick]] = [[] for _ in ctrls]
     for i in range(ticks):
+        if then is not None and i == then[0]:
+            engine = then[1]
         for c, ctrl in enumerate(ctrls):
             if i == starts[c]:
                 limits[c] = ctrl.initial

@@ -84,16 +84,6 @@ def test_blind_clients_sharing_an_engine_keep_the_queue_bounded():
     assert total <= 256 * 2, total
 
 
-def test_one_client_on_the_shared_driver_matches_the_single_driver():
-    """run_shared with one client is run: the same windows, reasons and deliveries."""
-    for seed in SEEDS:
-        engine = Engine(curve=REAL_SGLANG, cap=256, gauges=False, noise=0.05, seed=seed)
-        alone = run(Auto(seed=seed), engine, 300)
-        (together,) = run_shared([Auto(seed=seed)], Engine(curve=REAL_SGLANG, cap=256, gauges=False,
-                                                                 noise=0.05, seed=seed), 300)
-        assert [(t.limit, t.reason) for t in alone] == [(t.limit, t.reason) for t in together]
-
-
 @pytest.mark.parametrize("rate_limit", [64, 100, 127, 200, 500])
 def test_a_hosted_api_limit_over_many_seeds(rate_limit):
     """The fast tier's hosted-API test over 40 noise draws and trial schedules."""

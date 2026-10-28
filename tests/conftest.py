@@ -5,7 +5,6 @@ Timeouts are covered with pytest-timeout's signal method (the Linux default): th
 method exits the process before any report is made."""
 
 import os
-import random
 
 import pytest
 from hypothesis import settings
@@ -35,8 +34,12 @@ def pytest_collection_modifyitems(config, items):
 def _seeded_auto(monkeypatch):
     """An Auto built without a seed draws its trial jitter from the OS; in tests it gets seed 0,
     so a run is repeatable. A test that wants several schedules passes `seed` itself."""
-    seeded = lambda seed=None: random.Random(0 if seed is None else seed)  # noqa: E731
-    monkeypatch.setattr(saturate.controller, "random", type("random", (), {"Random": staticmethod(seeded)}))
+    build = saturate.controller.Auto.__init__
+
+    def seeded(self, *args, seed=None, **kwargs):
+        build(self, *args, seed=0 if seed is None else seed, **kwargs)
+
+    monkeypatch.setattr(saturate.controller.Auto, "__init__", seeded)
 
 
 @pytest.hookimpl(hookwrapper=True)

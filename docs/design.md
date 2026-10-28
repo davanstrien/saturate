@@ -136,7 +136,7 @@ flowchart TD
 | `hold` | window under 80% used, or a queue at or above the band's low end | hold |
 | `hold:ack` | waiting for an evidence window (`limit` completions and two throughput samples), or for a trial to settle | hold |
 | `hold:plateau` | waiting out the backoff between trials | hold |
-| `hold:jitter` | the backoff is out, after a failed trial (backoff > 1): a random 0–4 ticks more, drawn once per trial | hold — clients sharing one endpoint fall out of step |
+| `hold:jitter` | the backoff is out, after a failed trial (backoff > 1): a random 0–4 more ticks on which the trial is due, drawn once per trial; other holds do not count | hold — clients sharing one endpoint fall out of step, and a hold they all see (a shared queue in band) does not put them back in step |
 | `trial:up` / `trial:down` | the next move opens | move the window; judged later |
 | `hold:ceiling` / `hold:floor` | a move would cross `max_limit` or a backpressure ceiling / `min_limit`, or a cut is already at `min_limit` | skip to the next move; a cut arms nothing |
 

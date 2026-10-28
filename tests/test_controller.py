@@ -589,6 +589,22 @@ def test_a_ceiling_is_released_after_the_release_time():
     assert (ctrl.last_reason, new) == ("cut:bp", 56)
 
 
+def test_a_released_ceiling_does_not_cap_a_climb_under_a_higher_active_one():
+    """The probe cap is for the first move past a released ceiling. Once a higher ceiling is
+    active (met since, so the engine ran above the old one), only the active ceiling bounds a
+    climb: a cut back under the old one does not make the climb stop an eighth past it."""
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    limit = ceiling_at_64(ctrl)
+    ticks = int(BP_CEILING_RELEASE_S / TICK_S)
+    traj, _ = climb(ctrl, limit, ticks + 100, knee(512), latency_s=1.0)  # released, and climbed past it
+    assert ctrl.state.ceiling is None and ctrl.state.seen_ceiling is not None and max(traj) > 128, traj
+    high = max(traj)
+    ctrl.decide(healthy(high, backpressure=high, latency_s=1.0), high)  # a new, higher ceiling
+    assert ctrl.state.ceiling is not None and ctrl.state.ceiling.limit == high
+    _, new, _, _ = climb_until(ctrl, 40, "trial:up", knee(512), latency_s=1.0)  # from under the old one
+    assert new > 72, new  # not stopped at an eighth past the released ceiling of 64
+
+
 # --- whole runs -------------------------------------------------------------
 
 

@@ -46,6 +46,13 @@ for limit in (64, 100, 127, 200, 500):
                                                         gauges=False, noise=0.05)))
 SCENARIOS.append(("blind, flat 32 -> 64 as on real SGLang", dict(curve=[(32, 64.0), (64, 64.0), (192, 150.0)],
                                                               cap=256, gauges=False, noise=0.07)))
+# a request leaves its slot idle for a client round trip unless one waits in the queue
+REAL_SGLANG = [(32, 64.0), (64, 64.0), (256, 160.0)]  # 2026-10-28 Jobs: flat 32-64, rising to the cap
+for gauges in (False, True):
+    SCENARIOS.append((f"{'gauges' if gauges else 'blind'}, real-SGLang-like with 0.15 s refill",
+                      dict(curve=REAL_SGLANG, cap=256, gauges=gauges, noise=0.05, refill_s=0.15)))
+SCENARIOS.append(("blind, linear-256 with 0.15 s refill",
+                  dict(curve=LINEAR, cap=256, gauges=False, noise=0.05, refill_s=0.15)))
 SCENARIOS.append(("blind, 32 s requests", dict(curve=[(256, 8.0)], cap=256, gauges=False, noise=0.05)))
 SCENARIOS.append(("blind, 12 s requests, 60 s timeout", dict(curve=[(100, 8.0)], cap=100, gauges=False,
                                                              noise=0.05, read_timeout_s=60)))

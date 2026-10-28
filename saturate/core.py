@@ -366,24 +366,27 @@ class AdaptiveClient:
     async def __aenter__(self):
         if self._client.closed:  # entered again after an earlier `async with`: start fresh
             self._client, self.limiter = self._build()
-        await self._start_at_capacity()
-        await self.limiter.__aenter__()
+        try:
+            await self._begin()
+            await self.limiter.__aenter__()
+        except BaseException:  # cancelled or failed before the run began: nothing else will close it
+            await self._client.aclose()
+            raise
         return self
 
-    async def _start_at_capacity(self) -> None:
-        """Read the engine's capacity once, before the first request, and start Auto there (unless
-        the caller chose its start, or signals are off)."""
+    async def _begin(self) -> None:
+        """Before the first request: read the engine's capacity once (unless signals are off),
+        and start Auto's run from it (Auto.begin)."""
         controller = self.limiter.controller
-        if self._signal_source == "none" or not isinstance(controller, Auto):
+        if not isinstance(controller, Auto):
             return
-        capacity = await read_capacity(self._client, self.base)
-        if capacity is None:
-            return
-        controller.start_at_capacity(capacity.requests, capacity.queues)
+        capacity = None if self._signal_source == "none" else await read_capacity(self._client, self.base)
+        controller.begin(capacity)
         self.limiter.set_limit(controller.initial)
-        print(f"[pump] {capacity.engine} reports {capacity.requests} requests at once"
-              f"{'' if capacity.queues else ' (and rejects the rest)'}: starting at {controller.initial}",
-              file=sys.stderr, flush=True)
+        if capacity is not None:
+            print(f"[pump] {capacity.engine} reports {capacity.requests} requests at once"
+                  f"{'' if capacity.queues else ' (and rejects the rest)'}: starting at {controller.initial}",
+                  file=sys.stderr, flush=True)
 
     async def __aexit__(self, *exc):
         try:

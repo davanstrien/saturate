@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
@@ -97,14 +98,14 @@ def ramp_ticks(ticks) -> int:
 
 def score(auto, kwargs: dict, after: dict | None = None) -> tuple[float, float, float, float, float]:
     best, first, lat, fail, ramp = [], [], [], [], []
+    params = dict(kwargs)
+    reports = params.pop("reports", False)  # the engine reports its capacity before the run
     for seed in range(3):
-        kwargs = dict(kwargs)
-        reports = kwargs.pop("reports", False)  # the engine reports its capacity before the run
-        engine = Engine(**kwargs, seed=seed)
-        then = None if after is None else (300, Engine(**{**kwargs, **after}, seed=seed))
+        engine = Engine(**params, seed=seed)
+        then = None if after is None else (300, Engine(**{**params, **after}, seed=seed))
         controller = auto()
-        if reports and hasattr(controller, "start_at_capacity"):
-            controller.start_at_capacity(engine.cap, True)
+        if reports and hasattr(controller, "begin"):
+            controller.begin(SimpleNamespace(requests=engine.cap, queues=True))
         ticks = run(controller, engine, 600, then=then)
         tail = ticks[100:] if then is None else ticks[300:]  # after a change: how well it adapted
         best.append(share_of_best(tail))

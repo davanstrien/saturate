@@ -151,11 +151,14 @@ best fixed window: past a flat stretch that starts below the initial window, a g
 Before the first request, `AdaptiveClient` reads the engine's capacity once
 (`signals.read_capacity`: SGLang `/v1/loads` or `/get_server_info` `max_running_requests`,
 llama.cpp `/props` `total_slots`, TEI `/info` `max_concurrent_requests`; vLLM reports none).
-Unless the caller set `initial`, `Auto` starts there: a little above it for an engine that
-queues the rest, so a waiting request refills a free slot; exactly there, and no higher, for
-TEI, which rejects the rest with 429s.
+Unless the caller set `initial`, `Auto` starts there (`Auto.begin`, once per run, from the
+caller's unchanged configuration): above it by min(capacity, 2 × target_waiting) for an engine
+that queues the rest, so a waiting request refills a free slot; exactly there, and never above
+it, for TEI, which rejects the rest with 429s. The sources are asked at once, with 2 s
+timeouts, and each is read by its engine's own response shape.
 
-`Fixed(n)` bypasses all of it. Defaults: `Auto(target_waiting=8, initial=64,
+`Fixed(n)` bypasses all of it. Defaults: `Auto(target_waiting=8, initial=None (the engine's
+capacity, else 64),
 max_limit=512, step=8)`; cap `max_limit` (~128) for vision workloads — in-flight
 images live in host RAM.
 

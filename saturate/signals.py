@@ -23,6 +23,7 @@ from __future__ import annotations
 import dataclasses
 import re
 import sys
+from collections.abc import Callable
 
 from saturate.http import HttpClient, Timeouts, TransportError
 
@@ -156,42 +157,60 @@ class Capacity:
     engine: str
 
 
-# where each engine reports its capacity: (path from the server root, JSON key, engine, queues).
-# Checked on live servers 2026-10-28; vLLM reports none (max_num_seqs is not exposed).
-CAPACITY_SOURCES = (
-    ("/v1/loads", "max_running_requests", "sglang", True),
-    ("/get_server_info", "max_running_requests", "sglang", True),
-    ("/props", "total_slots", "llamacpp", True),
-    ("/info", "max_concurrent_requests", "tei", False),
+def _sglang_loads(body) -> int | None:
+    """SGLang /v1/loads: one entry per data-parallel rank (under "loads", or the body itself);
+    the engine's capacity is their sum."""
+    entries = body.get("loads", [body]) if isinstance(body, dict) else body
+    if not isinstance(entries, list) or not entries:
+        return None
+    caps = [e.get("max_running_requests") for e in entries if isinstance(e, dict) and "num_running_reqs" in e]
+    return sum(caps) if caps and len(caps) == len(entries) and all(_count(c) for c in caps) else None
+
+
+def _count(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _top_level(key: str, *signature: str) -> Callable[[object], int | None]:
+    """A count under `key` at the top level of a JSON object that also has every `signature` key:
+    the shape that names the engine, so another server's /info or /props does not pass for it."""
+    def read(body) -> int | None:
+        if not isinstance(body, dict) or not all(k in body for k in signature):
+            return None
+        value = body.get(key)
+        return value if _count(value) else None
+    return read
+
+
+# where each engine reports its capacity, in order of preference: (path from the server root,
+# reader, engine, queues past it). Checked on live servers 2026-10-28; vLLM reports none.
+CAPACITY_SOURCES: tuple[tuple[str, Callable[[object], int | None], str, bool], ...] = (
+    ("/v1/loads", _sglang_loads, "sglang", True),
+    ("/get_server_info", _top_level("max_running_requests", "max_prefill_tokens"), "sglang", True),
+    ("/props", _top_level("total_slots", "default_generation_settings"), "llamacpp", True),
+    ("/info", _top_level("max_concurrent_requests", "max_batch_tokens", "model_id"), "tei", False),
 )
+CAPACITY_TIMEOUTS = Timeouts(read=2.0, connect=2.0, pool=2.0, write=2.0)  # a one-off read: fail fast
 
 
-def _find_key(obj, key: str):
-    """The first value under `key` anywhere in a JSON document."""
-    if isinstance(obj, dict):
-        if key in obj:
-            return obj[key]
-        obj = list(obj.values())
-    if isinstance(obj, list):
-        for item in obj:
-            found = _find_key(item, key)
-            if found is not None:
-                return found
-    return None
+async def _read_one(client: HttpClient, url: str, reader) -> int | None:
+    try:
+        reply = await client.get(url, timeouts=CAPACITY_TIMEOUTS)
+        return reader(reply.json()) if reply.status_code == 200 else None
+    except (TransportError, ValueError):  # unreachable, or not JSON
+        return None
 
 
 async def read_capacity(client: HttpClient, endpoint: str) -> Capacity | None:
-    """The engine's capacity from the first source that reports one, or None (vLLM, a hosted
-    API, a proxy). A one-off read before the run: a failure costs a few fast requests."""
+    """The engine's capacity from the first source (in CAPACITY_SOURCES order) that reports one,
+    or None (vLLM, a hosted API, a proxy). Every source is asked at once, with short timeouts, so
+    the read costs one round trip, two seconds at most."""
+    import asyncio
+
     base = endpoint.rsplit("/v1", 1)[0]
-    for path, key, engine, queues in CAPACITY_SOURCES:
-        try:
-            reply = await client.get(f"{base}{path}", timeouts=SCRAPE_TIMEOUTS)
-            if reply.status_code != 200:
-                continue
-            value = _find_key(reply.json(), key)
-        except (TransportError, ValueError):  # unreachable, or not JSON
-            continue
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-            return Capacity(value, queues, engine)
+    found = await asyncio.gather(*(_read_one(client, f"{base}{path}", reader)
+                                   for path, reader, _, _ in CAPACITY_SOURCES))
+    for requests, (_, _, engine, queues) in zip(found, CAPACITY_SOURCES, strict=True):
+        if requests is not None:
+            return Capacity(requests, queues, engine)
     return None

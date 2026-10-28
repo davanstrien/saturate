@@ -1306,8 +1306,9 @@ def test_a_new_nested_key_extends_the_struct_like_a_new_column(tmp_path):
 
 def test_a_field_typed_after_it_was_first_none_is_stored_on_every_pyarrow(tmp_path):
     """The pin keeps struct fields in pin order and appends new ones (meta: struct<b, a>), while
-    inference orders them as they arrive (struct<a, b>). Arrow 26 casts structs by name; Arrow 19
-    (our floor) only casts matching order, so the second row became an error row there."""
+    inference orders them as they arrive (struct<a, b>). The cast matches struct fields by name
+    from Arrow 21 (our floor); Arrow 19 and 20 matched by order, and the second row became an
+    error row there."""
     from saturate import ParquetSink
 
     sink = ParquetSink(str(tmp_path), flush_every=1)

@@ -114,28 +114,35 @@ class Breaker:
         self.opens += 1
         print(f"[pump] circuit OPEN after {self.consecutive} consecutive 5xx/transport "
               "failures — pausing admission, probing", file=sys.stderr, flush=True)
-        opened = time.monotonic()
+        deadline = time.monotonic() + self.max_open_s  # probes and sleeps never run past it
         try:
             while True:
-                if time.monotonic() - opened > self.max_open_s:
+                left = deadline - time.monotonic()
+                if left <= 0:
                     self.dead = True  # waiters released below; they raise on re-check
                     raise FatalTransportError(
                         f"circuit breaker open for {self.max_open_s}s — server is not coming back")
-                try:
-                    r = await client.post(probe_url, json=probe_body(model),
-                                          timeouts=client.timeouts.capped(PROBE_TIMEOUT_S),
-                                          headers=PROBE_HEADERS)
-                    if _server_answered(r):
-                        break
-                except TransportError:
-                    pass
-                await asyncio.sleep(self.probe_interval)
+                if await self._probe(client, probe_url, model, min(PROBE_TIMEOUT_S, left)):
+                    break
+                await asyncio.sleep(min(self.probe_interval, max(0.0, deadline - time.monotonic())))
             self.consecutive = 0
         finally:
             self._open = False
             self._closed.set()  # NEVER strand waiters — even when the opener raises
         print("[pump] circuit CLOSED — server responding again, resuming admission",
               file=sys.stderr, flush=True)
+
+    @staticmethod
+    async def _probe(client: HttpClient, url: str, model: str | None, limit: float) -> bool:
+        """Whether the inference server answered a probe within `limit` seconds. The capped phase
+        timeouts keep each phase short; wait_for bounds their sum, which could reach 3x `limit`."""
+        try:
+            r = await asyncio.wait_for(client.post(url, json=probe_body(model),
+                                                   timeouts=client.timeouts.capped(limit),
+                                                   headers=PROBE_HEADERS), limit)
+        except (TransportError, asyncio.TimeoutError):
+            return False
+        return _server_answered(r)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

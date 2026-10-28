@@ -37,7 +37,7 @@ from saturate.transport import (
 from saturate.writer import Sink, drain, sink_hooks
 
 __all__ = [
-    "pump", "Stats", "Fixed", "Auto", "Obs", "Attempt", "Engine", "wait_for_health",
+    "pump", "Stats", "RowsLostError", "Fixed", "Auto", "Obs", "Attempt", "Engine", "wait_for_health",
     "Request", "make_json_request", "make_multipart_request", "existing_ids",
     "AdaptiveClient", "AdaptiveLimiter", "Done", "through", "stream", "skip_done",
     "drain", "read_output", "Sink", "sink_hooks", "ParquetSink", "FileSink", "shard_select",
@@ -65,6 +65,10 @@ def existing_ids(out_uri: str, retry_errors: bool = False) -> set[str]:
     return ParquetSink(out_uri, create=False).existing_ids(retry_errors=retry_errors)
 
 
+class RowsLostError(RuntimeError):
+    """A run ended with rows that were read but neither skipped nor written."""
+
+
 @dataclasses.dataclass
 class Stats:
     rows_total: int = 0
@@ -83,6 +87,13 @@ class Stats:
     hints: list = dataclasses.field(default_factory=list)
     cut_reasons: dict = dataclasses.field(default_factory=dict)  # window reductions by controller reason
     bound_by: dict = dataclasses.field(default_factory=dict)  # ticks per bottleneck verdict (CONTRACT §6)
+
+    @property
+    def rows_unaccounted(self) -> int:
+        """Rows read but neither skipped nor handed to the sink; 0 after every run that ends
+        normally."""
+        accounted = self.rows_done_prior + self.rows_deduped + self.rows_processed + self.rows_failed
+        return self.rows_total - accounted
 
     @property
     def tokens_per_sec(self) -> float:
@@ -227,6 +238,10 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
 
     if writer is not None:
         await writer  # never two writers on one file
+    if stats.rows_unaccounted:  # a lost row is a bug: the run must not certify itself complete
+        raise RowsLostError(f"{stats.rows_unaccounted} of {stats.rows_total} rows were read but "
+                            "neither skipped nor handed to the sink; no completion marker was "
+                            "written, and a re-run resumes them")
     stats.elapsed_s = round(time.monotonic() - t0, 2)
     stats.final_limit = limiter.limit
     stats.retries = getattr(limiter, "retries_total", 0)  # an embedder's own limiter may count none

@@ -57,8 +57,14 @@ class _Slot:
         self._entered = False  # a slot is entered once: the limiter keys its waiters by slot
 
     def _check(self):
-        task = self._l._task  # r5: a dead controller fails admissions run-fatally, never row errors
-        if task and task.done() and not task.cancelled() and task.exception() is not None:
+        """A controller loop that has ended while the limiter is open fails admissions for the
+        whole run (never as row errors): crashed, or cancelled by someone other than __aexit__."""
+        task = self._l._task
+        if task is None or not task.done() or self._l._closing:
+            return
+        if task.cancelled():
+            raise FatalTransportError("controller loop was cancelled while the run was going")
+        if task.exception() is not None:
             raise FatalTransportError(f"controller loop died: {task.exception()!r}")
 
     async def __aenter__(self):
@@ -107,6 +113,25 @@ class _Slot:
         self._entered = False
 
 
+async def _wait_for_loop(task: asyncio.Task) -> asyncio.CancelledError | None:
+    """Wait for a stopping controller loop to finish. A cancel of the caller is held until the
+    loop has finished and then returned, to be raised; a second cancel stops the waiting."""
+    caller_cancel = None
+    while not task.done():
+        try:
+            await asyncio.wait({task})  # never raises the loop's own cancellation
+        except asyncio.CancelledError as e:
+            if caller_cancel is not None:
+                raise
+            caller_cancel = e
+    return caller_cancel
+
+
+def _retrieve(task: asyncio.Task) -> None:
+    if not task.cancelled():
+        task.exception()  # marks it retrieved: no "exception was never retrieved" warning
+
+
 class AdaptiveLimiter:
     """Adaptive admission: `async with limiter.slot(): ...; limiter.observe(...)`.
 
@@ -133,6 +158,7 @@ class AdaptiveLimiter:
         self._admitted: dict[_Slot, float] = {}  # admission time of every request in flight
         self._latencies: deque[float] = deque(maxlen=128)  # successful attempts only; recent is what matters
         self._task: asyncio.Task | None = None
+        self._closing = False  # __aexit__ has begun: the controller loop is being stopped
         self._t0 = self._t_last = time.monotonic()
         self._last_tokens = 0
 
@@ -229,21 +255,29 @@ class AdaptiveLimiter:
 
     async def __aenter__(self):
         self._t0 = self._t_last = time.monotonic()
+        self._closing = False  # entered again after an earlier exit: supervise the new loop
         self._task = asyncio.create_task(self._loop())
         return self
 
     async def __aexit__(self, *exc):
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task  # a crashed tick loop surfaces here, never dies silently
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                if not exc or exc[0] is None:
-                    raise
-                print("[pump] controller loop also failed (primary exception wins)",
-                      file=sys.stderr, flush=True)  # r5: never mask the body's exception
+        if self._task is None:
+            return
+        self._closing = True
+        task = self._task
+        task.add_done_callback(_retrieve)  # however exit ends, the loop's outcome is collected
+        task.cancel()
+        caller_cancel = await _wait_for_loop(task)
+        failure = None if task.cancelled() else task.exception()
+        if caller_cancel is not None:
+            if failure is not None:
+                print(f"[pump] controller loop also failed: {failure!r}", file=sys.stderr, flush=True)
+            raise caller_cancel
+        if failure is None:
+            return
+        if not exc or exc[0] is None:
+            raise failure  # a crashed tick loop surfaces here, never dies silently
+        print("[pump] controller loop also failed (primary exception wins)",
+              file=sys.stderr, flush=True)  # never mask the body's exception
 
     async def _loop(self):
         while True:

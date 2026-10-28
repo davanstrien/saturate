@@ -126,3 +126,71 @@ def test_fixed_zero_raises():
 
 def test_as_sink_accepts_path(tmp_path):
     assert isinstance(as_sink(tmp_path), ParquetSink)  # Path was mistaken for a custom sink
+
+
+@pytest.mark.internals
+def test_a_cancelled_controller_loop_fails_admissions():
+    """The tick loop cancelled from outside while the limiter is open: admissions fail the run
+    instead of carrying on with a frozen window."""
+    from saturate.transport import FatalTransportError
+
+    async def go():
+        async with AdaptiveLimiter(Fixed(4)) as limiter:
+            limiter._task.cancel()
+            await asyncio.sleep(0)
+            async with limiter.slot():
+                pass
+
+    with pytest.raises(FatalTransportError, match="cancelled"):
+        asyncio.run(go())
+
+
+@pytest.mark.internals
+def test_a_cancel_of_the_caller_during_limiter_exit_is_not_swallowed():
+    """Exit stops the tick loop; a cancel of the caller that arrives meanwhile goes on."""
+
+    async def slow_to_stop():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.3)  # a loop that takes a moment to wind down
+            raise
+
+    async def body(limiter, exiting):
+        async with limiter:
+            limiter._task.cancel()
+            limiter._task = asyncio.create_task(slow_to_stop())
+            await asyncio.sleep(0)
+            exiting.set()
+        return "finished"
+
+    async def go():
+        limiter, exiting = AdaptiveLimiter(Fixed(4)), asyncio.Event()
+        task = asyncio.create_task(body(limiter, exiting))
+        await exiting.wait()
+        await asyncio.sleep(0.05)  # inside __aexit__, waiting for the loop to stop
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert limiter._task.done()  # the loop finished its cleanup before exit returned
+
+    asyncio.run(go())
+
+
+@pytest.mark.internals
+def test_a_limiter_entered_again_still_supervises_its_controller_loop():
+    from saturate.transport import FatalTransportError
+
+    async def go():
+        limiter = AdaptiveLimiter(Fixed(4))
+        async with limiter:
+            pass
+        async with limiter:
+            limiter._task.cancel()
+            await asyncio.sleep(0)
+            async with limiter.slot():
+                pass
+
+    with pytest.raises(FatalTransportError, match="cancelled"):
+        asyncio.run(go())
+

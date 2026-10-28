@@ -62,6 +62,7 @@ class StubServer:
         self.latency_s = latency_s
         self.latency_for: Callable[[dict], float] | None = None  # overrides latency_s per body
         self.status_for = status_for
+        self.drop_for: Callable[[dict], bool] | None = None  # True: close without answering
         self.raw_for: Callable[[dict], bytes | None] | None = None  # a raw body for this status, e.g. HTML
         self.port = 0
         self.requests = 0  # completion requests served (any status), probes excluded
@@ -140,6 +141,8 @@ class StubServer:
                 headers = {k.strip().lower(): v.strip() for k, _, v in
                            (line.partition(":") for line in header_block.split("\r\n") if line)}
                 body = await reader.readexactly(int(headers.get("content-length", 0)))
+                if self.drop_for is not None and self.drop_for(json.loads(body or b"{}")):
+                    return  # the connection closes with no answer, as when a server dies mid-request
                 status, ctype, payload = await self._respond(method, path.split("?", 1)[0], body,
                                                              headers)
                 writer.write(f"HTTP/1.1 {status} {_REASON.get(status, 'OK')}\r\n"

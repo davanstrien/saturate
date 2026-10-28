@@ -720,18 +720,18 @@ def test_throughput_units_are_compared_like_with_like():
     assert "hold:kept" not in reasons, reasons
 
 
-def test_the_release_wait_doubles_only_when_a_released_ceiling_is_met_again():
-    """Backpressure that keeps coming (a falling limit, or an outage) does not grow the wait
-    before the ceiling is released; meeting a released ceiling again doubles it, up to an hour."""
-    from saturate.controller import BP_CEILING_RELEASE_MAX_S, BP_CEILING_RELEASE_S
-
+def test_a_backpressure_ceiling_is_released_after_a_clean_stretch():
+    """However much backpressure came before (a falling limit, an outage), a ceiling is released
+    BP_CEILING_RELEASE_S after it was last met: a provider's limit can rise. The old ceiling is
+    kept as seen_ceiling, so meeting it again steps under it rather than halving."""
     ctrl = Auto(target_waiting=8, initial=2, min_limit=2, step=STEP)
     limit = 2
     for _ in range(40):
         limit = ctrl.decide(healthy(limit, backpressure=1, successes=0, waiting=None), limit)
-    assert ctrl.state.ceiling is not None and ctrl.state.ceiling.release_s == BP_CEILING_RELEASE_S
-    assert BP_CEILING_RELEASE_MAX_S == 3600.0
-
+    assert ctrl.state.ceiling is not None
+    for _ in range(int(BP_CEILING_RELEASE_S / TICK_S) + 2):
+        limit = ctrl.decide(healthy(limit, waiting=None), limit)
+    assert ctrl.state.ceiling is None and ctrl.state.seen_ceiling is not None
 
 def test_a_queue_cut_steps_down_by_the_excess_within_bounds():
     """The gauge says how far past the engine's capacity the window is: the cut steps down by

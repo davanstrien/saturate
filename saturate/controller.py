@@ -14,7 +14,6 @@ from dataclasses import dataclass, replace
 
 TICK_S = 2.0  # nominal tick period: the loop sleeps this long, and tick-count floors are multiples of it
 BP_CEILING_RELEASE_S = 300.0  # backpressure-free seconds before the backpressure ceiling is released
-BP_CEILING_RELEASE_MAX_S = 3600.0  # the release wait doubles on each re-meet, up to this
 MAX_SAMPLES = 16  # throughput samples kept: the most recent ticks only
 
 
@@ -134,11 +133,11 @@ class Settling:
 
 @dataclass(frozen=True)
 class Ceiling:
-    """The lowest window that met backpressure, at clock `met`; released after `release_s`."""
+    """The lowest window that met backpressure, at clock `met`; released BP_CEILING_RELEASE_S
+    later, because a provider's limit can rise."""
 
     limit: int
     met: float
-    release_s: float
 
 
 @dataclass(frozen=True)
@@ -184,8 +183,9 @@ class Auto:
       rarely but never given up on, so a later rise in capacity is found.
     The x4 move crosses a stretch where throughput is flat (SGLang's from 32 to 64) that a
     doubling cannot see past; x7/8 trims a window that overshot the engine's cap. The window
-    starts at `initial` (64): high enough that most of a short run is not spent ramping, low
-    enough that an engine with a few slots (llama.cpp) is not swamped.
+    starts at `initial` (64), so most of a short run is not spent ramping. On an engine with
+    a few slots and no metrics (llama.cpp without --metrics) that start queues requests and
+    raises latency: pass a smaller `initial`.
 
     A trial's readings arrive one request latency late, and a wider window has a longer latency
     at flat throughput (Little's law), so a trial is judged only after two latencies at its
@@ -202,8 +202,7 @@ class Auto:
        halve, and remember the window as a ceiling; growth then stops an eighth under it. A
        share, not any event: one row that always fails is not overload. At a ceiling met
        before (this one, or one released earlier), step just under it instead of halving.
-       A ceiling is released after BP_CEILING_RELEASE_S, because a provider's limit can rise;
-       each time the same limit is met again, the wait before the next release doubles.
+       A ceiling is released after BP_CEILING_RELEASE_S, because a provider's limit can rise.
     3. cut:kv — KV high with a low (or absent) prefix-hit rate: halve.
     4. cut:stall — window full and nothing completing for `stall_ticks` ticks, or 3x the
        latency when known, whichever is longer: halve. Once per episode: the next needs a
@@ -220,9 +219,10 @@ class Auto:
        is skipped; there is no move down at a backpressure ceiling (nothing waits there).
 
     A cut during a trial counts as a failed trial: the window goes no higher than where the
-    trial began. Every rule is a pure function of (Auto, State, Obs, limit) in RULES; the state
-    is frozen dataclasses (State, and its phase: Steady, Trial or Settling). Durations are
-    integrated in seconds from the observed `tick_s` (TICK_S when absent).
+    trial began (except a queue cut, which steps by what the gauge shows). Every rule is a pure
+    function of (Auto, State, Obs, limit) in RULES; the state is frozen dataclasses (State, and
+    its phase: Steady, Trial or Settling). Durations are integrated in seconds from the
+    observed `tick_s` (TICK_S when absent).
     """
 
     MOVES: tuple[float, ...] = (2.0, 4.0, 1.5, 1.25, 0.875)
@@ -293,8 +293,9 @@ class Auto:
     def evidence(self, state: State, limit: int) -> Reading | None:
         """Mean throughput once `limit` completions and two samples are in, over the samples
         kept (the most recent MAX_SAMPLES ticks) but the first: the first after a change still
-        describes the old window. On a slow engine, by the time a trial has settled, the samples
-        kept are the trial window's own."""
+        describes the old window. A settled trial's samples still include some from before it
+        settled, which dilutes a small gain at short latencies; judging on post-settle samples
+        alone measured worse (more latency, a slower ramp), so this is a trade-off."""
         if state.acks < limit or len(state.samples) < 2:
             return None
         samples = state.samples[1:]
@@ -310,7 +311,7 @@ def _observe(auto: Auto, state: State, obs: Obs, limit: int) -> State:
     tick = _tick(obs)
     state = replace(state, clock=state.clock + tick, acked_ever=state.acked_ever or obs.successes > 0,
                     latency_s=obs.latency_s if obs.latency_s is not None else state.latency_s)
-    if state.ceiling is not None and state.clock - state.ceiling.met >= state.ceiling.release_s:
+    if state.ceiling is not None and state.clock - state.ceiling.met >= BP_CEILING_RELEASE_S:
         state = replace(state, ceiling=None, seen_ceiling=state.ceiling)  # a provider's limit can rise
     if isinstance(state.phase, Trial):
         # the latency at the trial's start, or the first one seen if none was known then; not a
@@ -346,12 +347,8 @@ def _backpressure(auto: Auto, state: State, obs: Obs, limit: int) -> Decision | 
         return None
     known = state.ceiling or state.seen_ceiling
     at_known = known is not None and _below(known.limit) <= limit <= known.limit * 9 // 8
-    release = BP_CEILING_RELEASE_S
-    if at_known and known is not None:  # a limit that held: keep its wait; after a release, double it
-        doubled = known.release_s * 2 if state.ceiling is None else known.release_s
-        release = min(BP_CEILING_RELEASE_MAX_S, doubled)
     lowest = min(limit, state.ceiling.limit) if state.ceiling is not None else limit
-    state = replace(state, ceiling=Ceiling(lowest, state.clock, release))
+    state = replace(state, ceiling=Ceiling(lowest, state.clock))
     new = _below(limit) if at_known else limit // 2  # a known limit: step under; fresh overload: halve
     return auto.cut(state, obs, limit, new, "cut:bp")
 
@@ -391,14 +388,12 @@ def _judge(auto: Auto, state: State, obs: Obs, limit: int) -> Decision | None:
         return None
     trial = state.phase
     up = limit > trial.origin
-    early = auto.evidence(state, limit)  # a gain shows even through the old window's readings
-    if up and early is not None and early.ratio(trial.ref) >= auto.improve:
-        return limit, "hold:kept", replace(state, phase=Steady(), acks=0, samples=())
+    reading = auto.evidence(state, limit)
+    ratio = reading.ratio(trial.ref) if reading is not None else None
     settled = trial.ticks >= 3 and state.clock >= trial.settled_by()
-    reading = auto.evidence(state, limit) if settled else None
-    if reading is None:  # wait for the trial window's own readings
+    gain = up and ratio is not None and ratio >= auto.improve  # a gain shows even through old readings
+    if ratio is None or not (settled or gain):  # wait for the trial window's own readings
         return limit, "hold:ack", state
-    ratio = reading.ratio(trial.ref)
     kept = ratio >= auto.improve if up else ratio * auto.improve >= 1
     if kept:  # a gain starts MOVES over; a kept move down tries down again, against the same anchor
         steady = Steady() if up else Steady(move=trial.move, anchor=trial.ref)

@@ -123,7 +123,9 @@ Notes on what you didn't have to do:
   the bottleneck rather than the server.
   Want control anyway? `window=Fixed(64)` pins it; `window=Auto(initial=32, max_limit=128)`
   sets the starting point and ceiling (do cap it for vision workloads — in-flight images
-  live in RAM).
+  live in RAM). `Auto` starts at 64; against an engine with a few slots and no metrics
+  (llama.cpp with `--parallel 8` and no `--metrics`), start near the slot count,
+  `Auto(initial=8)`, or the extra requests wait in its queue.
 - **Ids are yours if you want them.** Pass `(id, row)` tuples, or `id_key="my_column"`, or
   an `id_fn=` callable. Default: a stable content-hash of the row — identical input rows
   then dedupe for free.

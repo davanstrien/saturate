@@ -126,7 +126,7 @@ flowchart TD
 | reason | when | action |
 |---|---|---|
 | `hold:cooldown` | after a cut or revert: at least max(2 ticks, the last latency) (3 ticks when unknown), longer while the oldest request in flight predates the change, capped at the stall patience | hold; the old window's completions are not evidence |
-| `cut:bp` | backpressure (429 / timeout / 5xx) on at least `bp_frac` of this tick's outcomes | halve and remember the window as a ceiling (growth stops ⅛ under it); at a ceiling met before, step under it instead. A ceiling is released after 300 s; each re-meet doubles that wait |
+| `cut:bp` | backpressure (429 / timeout / 5xx) on at least `bp_frac` of this tick's outcomes | halve and remember the window as a ceiling (growth stops ⅛ under it); at a ceiling met before, step under it instead. A ceiling is released after 300 s, because a provider's limit can rise |
 | `cut:kv` | KV ≥ 0.9 AND prefix-hit rate < 0.5 or absent | halve — high KV with healthy hits is cache reuse |
 | `cut:stall` | window full and nothing completed for max(3 ticks, 3× latency); once per episode | halve — a wedged engine reads as an empty queue because nothing new is admitted |
 | `hold:input_bound` | the source, not the engine, starves admission | hold; starved ticks are not evidence |
@@ -139,7 +139,8 @@ flowchart TD
 | `hold:ceiling` / `hold:floor` | a move would cross `max_limit` or a backpressure ceiling / `min_limit`, or a cut is already at `min_limit` | skip to the next move; a cut arms nothing |
 
 A cut during a trial counts as a failed trial: the window goes no higher than where the trial
-began. Latency is the p50 of successful attempts only — retries, backoff, breaker waits and
+began (except a queue cut, which steps by what the gauge shows). Latency is the p50 of successful
+attempts only — retries, backoff, breaker waits and
 poison rows are excluded — and waits are integrated in seconds from the measured tick.
 `bench/controller_sim.py` scores any version of the controller against simulated engines
 (tests/sim_engine.py). On random engines (a Hypothesis property) it reaches at least 75% of the

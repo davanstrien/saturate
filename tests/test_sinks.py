@@ -1306,9 +1306,8 @@ def test_a_new_nested_key_extends_the_struct_like_a_new_column(tmp_path):
 
 def test_a_field_typed_after_it_was_first_none_is_stored_on_every_pyarrow(tmp_path):
     """The pin keeps struct fields in pin order and appends new ones (meta: struct<b, a>), while
-    inference orders them as they arrive (struct<a, b>). The cast matches struct fields by name
-    from Arrow 21 (our floor); Arrow 19 and 20 matched by order, and the second row became an
-    error row there."""
+    inference orders them as they arrive (struct<a, b>). The cast matches struct fields by name,
+    so pin order and arrival order may differ."""
     from saturate import ParquetSink
 
     sink = ParquetSink(str(tmp_path), flush_every=1)
@@ -1398,3 +1397,19 @@ def test_an_untyped_nested_field_does_not_clash_within_one_batch(tmp_path):
     direct.flush()
     assert direct.rows_demoted == 0
     assert dict(read_output(str(tmp_path / "direct")))["b"] == {"m": {"new": "x", "k": 2}}
+
+
+def test_a_struct_with_a_repeated_field_name_is_an_error_row(tmp_path):
+    """A dict cannot repeat a key, but an Arrow StructScalar can repeat a field name. A cast
+    would keep one of the two values without a word, so the row is an error row instead."""
+    from saturate import ParquetSink
+
+    repeated = pa.StructArray.from_arrays([pa.array([1]), pa.array([2])], names=["x", "x"])[0]
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "first", "m": {"x": 0}, "error": None})
+    sink.append({"id": "repeated", "m": repeated, "error": None})
+    rows = {r["id"]: r for r in _read_whole_dir(tmp_path)[0].to_pylist()}
+    assert rows["first"]["m"] == {"x": 0}
+    assert rows["repeated"]["m"] is None
+    assert "repeated field name" in rows["repeated"]["error"]
+    assert sink.rows_demoted == 1

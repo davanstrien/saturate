@@ -1,5 +1,5 @@
-"""Type rules for dynamic-mode Parquet output: which Arrow types a column may hold once its type
-is pinned, and how a value's type is turned into the type that is stored.
+"""Type rules for ParquetSink: what a pinned column may hold and the type its values are stored
+as (dynamic mode), and which record keys a declared schema lacks (declared mode).
 
 ParquetSink owns the pin (the schema the first parts fixed) and calls these pure functions to
 check each row against it. Nothing here does I/O or holds state.
@@ -18,15 +18,15 @@ def is_nested(arrow_type: pa.DataType) -> bool:
     return pa.types.is_struct(arrow_type) or is_list(arrow_type)
 
 
-def untyped(arrow_type: pa.DataType) -> bool:
+def is_untyped(arrow_type: pa.DataType) -> bool:
     """A type with no typed leaf (null, list<null>, struct<>, ...): inferred from values that
     carry no information, so it can never be a pin — a later real value must be free to set it."""
     if pa.types.is_null(arrow_type):
         return True
     if is_list(arrow_type):
-        return untyped(arrow_type.value_type)
+        return is_untyped(arrow_type.value_type)
     if pa.types.is_struct(arrow_type):
-        return all(untyped(field.type) for field in arrow_type)
+        return all(is_untyped(field.type) for field in arrow_type)
     return False
 
 
@@ -53,14 +53,49 @@ def without_untyped(arrow_type: pa.DataType) -> pa.DataType | None:
     return arrow_type
 
 
-def storable(arrow_type: pa.DataType, top: bool = True) -> bool:
+def without_untyped_schema(schema: pa.Schema) -> pa.Schema:
+    """`schema` with its untyped columns dropped and the untyped fields removed from the rest
+    (`without_untyped`)."""
+    fields = []
+    for field in schema:
+        typed = without_untyped(field.type)
+        if typed is not None:
+            fields.append(pa.field(field.name, typed, field.nullable))
+    return pa.schema(fields)
+
+
+def _has_empty_nested_struct(arrow_type: pa.DataType, top: bool = True) -> bool:
     """Parquet cannot write a struct with no fields below the top level (a nested `{}`); a
     top-level one is an untyped column and is simply dropped."""
     if pa.types.is_struct(arrow_type):
-        return (top or len(arrow_type) > 0) and all(storable(field.type, False) for field in arrow_type)
+        if not top and len(arrow_type) == 0:
+            return True
+        return any(_has_empty_nested_struct(field.type, False) for field in arrow_type)
     if is_list(arrow_type):
-        return storable(arrow_type.value_type, False)
-    return True
+        return _has_empty_nested_struct(arrow_type.value_type, False)
+    return False
+
+
+def _has_repeated_field_name(arrow_type: pa.DataType) -> bool:
+    """A struct with two fields of one name, at any depth. A dict cannot make one, but an Arrow
+    StructScalar in a record can; a cast would keep only one of the two values."""
+    if pa.types.is_struct(arrow_type):
+        names = [field.name for field in arrow_type]
+        if len(names) != len(set(names)):
+            return True
+        return any(_has_repeated_field_name(field.type) for field in arrow_type)
+    if is_list(arrow_type):
+        return _has_repeated_field_name(arrow_type.value_type)
+    return False
+
+
+def check_storable(column: str, arrow_type: pa.DataType) -> None:
+    """Raise TypeError when Parquet cannot store values of `arrow_type` as they are: a nested
+    empty object, or a struct with a repeated field name."""
+    if _has_empty_nested_struct(arrow_type):
+        raise TypeError(f"{column}: {arrow_type} has a nested empty object, which parquet cannot store")
+    if _has_repeated_field_name(arrow_type):
+        raise TypeError(f"{column}: {arrow_type} has a struct with a repeated field name")
 
 
 def _is_number(arrow_type: pa.DataType) -> bool:
@@ -95,7 +130,7 @@ def fit(value_type: pa.DataType, pinned_type: pa.DataType) -> pa.DataType | None
     None when they do not fit. Usually that is `pinned_type` itself: the same type, an untyped
     one (nulls), or a scalar of the same kind (`same_kind`). Lists and structs are checked item
     by item and field by field (`_fit_struct`). A pinned field's type never changes."""
-    if value_type == pinned_type or untyped(value_type):
+    if value_type == pinned_type or is_untyped(value_type):
         return pinned_type
     if pa.types.is_struct(value_type) and pa.types.is_struct(pinned_type):
         return _fit_struct(value_type, pinned_type)
@@ -107,7 +142,7 @@ def fit(value_type: pa.DataType, pinned_type: pa.DataType) -> pa.DataType | None
     return pinned_type if same_kind(value_type, pinned_type) else None
 
 
-def _fit_struct(value_type: pa.StructType, pinned_type: pa.StructType) -> pa.DataType | None:
+def _fit_struct(value_type: pa.StructType, pinned_type: pa.StructType) -> pa.StructType | None:
     """A struct value against a pinned struct. A pinned field the value lacks is stored as null.
     A field the pin also has must fit the pinned field's type. A typed field the pin lacks is
     appended to the pinned struct, in the order the fields arrive."""

@@ -25,7 +25,16 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .schema import cast_columns, fit, is_nested, outside_declared, storable, untyped, without_untyped
+from .schema import (
+    cast_columns,
+    check_storable,
+    fit,
+    is_nested,
+    is_untyped,
+    outside_declared,
+    without_untyped,
+    without_untyped_schema,
+)
 
 
 def _log(msg: str) -> None:
@@ -202,14 +211,9 @@ class ParquetSink:
         """Pins the typed part of `schema` (`without_untyped`): an untyped column or nested field
         never pins, so its first typed value is free to set it."""
         if self._declared is None:
-            fields = []
-            for f in schema:
-                typed = without_untyped(f.type)
-                if typed is not None:
-                    fields.append(pa.field(f.name, typed, f.nullable))
-            schema = pa.schema(fields)
+            schema = without_untyped_schema(schema)
         self._schema = schema
-        self._pinned = {f.name: f.type for f in schema if not untyped(f.type)}
+        self._pinned = {f.name: f.type for f in schema if not is_untyped(f.type)}
         self._fits = {}  # the cached verdicts were for the old pin
         return schema
 
@@ -245,8 +249,7 @@ class ParquetSink:
         pinned_type = self._pinned[name]
         if value_type == pinned_type:
             return None
-        if not storable(value_type):
-            raise TypeError(f"{name}: {value_type} has a nested empty object, which parquet cannot store")
+        check_storable(name, value_type)
         key = (name, value_type)
         if key not in self._fits:
             self._fits[key] = fit(value_type, pinned_type)
@@ -267,9 +270,8 @@ class ParquetSink:
                 if stored_type is not None:
                     stored = table.column(i).cast(stored_type)
                     table = table.set_column(i, pa.field(field.name, stored_type), stored)
-            elif not storable(field.type):
-                raise TypeError(f"{field.name}: {field.type} has a nested empty object: "
-                                "parquet cannot store it")
+            else:
+                check_storable(field.name, field.type)
         return table
 
     def probe(self, record: dict) -> None:
@@ -306,9 +308,8 @@ class ParquetSink:
                     row.field(i).cast(stored_type)  # the values must fit too (0.5 -> int64, overflow)
                     fields.append(pa.field(field.name, stored_type))
                     continue
-            elif not storable(field.type):
-                raise TypeError(f"{field.name}: {field.type} has a nested empty object: "
-                                "parquet cannot store it")
+            else:
+                check_storable(field.name, field.type)
             typed = without_untyped(field.type)
             if typed is not None:  # what has no type yet is never written, so it cannot clash
                 fields.append(pa.field(field.name, typed))

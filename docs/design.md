@@ -96,7 +96,8 @@ judged against the reading where the run began. Anything else reverts, moves on 
 factor, and doubles the wait before the next trial (1, 2, 4 … 32 evidence windows): a plateau
 is retried rarely but never given up on. The ×4 move crosses a flat stretch that a doubling
 cannot see past (SGLang's from 32 to 64); ×⅞ trims a window that overshot the engine's cap.
-The same search runs with or without gauges: gauges only feed the cuts below.
+The same search runs with or without gauges: gauges feed the cuts below, and no trial opens
+while the engine's queue stands at or above the band's low end.
 
 Per tick, the first rule that applies wins and names itself as the tick's `reason` (telemetry
 §6); `Stats.cut_reasons` counts the `cut:*` ones. Each rule is a pure function in

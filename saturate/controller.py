@@ -1,9 +1,9 @@
 """Controllers: pure sans-IO decide(obs, limit) -> new limit.
 
 `Auto` searches for the window with the most delivered throughput (a hill climber) and cuts on
-overload; engine gauges, when there are any, only feed the cuts. The controller never knows
-where an observation came from (HTTP scrape, in-process engine, nowhere) — that's the
-SignalSource seam's job.
+overload; engine gauges, when there are any, feed the cuts and hold trials while a queue
+stands. The controller never knows where an observation came from (HTTP scrape, in-process
+engine, nowhere) — that's the SignalSource seam's job.
 """
 
 from __future__ import annotations
@@ -66,6 +66,7 @@ class Sample:
     clock: float
     tok_s: float | None
     rows_s: float
+    completions: int
 
 
 @dataclass(frozen=True)
@@ -146,8 +147,7 @@ class State:
     phase: Steady | Trial | Settling = Steady()
     ceiling: Ceiling | None = None
     seen_ceiling: Ceiling | None = None  # the last ceiling, kept after it is released
-    acks: int = 0  # evidence since the last change: completions, and throughput samples
-    samples: tuple[Sample, ...] = ()
+    samples: tuple[Sample, ...] = ()  # evidence since the last change: one per used tick
     latency_s: float | None = None  # the last request latency seen (timeouts report none)
     acked_ever: bool = False  # queue gauges mean nothing before the first completion ever
     silent_s: float = 0.0  # seconds of a full window with nothing completing
@@ -273,7 +273,7 @@ class Auto:
         tick = _tick(obs)
         latency = obs.latency_s if obs.latency_s is not None else state.latency_s
         hold = 3 * tick if latency is None else max(2 * tick, latency)
-        return replace(state, phase=Settling(state.clock, state.clock + hold, then), acks=0, samples=(),
+        return replace(state, phase=Settling(state.clock, state.clock + hold, then), samples=(),
                        silent_s=0.0, stall_armed=False)
 
     def cut(self, state: State, obs: Obs, limit: int, new: int, reason: str,
@@ -296,8 +296,8 @@ class Auto:
         describes the old window. A settled trial's samples still include some from before it
         settled, which dilutes a small gain at short latencies; judging on post-settle samples
         alone measured worse (more latency, a slower ramp), so this is a trade-off."""
-        if state.acks < limit or len(state.samples) < 2:
-            return None
+        if sum(x.completions for x in state.samples) < limit or len(state.samples) < 2:
+            return None  # `limit` completions within the samples kept, not before them
         samples = state.samples[1:]
         rows = sum(x.rows_s for x in samples) / len(samples)
         has_tokens = all(x.tok_s is not None for x in samples)
@@ -322,15 +322,14 @@ def _observe(auto: Auto, state: State, obs: Obs, limit: int) -> State:
         age = state.clock - state.phase.since
         draining = obs.oldest_s is not None and obs.oldest_s > age and age <= auto.patience_s(obs)
         if state.clock <= state.phase.until or draining:
-            return replace(state, silent_s=0.0, acks=0, samples=())  # the old window is not evidence
+            return replace(state, silent_s=0.0, samples=())  # the old window is not evidence
         state = replace(state, phase=state.phase.then)  # drained
     silent = obs.inflight >= limit and obs.successes == 0
     state = replace(state, stall_armed=state.stall_armed or obs.successes > 0,
                     silent_s=state.silent_s + tick if silent else 0.0)
     if not obs.input_bound and obs.inflight >= int(limit * 0.8):  # only a used window is evidence
-        sample = Sample(state.clock, obs.tok_s, obs.successes / tick)
-        state = replace(state, acks=state.acks + obs.successes,
-                        samples=(state.samples + (sample,))[-MAX_SAMPLES:])
+        sample = Sample(state.clock, obs.tok_s, obs.successes / tick, obs.successes)
+        state = replace(state, samples=(state.samples + (sample,))[-MAX_SAMPLES:])
     return state
 
 
@@ -397,7 +396,7 @@ def _judge(auto: Auto, state: State, obs: Obs, limit: int) -> Decision | None:
     kept = ratio >= auto.improve if up else ratio * auto.improve >= 1
     if kept:  # a gain starts MOVES over; a kept move down tries down again, against the same anchor
         steady = Steady() if up else Steady(move=trial.move, anchor=trial.ref)
-        return limit, "hold:kept", replace(state, phase=steady, acks=0, samples=())
+        return limit, "hold:kept", replace(state, phase=steady, samples=())
     then = Steady(backoff=min(auto.MAX_BACKOFF, trial.backoff * 2), move=trial.move + 1)
     return auto.clamp(state, trial.origin), "revert", auto.settle(state, obs, then)
 
@@ -418,18 +417,18 @@ def _open_trial(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
     assert isinstance(phase, Steady)
     if phase.waits + 1 < phase.backoff:
         waiting = replace(phase, waits=phase.waits + 1)
-        return limit, "hold:plateau", replace(state, phase=waiting, acks=0, samples=())
+        return limit, "hold:plateau", replace(state, phase=waiting, samples=())
     factor = auto.MOVES[phase.move % len(auto.MOVES)]
     new = auto.clamp(state, round(limit * factor))
     at_ceiling = state.ceiling is not None and limit >= _below(state.ceiling.limit)
     if new == limit or (factor < 1 and at_ceiling):  # nothing to try this way: the next move
-        skipped = replace(state, phase=replace(phase, waits=0, move=phase.move + 1), acks=0, samples=())
+        skipped = replace(state, phase=replace(phase, waits=0, move=phase.move + 1), samples=())
         at_floor = factor < 1 and not at_ceiling
         return limit, "hold:floor" if at_floor else "hold:ceiling", skipped
     ref = phase.anchor if new < limit and phase.anchor is not None else reading
     trial = Trial(origin=limit, ref=ref, opened=state.clock, widen=new / limit, move=phase.move,
                   backoff=phase.backoff, latency_s=state.latency_s or 0.0)
-    return new, "trial:up" if new > limit else "trial:down", replace(state, phase=trial, acks=0, samples=())
+    return new, "trial:up" if new > limit else "trial:down", replace(state, phase=trial, samples=())
 
 
 Rule = Callable[[Auto, State, Obs, int], "Decision | None"]

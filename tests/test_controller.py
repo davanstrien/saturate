@@ -742,3 +742,18 @@ def test_a_queue_cut_steps_down_by_the_excess_within_bounds():
         limit = warm(ctrl, 64)
         assert ctrl.decide(healthy(limit, waiting=waiting), limit) == expected, waiting
         assert ctrl.last_reason == "cut:queue"
+
+
+def test_evidence_counts_only_the_completions_of_the_samples_kept():
+    """Samples beyond the most recent MAX_SAMPLES ticks are dropped, and so are their
+    completions: a burst long before cannot qualify an evidence window whose kept ticks
+    delivered nothing."""
+    from saturate.controller import MAX_SAMPLES
+
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    limit = 64
+    slow = dict(waiting=None, latency_s=60.0)  # 60 s requests: a quiet window is no stall yet
+    ctrl.decide(healthy(limit, successes=64, tok_s=6400.0, **slow), limit)  # one burst
+    for _ in range(MAX_SAMPLES + 2):  # then nothing completes
+        ctrl.decide(healthy(limit, successes=0, tok_s=0.0, **slow), limit)
+    assert ctrl.evidence(ctrl.state, limit) is None

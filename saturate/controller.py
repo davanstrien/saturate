@@ -127,13 +127,16 @@ class Auto:
       times the best so far, and a +1 step from a window of L gains at most 1/L, too little
       to measure.
     - Plateau probes try 2x, then 4x, then 8x the window, because a flat stretch (SGLang's
-      from 32 to 64) can be wider than any step. Any measured gain starts the search again
-      at 2x. A probe that meets backpressure goes back to where it began, and the
-      backpressure ceiling then bounds the next ones.
+      from 32 to 64) can be wider than any step. A probe is judged once settled (rule 7), on
+      its own window's readings, against the reading just before it: the best ever seen is
+      lifted by noise. Any measured gain starts the search again at 2x. A probe that meets
+      backpressure goes back to where it began, and the backpressure ceiling then bounds
+      the next ones.
     - Once an 8x probe has failed, or a probe would only repeat a failed window, it trims:
       it tries an eighth less, keeps it if throughput holds (within `improve` of the reading
       before the trim, judged on the smaller window's own readings), and otherwise reverts.
-      A second failed trim to the same window ends trimming until the next gain. Trims undo
+      A second failed trim to the same window ends trimming until the next gain. There are
+      no trims at a backpressure ceiling: nothing waits in a queue there. Trims undo
       a doubling that confirmed a gain but overshot the engine's cap (64 -> 128 for a cap
       of 100); with noisy readings their verdicts are less reliable.
     Gauge mode probes by +step, and a queue above target ends any probe. Durations are

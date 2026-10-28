@@ -99,7 +99,7 @@ def run(ctrl, engine: Engine, ticks: int, limit: int | None = None,
     limit = ctrl.initial if limit is None else limit
     history = [limit]
     out = []
-    carry = 0.0
+    carry = timeout_carry = 0.0
     for i in range(ticks):
         if then is not None and i == then[0]:
             engine = then[1]
@@ -114,7 +114,9 @@ def run(ctrl, engine: Engine, ticks: int, limit: int | None = None,
         if engine.rate_limit is not None and seen > engine.rate_limit:
             rejected = round((seen - engine.rate_limit) / engine.latency_s(seen) * TICK_S) or 1
         # past the timeout each request fails once per read timeout, not once per tick
-        timed_out = round(seen * TICK_S / engine.read_timeout_s) or 1 if delivered == 0.0 and seen > 0 else 0
+        if delivered == 0.0 and seen > 0:
+            timeout_carry += seen * TICK_S / engine.read_timeout_s
+        timed_out, timeout_carry = int(timeout_carry), timeout_carry - int(timeout_carry)
         queued = max(0, limit - engine.cap)
         obs = dict(
             waiting=queued if engine.gauges else None,

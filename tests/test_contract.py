@@ -1346,7 +1346,7 @@ def test_a_run_that_loses_a_row_raises_and_writes_no_marker(stub, tmp_path, monk
     with pytest.raises(saturate.RowsLostError, match="1 of 5 rows"):
         pump(rows(5), default_to_request, default_parse, endpoint=stub.endpoint,
              output=str(tmp_path), window=Fixed(2), fail_fast=0)
-    assert not list(tmp_path.glob("completions/*.done"))
+    assert not list(tmp_path.glob("__saturate/completions/*.done"))
     stats = pump(rows(5), default_to_request, default_parse, endpoint=stub.endpoint,
                  output=str(tmp_path), window=Fixed(2), fail_fast=0)  # the re-run fills the gap
     assert stats.rows_processed == 1 and stats.rows_unaccounted == 0

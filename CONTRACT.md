@@ -23,7 +23,9 @@ Plus one discipline: **record, never guess** — every written value is an obser
 Stability: additive changes are allowed within v1 (new columns, sidecar files, keys);
 renames, retypes and removals are not. One exception before 0.3.0: §2 replaced strided
 fan-out with the id-hash rule and changed the `dataset_rows` and `bucket_rows` id formats,
-so an output written by 0.2 with those ids is not resumed by 0.3 (its rows run again). The controller, transport and engine lifecycle are
+so an output written by 0.2 with those ids is not resumed by 0.3 (its rows run again); and
+§1 moved every sidecar under `__saturate/` (0.3 still reads manifests from `_manifest/` on
+resume). The controller, transport and engine lifecycle are
 implementation — free to change.
 
 ## 1. Output layout
@@ -31,13 +33,20 @@ implementation — free to change.
 ```
 out/
 ├── part-{ms}-{seq}-{uuid8}.parquet        # append-only data parts, zstd
-├── _manifest/
-│   └── ids-part-….parquet                 # [id, error] sidecar, 1:1 with its part
-├── completions/
-│   ├── shard-{rank}.done                  # advisory completion marker per shard
-│   └── stats-{rank}.json                  # exact run summary (Stats + rank/world)
-└── telemetry-shard{rank}-….jsonl          # per-tick controller trajectory
+└── __saturate/
+    ├── manifest/
+    │   └── ids-part-….parquet             # [id, error] sidecar, 1:1 with its part
+    ├── completions/
+    │   ├── shard-{rank}.done              # advisory completion marker per shard
+    │   └── stats-{rank}.json              # exact run summary (Stats + rank/world)
+    └── telemetry/
+        └── telemetry-shard{rank}-….jsonl  # per-tick controller trajectory
 ```
+
+The data parts are the only files outside `__saturate/`. `datasets` and pyarrow skip paths
+that start with `__`, so `load_dataset(out)`, `pq.read_table(out)` and `pyarrow.dataset`
+read the parts alone. They read them raw: error rows are included, and a row that failed and
+later succeeded appears twice. `read_output` applies the reader rule (§4.2).
 
 `out` is a single fsspec URI (local path, `hf://datasets/...`, `hf://buckets/...`).
 Part names are globally unique across shards and re-runs without coordination and carry no
@@ -152,7 +161,7 @@ writing them as errors would make resume skip them forever.
 
 ## 5. Completion markers and stats
 
-`completions/shard-{rank}.done` (payload: the fixed sentinel `done`) is written last, when
+`__saturate/completions/shard-{rank}.done` (payload: the fixed sentinel `done`) is written last, when
 a shard's run returns normally. Markers are **advisory** (datatrove's convention — a
 coordinator can watch the directory); resume never depends on them, they don't certify
 row-level success, and they are sticky across re-runs of one output dir. Coordinators

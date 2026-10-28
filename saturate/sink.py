@@ -41,6 +41,16 @@ def _log(msg: str) -> None:
     print(f"[pump] {msg}", file=sys.stderr, flush=True)
 
 
+# Everything saturate writes beside the data parts lives under one directory whose name starts
+# with "__": datasets' loader and pyarrow's dataset reader both skip such paths, so
+# load_dataset(out) and pq.read_table(out) see the parts alone (CONTRACT §1).
+SIDECAR_DIR = "__saturate"
+MANIFEST_DIR = f"{SIDECAR_DIR}/manifest"
+OLD_MANIFEST_DIR = "_manifest"  # outputs written before 0.3: read on resume, never written
+COMPLETIONS_DIR = f"{SIDECAR_DIR}/completions"
+TELEMETRY_DIR = f"{SIDECAR_DIR}/telemetry"
+
+
 def _list_parts(fs, root: str) -> list[str]:
     """The data parts of an output dir, in write order (the CONTRACT part-name pattern)."""
     return sorted(fs.glob(f"{root}/part-*.parquet"))
@@ -185,7 +195,8 @@ class ParquetSink:
         scanned individually (kill-safe). retry_errors=True excludes ids whose
         only record is an error."""
         try:
-            manifests = sorted(self.fs.glob(f"{self.root}/_manifest/ids-*.parquet"))
+            manifests = sorted(self.fs.glob(f"{self.root}/{MANIFEST_DIR}/ids-*.parquet")
+                               + self.fs.glob(f"{self.root}/{OLD_MANIFEST_DIR}/ids-*.parquet"))
         except FileNotFoundError:  # an output that does not exist yet (a repo never created)
             self.error_only_ids = set()
             return set()
@@ -384,8 +395,8 @@ class ParquetSink:
             table = cast_columns(table.select(schema.names), schema).cast(schema)
         self._write(f"{self.root}/{name}", table)
         try:  # manifest second: a crash in between leaves an uncovered part -> scanned
-            self.fs.makedirs(f"{self.root}/_manifest", exist_ok=True)
-            self._write(f"{self.root}/_manifest/ids-{name}", table.select(["id", "error"]))
+            self.fs.makedirs(f"{self.root}/{MANIFEST_DIR}", exist_ok=True)
+            self._write(f"{self.root}/{MANIFEST_DIR}/ids-{name}", table.select(["id", "error"]))
         except Exception as e:
             _log(f"manifest write failed (non-fatal, part covered by scan fallback): {e}")
         self.rows_written += len(self._buf)
@@ -513,8 +524,8 @@ class ParquetSink:
         self._telemetry_names.pop(shard[0], None)
 
     def write_marker(self, shard: tuple[int, int]) -> None:
-        self.fs.makedirs(f"{self.root}/completions", exist_ok=True)
-        with self.fs.open(f"{self.root}/completions/shard-{shard[0]}.done", "wb") as f:
+        self.fs.makedirs(f"{self.root}/{COMPLETIONS_DIR}", exist_ok=True)
+        with self.fs.open(f"{self.root}/{COMPLETIONS_DIR}/shard-{shard[0]}.done", "wb") as f:
             f.write(b"done")
         self._telemetry_names.pop(shard[0], None)  # the marker ends a run: the next one gets a new file
 
@@ -526,8 +537,8 @@ class ParquetSink:
 
         payload = _json.loads(stats_json)
         payload["rank"], payload["world"] = shard[0], shard[1]
-        self.fs.makedirs(f"{self.root}/completions", exist_ok=True)
-        with self.fs.open(f"{self.root}/completions/stats-{shard[0]}.json", "wb") as f:
+        self.fs.makedirs(f"{self.root}/{COMPLETIONS_DIR}", exist_ok=True)
+        with self.fs.open(f"{self.root}/{COMPLETIONS_DIR}/stats-{shard[0]}.json", "wb") as f:
             f.write(_json.dumps(payload).encode())
 
     def write_telemetry(self, shard: tuple[int, int], lines: list[str]) -> None:
@@ -539,7 +550,8 @@ class ParquetSink:
         if name is None:
             name = f"telemetry-shard{shard[0]}-{int(time.time())}-{uuid.uuid4().hex[:6]}.jsonl"
             self._telemetry_names[shard[0]] = name
-        with self.fs.open(f"{self.root}/{name}", "wb") as f:
+            self.fs.makedirs(f"{self.root}/{TELEMETRY_DIR}", exist_ok=True)
+        with self.fs.open(f"{self.root}/{TELEMETRY_DIR}/{name}", "wb") as f:
             f.write("\n".join(lines).encode())
 
 

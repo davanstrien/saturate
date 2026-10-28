@@ -576,7 +576,7 @@ documented as trading away crash granularity.
 
 **Honest counter.** If you have a genuine DAG — heterogeneous CPU and GPU stages, fan-in,
 conditional branches, cross-stage retries — you want an orchestrator, and saturate is not one.
-It is designed to sit *inside* one, which is why the output convention (`completions/shard-{n}.done`)
+It is designed to sit *inside* one, which is why the output convention (`__saturate/completions/shard-{n}.done`)
 is deliberately datatrove's, so a coordinator can watch the directory without knowing anything
 about saturate.
 

@@ -558,7 +558,7 @@ def test_begin_run_gives_each_run_its_own_telemetry_file(tmp_path):
     sink.write_telemetry((0, 1), ["{}"])  # run 1 crashes before its marker
     sink.begin_run((0, 1))
     sink.write_telemetry((0, 1), ["{}"])
-    assert len(list(tmp_path.glob("telemetry-shard0-*.jsonl"))) == 2
+    assert len(list(tmp_path.glob("__saturate/telemetry/telemetry-shard0-*.jsonl"))) == 2
 
 
 def test_manifest_read_retries_transient_errors(tmp_path, monkeypatch):
@@ -717,7 +717,7 @@ def test_reserved_columns_win_over_parse(tmp_path):
     # stats sidecar (CONTRACT §5): exact counts + geometry for storage-only readers
     import json as _json
     sink.write_stats((2, 4), _json.dumps({"rows_processed": 1, "rows_failed": 0}))
-    got = _json.loads((tmp_path / "completions" / "stats-2.json").read_text())
+    got = _json.loads((tmp_path / "__saturate" / "completions" / "stats-2.json").read_text())
     assert (got["rank"], got["world"], got["rows_processed"]) == (2, 4, 1)
 
 
@@ -824,7 +824,7 @@ def test_existing_ids_concurrent_reads_match_sequential(tmp_path):
     ids = {f"row-{i:03d}" for i in range(200)}
     for i, id_ in enumerate(sorted(ids)):
         sink.append({"id": id_, "error": "http 500: nope" if i % 7 == 0 else None})
-    manifests = sorted((tmp_path / "_manifest").glob("ids-part-*.parquet"))
+    manifests = sorted((tmp_path / "__saturate" / "manifest").glob("ids-part-*.parquet"))
     assert len(manifests) == 200
     manifests[3].unlink()  # uncovered part: scanned individually
     manifests[150].write_bytes(b"not parquet")  # unreadable sidecar: its part is scanned
@@ -840,8 +840,8 @@ def test_existing_ids_warns_on_many_manifest_files(tmp_path, capsys):
     say so once and point at the knob (flush_every)."""
     from saturate import ParquetSink
 
-    mdir = tmp_path / "_manifest"
-    mdir.mkdir()
+    mdir = tmp_path / "__saturate" / "manifest"
+    mdir.mkdir(parents=True)
     table = pa.Table.from_pylist([{"id": "x", "error": None}])
     for i in range(1001):
         pq.write_table(table, mdir / f"ids-part-{i:05d}.parquet")
@@ -1413,3 +1413,45 @@ def test_a_struct_with_a_repeated_field_name_is_an_error_row(tmp_path):
     assert rows["repeated"]["m"] is None
     assert "repeated field name" in rows["repeated"]["error"]
     assert sink.rows_demoted == 1
+
+
+def _finished_output(tmp_path):
+    """An output with every kind of file a run writes: parts, manifests, a marker, stats and
+    telemetry."""
+    from saturate import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=2)
+    for i in range(4):
+        sink.append({"id": f"r{i}", "text": f"row {i}", "error": None})
+    sink.append({"id": "bad", "error": "HTTP 400"})
+    sink.flush()
+    sink.write_telemetry((0, 1), ['{"t": 1}'])
+    sink.write_stats((0, 1), "{}")
+    sink.write_marker((0, 1))
+    return sink
+
+
+def test_an_output_loads_with_load_dataset_and_read_table(tmp_path):
+    """The manifests were read as data (load_dataset took its schema from {id, error} and then
+    failed on the parts), and pq.read_table failed on completions/shard-0.done (#31). The
+    loaders see the raw parts: error rows included."""
+    import datasets
+    import pyarrow.dataset as ds
+
+    _finished_output(tmp_path)
+    loaded = datasets.load_dataset(str(tmp_path), split="train")
+    assert sorted(loaded["id"]) == ["bad", "r0", "r1", "r2", "r3"]
+    assert set(loaded.column_names) == {"id", "text", "error"}
+    assert pq.read_table(str(tmp_path)).num_rows == 5
+    assert ds.dataset(str(tmp_path), format="parquet").count_rows() == 5
+
+
+def test_an_output_in_the_old_layout_resumes(tmp_path):
+    """Outputs written before 0.3 keep their manifests in _manifest/: resume still reads them."""
+    from saturate import ParquetSink
+
+    _finished_output(tmp_path)
+    (tmp_path / "__saturate" / "manifest").rename(tmp_path / "_manifest")
+    resumed = ParquetSink(str(tmp_path))
+    assert resumed.existing_ids() == {"r0", "r1", "r2", "r3", "bad"}
+    assert resumed.existing_ids(retry_errors=True) == {"r0", "r1", "r2", "r3"}

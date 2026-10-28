@@ -25,8 +25,6 @@ from saturate.pipeline import through
 from saturate.signals import CEILING_FLAG
 from saturate.sink import FileSink, ParquetSink, as_sink, read_output
 from saturate.source import (
-    already_sharded,
-    as_sharded,
     check_shard,
     content_id,
     prepare_ahead,
@@ -51,7 +49,7 @@ __all__ = [
     "Request", "make_json_request", "make_multipart_request", "existing_ids",
     "AdaptiveClient", "AdaptiveLimiter", "Done", "through", "stream", "skip_done",
     "drain", "read_output", "Sink", "sink_hooks", "ParquetSink", "FileSink", "shard_select",
-    "shard_of", "as_sharded", "content_id", "prepare_ahead",
+    "shard_of", "content_id", "prepare_ahead",
     "FatalTransportError", "dataset_rows", "bucket_rows"]
 try:
     __version__ = importlib.metadata.version("saturate")
@@ -151,13 +149,12 @@ def pump(
         the rows whose id belongs to shard `rank` — `shard_of(id, world) == rank`, a hash of the
         id (CONTRACT §2) — and labels its telemetry, stats and completion marker with it. Give
         every Job the same `rows` and its own rank; the shards are disjoint and together cover
-        the input. Rows tagged with the same shard are taken as they are: a sharded source
-        (`dataset_rows(..., shard=)`, `bucket_rows(..., shard=)`, which select before they
-        fetch or decode a row), `shard_select`, and `prepare_ahead` over any of these. Rows
-        tagged for another shard raise. If you selected this shard's rows yourself by another
-        rule (e.g. datasets' `split_dataset_by_node`), pass `as_sharded(rows, shard)`: they are
-        all processed, and `shard` only labels the output. A generator or `islice` over tagged
-        rows drops the tag, and the run selects by hash again.
+        the input. For large objects, pass the same `shard`
+        to the source too (`bucket_rows(..., shard=)`, `dataset_rows(..., shard=)`): it then
+        skips the other shards' rows before it fetches or decodes them. A source sharded
+        differently from pump() leaves the run nothing to process. Input you split yourself
+        must be split by `shard_of` (or `shard_select`); split any other way, pass no `shard`
+        and give each Job its own output.
     flush_every: rows buffered before a parquet part is written. None (default) = 10 rows for
         a local output; a remote output (hf://, s3://...) flushes every 1000 rows or 60 s,
         whichever comes first, because each flush blocks the run for a remote write. The age
@@ -194,26 +191,14 @@ def pump(
         already failed, and some rows fail for good.
     """
     shard = check_shard(shard)
-    select_shard = _needs_shard_selection(rows, shard)
+    select_shard = shard[1] > 1
+    if select_shard:
+        _log(f"shard={shard}: processing only the rows whose id hashes to shard {shard[0]} "
+             f"of {shard[1]}")
     return asyncio.run(_pump(rows, to_request, parse, endpoint, output, window, shard,
                              flush_every, read_timeout, route, headers, retry_errors,
                              id_key, id_fn, signal_source, schema, prepare_workers,
                              fail_fast, retry_budget_s, timeouts, proxy, select_shard))
-
-
-def _needs_shard_selection(rows, shard: tuple[int, int]) -> bool:
-    """Whether pump() must select shard `shard`'s rows from `rows` itself. Rows tagged with
-    the same shard need no second pass; rows tagged for another shard raise, because the run
-    would process none or the wrong ones and look finished."""
-    rank, world = shard
-    if already_sharded(rows, shard):
-        _log(f"shard={shard}: the input holds this shard's rows only; processing all of them")
-        return False
-    if world == 1:
-        return False
-    _log(f"shard={shard}: processing only the rows whose id hashes to shard {rank} of {world} "
-         "(a source given shard= selects before it fetches or decodes)")
-    return True
 
 
 async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_every,

@@ -181,3 +181,10 @@ def test_limit_counts_the_input_before_shard_and_skip(tmp_path):
     assert sorted(rid for s in slices for rid in s) == first_ten
     rest = ids_of(f"{root}/*.bin", root=str(root), limit=10, skip=set(first_ten[:7]))
     assert rest == first_ten[7:]
+
+
+def test_default_ids_are_the_listed_paths(tmp_path):
+    """Without root=, an id is the path fsspec lists (here the absolute local path), so no
+    store layout is guessed."""
+    scans = make_volumes(tmp_path)
+    assert ids_of(f"{scans}/vol1/*.png") == [f"{scans}/vol1/p1.png", f"{scans}/vol1/p2.png"]

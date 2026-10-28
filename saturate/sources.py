@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 
-from saturate.source import ShardedRows, check_shard, content_id, rolling_map, shard_of
+from saturate.source import check_shard, content_id, rolling_map, shard_of
 
 
 def _index_id_prefix(repo: str | None, revision: str | None, config: str | None, split: str) -> str:
@@ -86,9 +86,9 @@ def dataset_rows(
     you pin one: a position names the same row only within one snapshot, so a
     new pin re-runs every row, while an unpinned run follows the branch and
     trusts that rows were not reordered. For an already-loaded object the
-    prefix is `{config}:{split}` from its `info.config_name` (or `{split}`
-    alone); feed several loaded objects into one output with a column or
-    callable id instead. Cheap and safe for any column type (images, audio).
+    prefix is `{config}:{split}` from the arguments you pass (`{split}` alone
+    without `config`); feed several loaded objects into one output with a
+    column or callable id instead. Cheap and safe for any column type (images, audio).
     "content" — order-independent content hash via `content_id` over the
     *yielded* row (after `columns` filtering — that is the lever for keeping
     the hash JSON-safe; strict, refuses images. Dedups identical rows,
@@ -104,15 +104,13 @@ def dataset_rows(
     so K shards with one limit cover those rows between them).
 
     `shard=(rank, world)` yields only the rows whose id belongs to that shard
-    (`shard_of`, CONTRACT §2). An example of another shard is skipped before it
-    is decoded (images, audio) when the id is an index or a column and the
-    dataset is a repo id or a plain map-style Dataset. Otherwise every example
-    is decoded and the other shards' rows are then dropped: content and
-    callable ids need the decoded example, and an IterableDataset object, or a
-    Dataset with a format or transform, may already decode in its own
-    pipeline (a filter or map does). The result is the same either way; only
-    the cost differs. Every shard still streams the whole dataset. Pass the
-    same `shard` to pump().
+    (`shard_of`, CONTRACT §2). When `dataset` is a repo id and the id is an
+    index or a column, an example of another shard is skipped before it is
+    decoded (images, audio). An already-loaded object is iterated as it is:
+    every example is decoded, then the other shards' rows are dropped. Content
+    and callable ids need the decoded example, so they decode every example
+    too. The rows are the same either way; only the cost differs. Every shard
+    still streams the whole dataset. Pass the same `shard` to pump().
     """
     if shard is not None:
         shard = check_shard(shard)
@@ -130,7 +128,8 @@ def dataset_rows(
         )
         loaded_config = getattr(getattr(dataset, "info", None), "config_name", None)
         prefix = _index_id_prefix(repo, revision, config or loaded_config or "default", split)
-        loaded_here = True
+        if shard is not None and not callable(ids) and ids != "content":
+            return _iter_decoding_late(dataset, repo, token, ids, columns, limit, prefix, shard)
     elif revision is not None or token is not None:
         raise ValueError(
             "revision=/token= only apply when `dataset` is a repo id string; "
@@ -138,9 +137,7 @@ def dataset_rows(
             "silently ignored revision would void the index ids)"
         )
     else:
-        loaded_config = getattr(getattr(dataset, "info", None), "config_name", None)
-        prefix = _index_id_prefix(None, None, loaded_config, split)
-        loaded_here = False
+        prefix = _index_id_prefix(None, None, config, split)
     if columns is not None and not callable(ids):
         # column pushdown: select BEFORE iterating so unused features are
         # neither downloaded nor decoded — found live embedding the text
@@ -154,73 +151,38 @@ def dataset_rows(
                 dataset = dataset.select_columns(sorted(keep))
             except Exception:
                 pass  # unknown names surface naturally at first iteration
-    rows = _iter_dataset(dataset, ids, columns, limit, prefix, shard, loaded_here)
-    return ShardedRows(rows, shard) if shard is not None else rows
+    return _iter_dataset(dataset, ids, columns, limit, prefix, shard)
 
 
-def _is_plain_map_style(dataset) -> bool:
-    """A non-empty map-style Dataset with no format or transform set: its stored examples are
-    still encoded, and to_iterable_dataset() yields them unchanged."""
-    if not hasattr(dataset, "to_iterable_dataset") or not hasattr(dataset, "format"):
-        return False
-    return dataset.format.get("type") is None and len(dataset) > 0
-
-
-def _iter_dataset(dataset, ids, columns, limit, prefix, shard, loaded_here) -> Iterator[tuple[str, dict]]:
-    # An index or column id is known before the example is decoded, so a sharded run can
-    # iterate the raw examples and decode only its own (an image decode is the cost). That
-    # is safe only where nothing upstream has decoded the examples already: a dataset loaded
-    # here from a repo id, or a plain map-style Dataset. A filter, map or transform the
-    # caller set up decodes on its own, so such a dataset is iterated as it is and the
-    # other shards' rows are dropped after decoding.
-    raw_examples = loaded_here
-    if shard is not None and _is_plain_map_style(dataset):
-        dataset = dataset.to_iterable_dataset()
-        raw_examples = True
-    id_before_decode = not callable(ids) and ids != "content"
-    features = getattr(dataset, "features", None)
-    decode_late = (shard is not None and raw_examples and id_before_decode and features is not None
-                   and hasattr(dataset, "decode"))
-    examples = dataset.decode(False) if decode_late else dataset
-    for i, ex in enumerate(examples):
+def _iter_dataset(dataset, ids, columns, limit, prefix, shard) -> Iterator[tuple[str, dict]]:
+    """(id, row) for each example as `dataset` yields it, keeping only shard `shard`'s rows."""
+    for i, ex in enumerate(dataset):
         if limit is not None and i >= limit:
             return
-        rid = None
-        if decode_late:
-            rid = _row_id(ids, ex, None, i, prefix)
-            if shard_of(rid, shard[1]) != shard[0]:
-                continue
-            # The token datasets itself passes when it decodes, so files in a private repo
-            # can be read. `_token_per_repo_id` is a private datasets attribute: if a release
-            # renames it, getattr returns None and late decoding of private-repo files that
-            # are fetched by path (not embedded bytes) fails with an auth error.
-            ex =features.decode_example(ex, token_per_repo_id=getattr(dataset, "_token_per_repo_id", None))
         row = {k: ex[k] for k in columns} if columns is not None else dict(ex)
-        if rid is None:
-            rid = _row_id(ids, ex, row, i, prefix)
-            if shard is not None and shard_of(rid, shard[1]) != shard[0]:
-                continue
+        rid = _row_id(ids, ex, row, i, prefix)
+        if shard is not None and shard_of(rid, shard[1]) != shard[0]:
+            continue
         yield rid, row
 
 
-def _store_root(fs, path: str) -> str:
-    """The root of the store that holds `path`, as a prefix of it: the bucket or repo for
-    Hugging Face paths (a repo's revision included), the bucket for object stores that
-    expose split_path (s3, gcs, azure), and the filesystem root otherwise (local disk)."""
-    in_store = None
-    if hasattr(fs, "resolve_path"):  # HfFileSystem
-        # The root is the prefix of `path` before the in-store path (path_in_repo for a repo,
-        # path for a bucket), not `resolved.root`: that is rebuilt by huggingface_hub, and a
-        # revision spelled differently there than in `path` would put every match outside it.
-        resolved = fs.resolve_path(path)
-        in_store = getattr(resolved, "path_in_repo", None)
-        if in_store is None:
-            in_store = getattr(resolved, "path", None)
-    elif hasattr(fs, "split_path"):  # s3fs, gcsfs, adlfs: (bucket, key, version)
-        in_store = fs.split_path(path)[1]
-    if in_store and path.endswith(in_store):
-        return path[: len(path) - len(in_store)]
-    return getattr(fs, "root_marker", "")
+def _iter_decoding_late(dataset, repo, token, ids, columns, limit, prefix,
+                        shard) -> Iterator[tuple[str, dict]]:
+    """Like `_iter_dataset` for a dataset loaded here from `repo`, with an index or column id:
+    the id is known before the example is decoded, so the examples are read undecoded and only
+    shard `shard`'s are decoded (an image or audio decode is the cost)."""
+    if not hasattr(dataset, "decode"):  # streaming=False loads a map-style Dataset
+        dataset = dataset.to_iterable_dataset()
+    features = dataset.features
+    token_per_repo_id = {repo: token} if token is not None else None
+    for i, ex in enumerate(dataset.decode(False)):
+        if limit is not None and i >= limit:
+            return
+        rid = _row_id(ids, ex, None, i, prefix)
+        if shard_of(rid, shard[1]) != shard[0]:
+            continue
+        ex = features.decode_example(ex, token_per_repo_id=token_per_repo_id)
+        yield rid, ({k: ex[k] for k in columns} if columns is not None else dict(ex))
 
 
 def bucket_rows(
@@ -242,15 +204,14 @@ def bucket_rows(
     Chosen over datasets/imagefolder deliberately: measured 1.6x faster on a
     real bucket and — decisively — streaming imagefolder drops the file path,
     leaving no stable id to hang resume on. Here the id IS the path ("path",
-    default; or any callable path -> id), relative to `root`. The default
-    root is the store: the bucket or repo for hf:// (so
-    "hf://buckets/org/b/scans/vol1/p1.png" has the id "scans/vol1/p1.png"),
-    the bucket for s3/gcs/azure, the filesystem root for a local path (the
-    absolute path without its leading "/"). The id does not depend on the
-    glob, so vol1/*.png and vol2/*.png never share an id, and widening a glob
-    to **/*.png keeps every id it already had. Pass `root` (a URI or path
-    that every match lies under) for shorter ids, or ids that survive moving
-    a local directory; a match outside it raises.
+    default; or any callable path -> id): the path fsspec lists, without the
+    scheme ("buckets/org/b/scans/vol1/p1.png" for
+    "hf://buckets/org/b/scans/vol1/p1.png", "bucket/key" for s3, the absolute
+    path for a local file). The id does not depend on the glob, so vol1/*.png
+    and vol2/*.png never share an id, and widening a glob to **/*.png keeps
+    every id it already had. Pass `root` (a URI or path that every match lies
+    under) to drop that prefix from the ids: shorter ids, or ids that survive
+    moving a local directory. A match outside `root` raises.
 
     `skip` filters paths BEFORE any bytes are read — id-first resume for
     buckets: pass `existing_ids(output)` and a re-run pays listing only, not
@@ -288,12 +249,9 @@ def bucket_rows(
     infos = fs.glob(glob_path, detail=True)
     paths = sorted(p for p, i in infos.items() if i.get("type") != "directory")
     if not paths:
-        return ShardedRows(iter(()), shard) if shard is not None else iter(())
+        return iter(())
 
-    if root is not None:
-        base_path = fsspec.core.url_to_fs(root)[1].rstrip("/") + "/"
-    else:
-        base_path = _store_root(fs, paths[0])
+    base_path = fsspec.core.url_to_fs(root)[1].rstrip("/") + "/" if root is not None else ""
 
     def rid_of(path: str) -> str:
         if callable(ids):
@@ -315,8 +273,7 @@ def bucket_rows(
             continue
         selected.append((rid, p))
 
-    rows = _fetch(fs, selected, prefetch) if read else _listed(selected)
-    return ShardedRows(rows, shard) if shard is not None else rows
+    return _fetch(fs, selected, prefetch) if read else _listed(selected)
 
 
 def _listed(selected: list[tuple[str, str]]) -> Iterator[tuple[str, dict]]:

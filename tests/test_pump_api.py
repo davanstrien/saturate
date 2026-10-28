@@ -16,4 +16,4 @@ def test_pump_docstring_covers_every_parameter():
 def test_pump_docstring_says_shard_selects_input():
     doc = pump.__doc__
     assert "processes only" in doc and "shard_of" in doc
-    assert "as_sharded" in doc
+    assert "split by `shard_of`" in doc

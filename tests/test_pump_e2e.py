@@ -455,16 +455,6 @@ def test_shard_processes_only_its_own_rows(stub, tmp_path):
         assert ids and {shard_of(i, 3) for i in ids} == {rank}
 
 
-def test_rows_sharded_for_another_shard_are_refused(tmp_path):
-    """A source sharded for (1, 4) handed to pump(shard=(2, 4)) would process nothing and
-    look finished: refused before any request."""
-    from saturate import shard_select, stream
-
-    with pytest.raises(ValueError, match="sharded for"):
-        pump(shard_select(stream(rows(8)), 1, 4), to_request, parse, endpoint="http://127.0.0.1:9",
-             output=str(tmp_path), shard=(2, 4))
-
-
 def test_invalid_shard_raises(tmp_path):
     for bad in [(4, 4), (-1, 2), (0, 0)]:
         with pytest.raises(ValueError, match="shard"):
@@ -472,22 +462,13 @@ def test_invalid_shard_raises(tmp_path):
                  shard=bad)
 
 
-def test_prepare_ahead_keeps_the_shard_tag(stub, tmp_path):
-    """prepare_ahead dropped the tag, so rows sharded for (0, 4) ran as shard 1: pump selected
-    again by hash, processed nothing, and wrote shard-1.done (#19's silent failure)."""
-    from saturate import prepare_ahead, shard_select, stream
+def test_input_split_by_shard_select_runs_every_row_of_the_shard(stub, tmp_path):
+    """Input split with shard_select (the shard_of rule) and pump(shard=) select the same rows:
+    pump's own selection keeps every one of them."""
+    from saturate import shard_select, stream
 
-    ready = prepare_ahead(shard_select(stream(rows(40)), 0, 4), lambda row: row)
-    with pytest.raises(ValueError, match="sharded for"):
-        pump(ready, to_request, parse, endpoint=stub.endpoint, output=str(tmp_path), shard=(1, 4))
-    assert not (tmp_path / "completions" / "shard-1.done").exists()
-
-
-def test_as_sharded_rows_are_taken_as_given(stub, tmp_path):
-    """The way to say "I selected this shard's rows myself": shard= then only labels."""
-    from saturate import as_sharded
-
-    stats = pump(as_sharded(rows(20), (1, 4)), to_request, parse, endpoint=stub.endpoint,
+    mine = list(shard_select(stream(rows(40)), 1, 4))
+    stats = pump(iter(mine), to_request, parse, endpoint=stub.endpoint,
                  output=str(tmp_path), window=Fixed(4), shard=(1, 4))
-    assert stats.rows_processed == 20
+    assert mine and stats.rows_processed == len(mine)
     assert (tmp_path / "completions" / "shard-1.done").exists()

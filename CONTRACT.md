@@ -90,11 +90,10 @@ An id names the data, not the query that found it. The built-in sources make ids
   config give the same ids. The revision is part of the id only when the caller pins one:
   a position names the same row only within one snapshot, so a new pin re-runs every row,
   while an unpinned run follows the branch and trusts that rows were not reordered. For an
-  already-loaded dataset object the prefix is `{config}:{split}` (its `info.config_name`)
+  already-loaded dataset object the prefix is `{config}:{split}` from the arguments given,
   or `{split}`.
-- `bucket_rows` path ids are the object path relative to the store root: the bucket or
-  repo (with its revision) for `hf://`, the bucket for s3/gcs/azure, the filesystem root
-  for a local path, or a caller-given `root`. The glob plays no part, so sibling globs never
+- `bucket_rows` path ids are the paths fsspec lists, without the scheme (the absolute path
+  for a local file), or relative to a caller-given `root`. The glob plays no part, so sibling globs never
   share an id and widening a glob keeps every existing id.
 
 Fan-out: K shards share one output. A row belongs to shard
@@ -109,11 +108,11 @@ input order, resume filtering and a growing input; the shards are disjoint and c
 input; a source can apply it before it reads or decodes a row; and applying it twice
 with the same `(r, K)` keeps the same rows. Changing K between runs moves rows between
 shards, which is safe: resume is per id over the whole output (§3). Ids never come from a
-per-shard counter. Rows a source or `shard_select` sharded carry a `(rank, world)` tag:
-pump takes rows tagged with its own shard as they are and refuses rows tagged for
-another. A caller who selects rows by another rule tags them with
-`as_sharded(rows, shard)`, and `shard` then only labels the output (§5). A source's
-`limit` counts input rows before sharding.
+per-shard counter. pump applies the rule to whatever input it is given, so input already
+split by the same rule passes through whole; input split by any other rule does not, and
+belongs in its own output without `shard`. A source given `shard` applies the same rule
+before it fetches or decodes; given a different `(r, K)` from pump's, the run has nothing
+to process. A source's `limit` counts input rows before sharding.
 
 ## 3. Resume semantics
 

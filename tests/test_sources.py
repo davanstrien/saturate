@@ -150,8 +150,9 @@ def decode_counter(monkeypatch):
 
 def test_shard_keeps_only_its_rows_and_decodes_nothing_else(monkeypatch):
     """Fan-out decoded every row on every shard, then threw (K-1)/K of them away (#34). With
-    shard=, a row of another shard is never decoded: for a map-style Dataset, and for a
-    streaming dataset loaded from a repo id."""
+    shard= and a repo id, a row of another shard is never decoded, streaming or not. An
+    already-loaded object is iterated as it is: every row is decoded, and the shards are still
+    disjoint and complete."""
     import datasets
 
     from saturate import shard_of
@@ -164,26 +165,15 @@ def test_shard_keeps_only_its_rows_and_decodes_nothing_else(monkeypatch):
     assert sorted(i for s in slices for i, _ in s) == sorted(whole)  # disjoint and complete
     for rank, s in enumerate(slices):
         assert all(shard_of(i, 4) == rank for i, _ in s)
-    assert len(calls) == 40  # each row decoded once, by its own shard
+    assert len(calls) == 4 * 40  # an object you loaded: every shard decodes every row
 
-    monkeypatch.setattr(datasets, "load_dataset", lambda *a, **kw: big.to_iterable_dataset())
-    expected = [(i, row) for i, row in dataset_rows("org/keys") if shard_of(i, 4) == 2]
-    calls.clear()
-    streamed = list(dataset_rows("org/keys", shard=(2, 4)))
-    assert streamed == expected
-    assert len(calls) == len(streamed)
-
-
-def test_nested_shard_select_with_another_shard_raises():
-    """shard_select(shard_select(rows, 0, 2), 1, 2) kept nothing and was tagged (1, 2), so
-    pump(shard=(1, 2)) accepted an empty slice."""
-    from saturate import shard_select, stream
-
-    rows = [{"text": f"row {i}"} for i in range(20)]
-    with pytest.raises(ValueError, match="sharded for"):
-        shard_select(shard_select(stream(rows), 0, 2), 1, 2)
-    once = shard_select(stream(rows), 1, 2)
-    assert shard_select(once, 1, 2) is once  # the same shard: kept as it is
+    for loaded in (big.to_iterable_dataset(), big):  # streaming=True, streaming=False
+        monkeypatch.setattr(datasets, "load_dataset", lambda *a, loaded=loaded, **kw: loaded)
+        expected = [(i, row) for i, row in dataset_rows("org/keys") if shard_of(i, 4) == 2]
+        calls.clear()
+        streamed = list(dataset_rows("org/keys", shard=(2, 4)))
+        assert streamed == expected
+        assert len(calls) == len(streamed)  # only this shard's rows were decoded
 
 
 def test_fractional_or_bool_shards_raise():

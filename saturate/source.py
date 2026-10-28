@@ -137,18 +137,7 @@ def prepare_ahead(rows: Iterable[tuple[str, dict]], fn: Callable[[dict], dict], 
     to control its lifetime and size — with a process pool, `fn` and the rows must be
     picklable (a module-level function, not a lambda). An exception in `fn` is raised at
     the consumer. Work done here happens before the pump sees the row, so a pump fed by
-    prepare_ahead reads that cost as source wait (SOURCE-BOUND), not prep.
-
-    Rows sharded by a source, `shard_select` or `as_sharded` keep their shard tag through
-    here, so pump() still checks it against its own `shard`."""
-    prepared = _prepare_ahead(rows, fn, workers, executor)
-    if isinstance(rows, ShardedRows):
-        return ShardedRows(prepared, rows.shard)
-    return prepared
-
-
-def _prepare_ahead(rows: Iterable[tuple[str, dict]], fn: Callable[[dict], dict], workers: int,
-                   executor: Executor | None) -> Iterator[tuple[str, dict]]:
+    prepare_ahead reads that cost as source wait (SOURCE-BOUND), not prep."""
     apply = partial(_apply_to_row, fn)  # module-level + partial: picklable for a process pool
     if executor is not None:
         yield from rolling_map(rows, apply, executor, workers)
@@ -182,59 +171,9 @@ def shard_of(row_id: str, world: int) -> int:
     return int.from_bytes(digest[:8], "big") % world
 
 
-class ShardedRows:
-    """An iterator that holds only the rows of one shard. `shard` is that (rank, world).
-    pump() reads it to skip a second selection, and to refuse rows that were sharded for
-    another shard than the one it runs.
-
-    The tag lives on this object. `prepare_ahead` keeps it; a generator, `islice` or any
-    other wrapper drops it, and pump() then selects by hash again. That is harmless when the
-    shards agree. When they differ, the run processes the wrong rows, or none."""
-
-    def __init__(self, rows: Iterable, shard: tuple[int, int]):
-        self._rows = iter(rows)
-        self.shard = shard
-
-    def __iter__(self) -> ShardedRows:
-        return self
-
-    def __next__(self):
-        return next(self._rows)
-
-
-def already_sharded(rows: Iterable, shard: tuple[int, int]) -> bool:
-    """True when `rows` carries the tag of `shard`. Raises when it carries another shard's
-    tag: selecting again would keep none of its rows, or the wrong ones."""
-    if not isinstance(rows, ShardedRows):
-        return False
-    if rows.shard != shard:
-        raise ValueError(f"rows were sharded for {rows.shard}, not {shard}; use one (rank, world) "
-                         "for the source, shard_select, as_sharded and pump()")
-    return True
-
-
-def as_sharded(rows: Iterable, shard: tuple[int, int]) -> ShardedRows:
-    """Mark `rows` as holding only shard `shard`'s rows, selected by you (for example with
-    datasets' `split_dataset_by_node`). pump(shard=shard) then takes every row as it is, and
-    `shard` only labels the output. Rows already tagged with the same shard are returned as
-    they are; rows tagged with another shard raise."""
-    shard = check_shard(shard)
-    if isinstance(rows, ShardedRows) and already_sharded(rows, shard):
-        return rows
-    return ShardedRows(rows, shard)
-
-
-def _rows_of_shard(rows: Iterable[tuple[str, dict]], rank: int, world: int) -> Iterator[tuple[str, dict]]:
-    for id_, row in rows:
-        if shard_of(id_, world) == rank:
-            yield id_, row
-
-
-def shard_select(rows: Iterable[tuple[str, dict]], rank: int = 0, world: int = 1) -> ShardedRows:
+def shard_select(rows: Iterable[tuple[str, dict]], rank: int = 0,
+                 world: int = 1) -> Iterator[tuple[str, dict]]:
     """The (id, row) pairs that belong to shard `rank` of `world`: those with
-    `shard_of(id, world) == rank` (CONTRACT §2). Rows already tagged with this shard are
-    returned as they are; rows tagged with another shard raise."""
-    shard = check_shard((rank, world))
-    if isinstance(rows, ShardedRows) and already_sharded(rows, shard):
-        return rows
-    return ShardedRows(_rows_of_shard(rows, *shard), shard)
+    `shard_of(id, world) == rank` (CONTRACT §2). pump(shard=) applies this to its input."""
+    rank, world = check_shard((rank, world))  # checked now, not at the first row
+    return ((id_, row) for id_, row in rows if shard_of(id_, world) == rank)

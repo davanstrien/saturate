@@ -250,21 +250,16 @@ rows = dataset_rows("org/pages", shard=(RANK, 4))  # decodes 1/4 (each Job still
 stats = pump(rows, to_request, parse, endpoint, output, shard=(RANK, 4))
 ```
 
-A sharded source tags its rows with its `(rank, world)`. `pump()` does not select a second
-time from rows tagged with its own shard, and it raises if they are tagged for another
-shard. `prepare_ahead` keeps the tag. A generator, `islice` or other wrapper drops it, and
-`pump()` then selects by hash again: harmless when the shards agree, but a mismatch is no
-longer caught. `limit=` in both sources counts the first N rows of the input before
-sharding, so K shards with one limit cover those N rows between them.
+`pump()` then selects again, which keeps every row the source gave it. Use the same pair
+on the source and on `pump()`: a source sharded for another rank leaves the Job nothing to
+process. `dataset_rows` skips decoding only when it loads the repo itself; a `Dataset` you
+pass in is iterated as it is. `limit=` in both sources counts the first N rows of the input
+before sharding, so K shards with one limit cover those N rows between them.
 
-If you select a shard's rows yourself by another rule (for example
-`datasets.distributed.split_dataset_by_node`), tag them with `as_sharded`. `pump()` then
-processes every row it is given, and `shard=` only labels the output:
-
-```python
-rows = as_sharded(split_dataset_by_node(ds, rank=RANK, world_size=4), (RANK, 4))
-stats = pump(rows, to_request, parse, endpoint, output, shard=(RANK, 4))
-```
+To split the input yourself, split it by `shard_of` (or
+`shard_select(rows, rank, world)`), so it agrees with `pump(shard=)`. If you split it any other
+way (for example `datasets.distributed.split_dataset_by_node`, which splits by position), pass
+no `shard` and give each Job its own output.
 
 Each shard adapts to its own node independently and writes `completions/shard-{rank}.done`
 when finished (datatrove's marker convention — a coordinator can watch the directory).
@@ -281,10 +276,11 @@ query:
   example `org/books:en:train:000000012`. Two configs or splits in one output do not share
   ids. The revision is in the id only when you pin one: a position names the same row only
   in one snapshot, so a new pin runs every row again.
-- `bucket_rows` ids are the object path from the store root: the bucket or repo for
-  `hf://`, the bucket for `s3://`, the filesystem root for a local path. `vol1/*.png` and
-  `vol2/*.png` do not share ids, and a wider glob keeps the ids a narrower one gave. Pass
-  `root=` for shorter ids under a directory.
+- `bucket_rows` ids are the paths fsspec lists, without the scheme: `buckets/org/b/scans/p1.png`
+  for `hf://buckets/org/b/scans/p1.png`, `bucket/key` for `s3://`, the absolute path for a
+  local file. `vol1/*.png` and `vol2/*.png` do not share ids, and a wider glob keeps the ids a
+  narrower one gave. Pass `root=` to drop a prefix: shorter ids, or ids that survive moving a
+  local directory.
 
 ## Preparing input
 

@@ -125,6 +125,9 @@ def main(refs: list[str]) -> None:
     print("| **mean** | " + " | ".join(means) + " |")
     worst = [f"{min(x[0] for x in totals[ref]):.0%}" for ref, _ in autos]
     print("| **worst best** | " + " | ".join(worst) + " |")
+    # a run that never reaches 90% counts as the whole run in the mean; the median is robust to it
+    ramps = [f"{statistics.median(x[4] for x in totals[ref]):.0f}" for ref, _ in autos]
+    print("| **median ramp** | " + " | ".join(ramps) + " |")
 
 
 if __name__ == "__main__":

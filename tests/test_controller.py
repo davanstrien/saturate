@@ -290,7 +290,7 @@ def test_input_bound_ticks_are_not_evidence():
     resumed = healthy(16, tok_s=2000.0)
     traj, reasons = drive(ctrl, limit, [starved] * 6 + [resumed])
     assert reasons == ["hold:input_bound"] * 6 + ["trial:up"] and traj[-1] == 32, (traj, reasons)
-    assert ctrl.state.phase.ref == 2000.0, ctrl.state.phase
+    assert ctrl.state.phase.ref.tok_s == 2000.0, ctrl.state.phase
 
 
 def test_partially_used_window_is_not_evidence():
@@ -302,7 +302,7 @@ def test_partially_used_window_is_not_evidence():
     resumed = healthy(16, tok_s=2000.0)
     traj, reasons = drive(ctrl, limit, [thin] * 6 + [resumed])
     assert reasons == ["hold"] * 6 + ["trial:up"] and traj[-1] == 32, (traj, reasons)
-    assert ctrl.state.phase.ref == 2000.0, ctrl.state.phase
+    assert ctrl.state.phase.ref.tok_s == 2000.0, ctrl.state.phase
 
 
 def test_cold_start_neither_grows_nor_stalls():
@@ -336,7 +336,7 @@ def test_completions_per_second_stand_in_when_tokens_are_unreported():
     grow with the window keep a wider trial; flat completions revert it."""
     ctrl = Auto(target_waiting=8, initial=16, step=STEP)
     traj, reasons = drive(ctrl, 16, [healthy(16, tok_s=None, successes=32)] * 2)
-    assert reasons[-1] == "trial:up" and ctrl.state.phase.ref == 32 / TICK_S, ctrl.state.phase
+    assert reasons[-1] == "trial:up" and ctrl.state.phase.ref.rows_s == 32 / TICK_S, ctrl.state.phase
     traj, reasons = drive(ctrl, 32, [healthy(32, tok_s=None, successes=64)] * 2)
     assert reasons[-1] == "hold:kept" and traj[-1] == 32, reasons
 
@@ -673,3 +673,72 @@ def test_decide_reports_a_reason_for_every_tick():
         assert ctrl.last_reason in REASONS, ctrl.last_reason
         seen.add(ctrl.last_reason)
     assert len(seen) >= 5, seen
+
+
+def open_trial(ctrl, limit, obs):
+    """Feed `obs` (its inflight following the window) until the first trial opens; the new limit."""
+    for _ in range(10):
+        new = ctrl.decide(dict(obs, inflight=limit), limit)
+        if ctrl.last_reason == "trial:up":
+            return new
+        limit = new
+    raise AssertionError("no trial opened")
+
+
+def test_a_trial_is_judged_on_its_own_window_readings():
+    """30 s requests: readings from the first two latencies after a move still describe the old
+    window. A real 6% gain is kept once the trial window's own readings arrive, not averaged
+    away with the old ones (then the next trial opens)."""
+    ctrl = Auto(target_waiting=8, initial=16, step=STEP)
+    limit = open_trial(ctrl, 16, healthy(16, tok_s=100.0, latency_s=30.0, waiting=None))
+    assert limit == 32
+    reasons = []
+    for _ in range(28):  # 56 s: still the old window's completions
+        limit = ctrl.decide(healthy(limit, tok_s=100.0, latency_s=30.0, waiting=None), limit)
+        reasons.append(ctrl.last_reason)
+    for _ in range(32):  # the trial window's own readings: up 6%
+        limit = ctrl.decide(healthy(limit, tok_s=106.0, latency_s=30.0, waiting=None), limit)
+        reasons.append(ctrl.last_reason)
+    assert "hold:kept" in reasons and "revert" not in reasons[:reasons.index("hold:kept")], reasons
+
+
+def test_a_latency_first_seen_mid_trial_extends_the_wait():
+    """The trial opened before any latency was known; a 30 s latency reported afterwards makes it
+    wait two latencies at the trial window before a verdict, not three ticks."""
+    ctrl = Auto(target_waiting=8, initial=16, step=STEP)
+    limit = open_trial(ctrl, 16, healthy(16, tok_s=100.0, waiting=None))
+    traj, reasons = drive(ctrl, limit, [healthy(limit, tok_s=100.0, latency_s=30.0, waiting=None)] * 20)
+    assert "revert" not in reasons and traj == [32] * 20, (traj, reasons)
+
+
+def test_throughput_units_are_compared_like_with_like():
+    """The reference was taken in completions/s (no tokens reported); tokens appearing during the
+    trial are not a gain: the trial is judged in completions/s."""
+    ctrl = Auto(target_waiting=8, initial=16, step=STEP)
+    limit = open_trial(ctrl, 16, healthy(16, tok_s=None, waiting=None, successes=16))
+    traj, reasons = drive(ctrl, limit, [healthy(limit, tok_s=100.0, waiting=None, successes=16)] * 8)
+    assert "hold:kept" not in reasons, reasons
+
+
+def test_the_release_wait_doubles_only_when_a_released_ceiling_is_met_again():
+    """Backpressure that keeps coming (a falling limit, or an outage) does not grow the wait
+    before the ceiling is released; meeting a released ceiling again doubles it, up to an hour."""
+    from saturate.controller import BP_CEILING_RELEASE_MAX_S, BP_CEILING_RELEASE_S
+
+    ctrl = Auto(target_waiting=8, initial=2, min_limit=2, step=STEP)
+    limit = 2
+    for _ in range(40):
+        limit = ctrl.decide(healthy(limit, backpressure=1, successes=0, waiting=None), limit)
+    assert ctrl.state.ceiling is not None and ctrl.state.ceiling.release_s == BP_CEILING_RELEASE_S
+    assert BP_CEILING_RELEASE_MAX_S == 3600.0
+
+
+def test_a_queue_cut_steps_down_by_the_excess_within_bounds():
+    """The gauge says how far past the engine's capacity the window is: the cut steps down by
+    the excess queue, at least `step` and at most half the window (another client's requests
+    may be queued too)."""
+    for waiting, expected in [(20, 64 - STEP), (40, 64 - 24), (500, 32)]:
+        ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+        limit = warm(ctrl, 64)
+        assert ctrl.decide(healthy(limit, waiting=waiting), limit) == expected, waiting
+        assert ctrl.last_reason == "cut:queue"

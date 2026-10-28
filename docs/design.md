@@ -115,10 +115,10 @@ flowchart TD
     ST -- no --> IB{source slower\nthan engine?}
     IB -- yes --> HOLD
     IB -- no --> HI{queue above band?}
-    HI -- yes --> DOWN[−step]
+    HI -- yes --> DOWN[step down by\nthe excess queue]
     HI -- no --> TR{trial open?}
     TR -- yes --> J[judge once its readings\nare in: keep or revert]
-    TR -- no --> U{window ≥80% used\nand queue in band?}
+    TR -- no --> U{window ≥80% used\nand queue below band?}
     U -- no --> HOLD
     U -- yes --> S[after the backoff:\nopen the next trial]
 ```
@@ -130,19 +130,21 @@ flowchart TD
 | `cut:kv` | KV ≥ 0.9 AND prefix-hit rate < 0.5 or absent | halve — high KV with healthy hits is cache reuse |
 | `cut:stall` | window full and nothing completed for max(3 ticks, 3× latency); once per episode | halve — a wedged engine reads as an empty queue because nothing new is admitted |
 | `hold:input_bound` | the source, not the engine, starves admission | hold; starved ticks are not evidence |
-| `cut:queue` | queue above band (not before the first completion ever) | −step |
+| `cut:queue` | queue above band (not before the first completion ever) | step down by the excess queue: at least `step`, at most half the window |
 | `hold:kept` / `revert` | a trial's readings are in: kept on a gain (up) or no loss (down), else reverted | a kept move up restarts `MOVES`; a revert advances it and doubles the backoff |
-| `hold` | window under 80% used, or the queue not in band | hold |
+| `hold` | window under 80% used, or a queue at or above the band's low end | hold |
 | `hold:ack` | waiting for an evidence window (`limit` completions and two throughput samples), or for a trial to settle | hold |
 | `hold:plateau` | waiting out the backoff between trials | hold |
 | `trial:up` / `trial:down` | the next move opens | move the window; judged later |
-| `hold:ceiling` / `hold:floor` | the move would cross `max_limit` or a backpressure ceiling / `min_limit` | skip to the next move |
+| `hold:ceiling` / `hold:floor` | a move would cross `max_limit` or a backpressure ceiling / `min_limit`, or a cut is already at `min_limit` | skip to the next move; a cut arms nothing |
 
 A cut during a trial counts as a failed trial: the window goes no higher than where the trial
 began. Latency is the p50 of successful attempts only — retries, backoff, breaker waits and
 poison rows are excluded — and waits are integrated in seconds from the measured tick.
 `bench/controller_sim.py` scores any version of the controller against simulated engines
-(tests/sim_engine.py).
+(tests/sim_engine.py). On random engines (a Hypothesis property) it reaches at least 75% of the
+best fixed window: past a flat stretch that starts below the initial window, a gain just over
+`improve` can read as flat, and the climber stays below it.
 
 `Fixed(n)` bypasses all of it. Defaults: `Auto(target_waiting=8, initial=16,
 max_limit=512, step=8)`; cap `max_limit` (~128) for vision workloads — in-flight

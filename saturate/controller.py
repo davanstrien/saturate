@@ -1,9 +1,9 @@
 """Controllers: pure sans-IO decide(obs, limit) -> new limit.
 
-Signal priority (decision 5): delivered throughput primary, engine gauges a
-secondary accelerator, blind AIMD the universal floor. The controller never
-knows where an observation came from (HTTP scrape, in-process engine, nowhere)
-— that's the SignalSource seam's job.
+`Auto` searches for the window with the most delivered throughput (a hill climber) and cuts on
+overload; engine gauges, when there are any, only feed the cuts. The controller never knows
+where an observation came from (HTTP scrape, in-process engine, nowhere) — that's the
+SignalSource seam's job.
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ from dataclasses import dataclass, replace
 
 TICK_S = 2.0  # nominal tick period: the loop sleeps this long, and tick-count floors are multiples of it
 BP_CEILING_RELEASE_S = 300.0  # backpressure-free seconds before the backpressure ceiling is released
+BP_CEILING_RELEASE_MAX_S = 3600.0  # the release wait doubles on each re-meet, up to this
+MAX_SAMPLES = 16  # throughput samples kept: the most recent ticks only
 
 
 @dataclasses.dataclass
@@ -59,6 +61,34 @@ class Fixed:
 # --- Auto: phases and state, all frozen ----------------------------------------------------------
 
 @dataclass(frozen=True)
+class Sample:
+    """One tick's throughput: tokens/s when the engine reports them, and completions/s."""
+
+    clock: float
+    tok_s: float | None
+    rows_s: float
+
+
+@dataclass(frozen=True)
+class Reading:
+    """Mean throughput over some samples. `tok_s` is None unless every sample had tokens."""
+
+    tok_s: float | None
+    rows_s: float
+
+    def ratio(self, other: Reading) -> float:
+        """self / other, in tokens when both have them, else in completions (like with like)."""
+        if self.tok_s is not None and other.tok_s is not None:
+            return self.tok_s / other.tok_s if other.tok_s else float("inf")
+        return self.rows_s / other.rows_s if other.rows_s else float("inf")
+
+    @property
+    def nothing(self) -> bool:
+        """Nothing delivered, by either measure: no basis to compare a trial with."""
+        return self.rows_s == 0 or self.tok_s == 0
+
+
+@dataclass(frozen=True)
 class Steady:
     """Holding the window. The next trial opens once `backoff` evidence windows have passed
     (`waits` counts them) and moves the window by MOVES[move]. `anchor` is the reading where a
@@ -68,21 +98,28 @@ class Steady:
     waits: int = 0
     backoff: int = 1
     move: int = 0
-    anchor: float | None = None
+    anchor: Reading | None = None
 
 
 @dataclass(frozen=True)
 class Trial:
-    """The window moved from `origin` by MOVES[move]. It is judged against `ref`, the reading
-    just before the move, once `settle_s` seconds and three ticks have passed (`ticks`)."""
+    """The window moved from `origin` by MOVES[move] (`widen` = new / origin). It is judged
+    against `ref`, the reading just before the move, once three ticks and two latencies at the
+    trial window have passed: the latency at the start (or the first one seen, if none was
+    known), times `widen` (at flat throughput latency grows with the window, by Little's law)."""
 
     origin: int
-    ref: float  # the reading before the move (for a move down: the run's anchor)
+    ref: Reading  # the reading before the move (for a move down: the run's anchor)
     opened: float
-    settle_s: float
+    widen: float
     move: int
     backoff: int
+    latency_s: float = 0.0  # the latency the trial's wait is based on (0 until one is known)
     ticks: int = 0
+
+    def settled_by(self) -> float:
+        """The clock time from which the trial window's own readings have arrived."""
+        return self.opened + 2 * self.latency_s * max(1.0, self.widen)
 
 
 @dataclass(frozen=True)
@@ -111,7 +148,7 @@ class State:
     ceiling: Ceiling | None = None
     seen_ceiling: Ceiling | None = None  # the last ceiling, kept after it is released
     acks: int = 0  # evidence since the last change: completions, and throughput samples
-    samples: tuple[float, ...] = ()
+    samples: tuple[Sample, ...] = ()
     latency_s: float | None = None  # the last request latency seen (timeouts report none)
     acked_ever: bool = False  # queue gauges mean nothing before the first completion ever
     silent_s: float = 0.0  # seconds of a full window with nothing completing
@@ -170,7 +207,8 @@ class Auto:
        latency when known, whichever is longer: halve. Once per episode: the next needs a
        completion after the last change has drained.
     5. hold:input_bound — the source, not the engine, is starving admission.
-    6. cut:queue — engine queue above target (waiting > hi): step down by `step`. Not before
+    6. cut:queue — engine queue above target (waiting > hi): step down by the excess, at least
+       `step`, at most half the window (the queue may hold other clients' requests). Not before
        the first completion ever: a cold engine queues the whole initial window.
     7. hold:kept / revert / hold:ack — a trial is open: judge it once its evidence is in.
     8. hold — window under 80% used (the source sets the pace), or a queue in band.
@@ -236,24 +274,32 @@ class Auto:
         return replace(state, phase=Settling(state.clock, state.clock + hold, then), acks=0, samples=(),
                        silent_s=0.0, stall_armed=False)
 
-    def cut(self, state: State, obs: Obs, limit: int, new: int, reason: str) -> Decision:
-        """The one way down that is not a trial. A trial that meets a cut failed: the window goes
-        no higher than where it began, and the next trial tries the next move."""
+    def cut(self, state: State, obs: Obs, limit: int, new: int, reason: str,
+            keep_target: bool = False) -> Decision:
+        """The one way down that is not a trial. A trial that meets a cut failed: the next trial
+        tries the next move, and the window goes no higher than where the trial began, unless
+        `keep_target` (a queue gauge says exactly how far to step down)."""
         then = Steady()
         if isinstance(state.phase, Trial):
-            new = min(new, state.phase.origin)
+            new = new if keep_target else min(new, state.phase.origin)
             then = Steady(backoff=min(self.MAX_BACKOFF, state.phase.backoff * 2), move=state.phase.move + 1)
         new = self.clamp(state, new)
         if new >= limit:  # at the floor already
             return limit, "hold:floor", replace(state, phase=then)
         return new, reason, self.settle(state, obs, then)
 
-    def evidence(self, state: State, limit: int) -> float | None:
-        """Mean throughput once `limit` completions and two samples are in. The first sample
-        after a change still describes the old window, and is dropped."""
-        if state.acks >= limit and len(state.samples) >= 2:
-            return sum(state.samples[1:]) / (len(state.samples) - 1)
-        return None
+    def evidence(self, state: State, limit: int) -> Reading | None:
+        """Mean throughput once `limit` completions and two samples are in, over the samples
+        kept (the most recent MAX_SAMPLES ticks) but the first: the first after a change still
+        describes the old window. On a slow engine, by the time a trial has settled, the samples
+        kept are the trial window's own."""
+        if state.acks < limit or len(state.samples) < 2:
+            return None
+        samples = state.samples[1:]
+        rows = sum(x.rows_s for x in samples) / len(samples)
+        has_tokens = all(x.tok_s is not None for x in samples)
+        tok = sum(x.tok_s or 0.0 for x in samples) / len(samples) if has_tokens else None
+        return Reading(tok, rows)
 
 
 # --- per-tick bookkeeping ----------------------------------------------------------------------------
@@ -265,7 +311,10 @@ def _observe(auto: Auto, state: State, obs: Obs, limit: int) -> State:
     if state.ceiling is not None and state.clock - state.ceiling.met >= state.ceiling.release_s:
         state = replace(state, ceiling=None, seen_ceiling=state.ceiling)  # a provider's limit can rise
     if isinstance(state.phase, Trial):
-        state = replace(state, phase=replace(state.phase, ticks=state.phase.ticks + 1))
+        # the latency at the trial's start, or the first one seen if none was known then; not a
+        # later one, which an overshooting trial inflates with its own queueing
+        latency = state.phase.latency_s or obs.latency_s or 0.0
+        state = replace(state, phase=replace(state.phase, ticks=state.phase.ticks + 1, latency_s=latency))
     if isinstance(state.phase, Settling):
         age = state.clock - state.phase.since
         draining = obs.oldest_s is not None and obs.oldest_s > age and age <= auto.patience_s(obs)
@@ -276,8 +325,9 @@ def _observe(auto: Auto, state: State, obs: Obs, limit: int) -> State:
     state = replace(state, stall_armed=state.stall_armed or obs.successes > 0,
                     silent_s=state.silent_s + tick if silent else 0.0)
     if not obs.input_bound and obs.inflight >= int(limit * 0.8):  # only a used window is evidence
-        rate = obs.tok_s if obs.tok_s is not None else obs.successes / tick  # tokens, else rows
-        state = replace(state, acks=state.acks + obs.successes, samples=state.samples + (rate,))
+        sample = Sample(state.clock, obs.tok_s, obs.successes / tick)
+        state = replace(state, acks=state.acks + obs.successes,
+                        samples=(state.samples + (sample,))[-MAX_SAMPLES:])
     return state
 
 
@@ -294,7 +344,10 @@ def _backpressure(auto: Auto, state: State, obs: Obs, limit: int) -> Decision | 
         return None
     known = state.ceiling or state.seen_ceiling
     at_known = known is not None and _below(known.limit) <= limit <= known.limit * 9 // 8
-    release = known.release_s * 2 if at_known else BP_CEILING_RELEASE_S  # a limit that held: look less often
+    release = BP_CEILING_RELEASE_S
+    if at_known and known is not None:  # a limit that held: keep its wait; after a release, double it
+        doubled = known.release_s * 2 if state.ceiling is None else known.release_s
+        release = min(BP_CEILING_RELEASE_MAX_S, doubled)
     lowest = min(limit, state.ceiling.limit) if state.ceiling is not None else limit
     state = replace(state, ceiling=Ceiling(lowest, state.clock, release))
     new = _below(limit) if at_known else limit // 2  # a known limit: step under; fresh overload: halve
@@ -322,7 +375,11 @@ def _input_bound(auto: Auto, state: State, obs: Obs, limit: int) -> Decision | N
 
 def _queue(auto: Auto, state: State, obs: Obs, limit: int) -> Decision | None:
     if state.acked_ever and obs.waiting is not None and obs.waiting > auto.hi:
-        return auto.cut(state, obs, limit, limit - auto.step, "cut:queue")
+        # step down by the excess the gauge shows, at least `step` and at most half the window
+        # (the queue may hold other clients' requests); during a trial too: the queue says where
+        # the engine's limit is, which is finer than going back to where the trial began
+        down = min(max(auto.step, obs.waiting - auto.hi), limit // 2)
+        return auto.cut(state, obs, limit, limit - down, "cut:queue", keep_target=True)
     return None
 
 
@@ -330,14 +387,17 @@ def _judge(auto: Auto, state: State, obs: Obs, limit: int) -> Decision | None:
     """A trial holds its window until its evidence is in, then is kept or reverted."""
     if not isinstance(state.phase, Trial):
         return None
-    trial, reading = state.phase, auto.evidence(state, limit)
-    if reading is None:
-        return limit, "hold:ack", state
+    trial = state.phase
     up = limit > trial.origin
-    kept = reading >= trial.ref * auto.improve if up else reading * auto.improve >= trial.ref
-    settled = trial.ticks >= 3 and state.clock - trial.opened >= trial.settle_s
-    if not settled and not (kept and up):  # until settled, only a gain from a wider window counts
+    early = auto.evidence(state, limit)  # a gain shows even through the old window's readings
+    if up and early is not None and early.ratio(trial.ref) >= auto.improve:
+        return limit, "hold:kept", replace(state, phase=Steady(), acks=0, samples=())
+    settled = trial.ticks >= 3 and state.clock >= trial.settled_by()
+    reading = auto.evidence(state, limit) if settled else None
+    if reading is None:  # wait for the trial window's own readings
         return limit, "hold:ack", state
+    ratio = reading.ratio(trial.ref)
+    kept = ratio >= auto.improve if up else ratio * auto.improve >= 1
     if kept:  # a gain starts MOVES over; a kept move down tries down again, against the same anchor
         steady = Steady() if up else Steady(move=trial.move, anchor=trial.ref)
         return limit, "hold:kept", replace(state, phase=steady, acks=0, samples=())
@@ -352,10 +412,10 @@ def _idle(auto: Auto, state: State, obs: Obs, limit: int) -> Decision | None:
     return None
 
 
-def _steady(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
+def _open_trial(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
     """With an evidence window in and the backoff waited out, open the next trial."""
     reading = auto.evidence(state, limit)
-    if reading is None or reading == 0 or state.silent_s > 0:  # nothing delivered: no basis for a trial
+    if reading is None or reading.nothing or state.silent_s > 0:  # nothing delivered: no basis for a trial
         return limit, "hold:ack", state
     phase = state.phase
     assert isinstance(phase, Steady)
@@ -367,15 +427,14 @@ def _steady(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
     at_ceiling = state.ceiling is not None and limit >= _below(state.ceiling.limit)
     if new == limit or (factor < 1 and at_ceiling):  # nothing to try this way: the next move
         skipped = replace(state, phase=replace(phase, waits=0, move=phase.move + 1), acks=0, samples=())
-        at_floor = factor < 1 and limit <= auto.min
+        at_floor = factor < 1 and not at_ceiling
         return limit, "hold:floor" if at_floor else "hold:ceiling", skipped
-    settle_s = 2 * (state.latency_s or 0.0) * max(1.0, new / limit)  # latency grows with the window
     ref = phase.anchor if new < limit and phase.anchor is not None else reading
-    trial = Trial(origin=limit, ref=ref, opened=state.clock, settle_s=settle_s,
-                  move=phase.move, backoff=phase.backoff)
+    trial = Trial(origin=limit, ref=ref, opened=state.clock, widen=new / limit, move=phase.move,
+                  backoff=phase.backoff, latency_s=state.latency_s or 0.0)
     return new, "trial:up" if new > limit else "trial:down", replace(state, phase=trial, acks=0, samples=())
 
 
 Rule = Callable[[Auto, State, Obs, int], "Decision | None"]
 RULES: tuple[Rule, ...] = (_cooling, _backpressure, _kv_pressure, _stall, _input_bound, _queue,
-                           _judge, _idle, _steady)
+                           _judge, _idle, _open_trial)

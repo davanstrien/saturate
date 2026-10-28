@@ -99,18 +99,26 @@ class Auto:
         real generations the reading that follows a widening still describes
         the old window (the growth gate throttles slow-start on its own).
     11. probe / hold:plateau — throughput flat: hold, and on a backoff schedule
-        (4, 8, 16, 32 evaluations) try +step anyway, because a real engine's
-        throughput lags the tick. Revert (7) unless it confirms.
+        (4, 8, 16, 32 evaluations) try a wider window anyway, because a real
+        engine's throughput lags the tick and can be flat over a stretch of
+        windows before it rises again. Revert (7) unless it confirms.
 
     Every reduction scales the throughput baseline with it, so throughput
     proportional to a smaller window is a plateau and throughput above it is
     growth. A reduction that cannot go below `min_limit` reports `hold:floor`
     and arms nothing; a widening that cannot go above `max_limit` reports
-    `hold:ceiling` and opens no probe. Blind mode (no gauges) grows by an eighth of the
-    window (at least 1) at each evidence window instead of doubling, and cannot hold a
-    probe. The step must be big enough to measure: growth needs throughput `improve` times
-    the best so far, and a +1 step from a window of L gains at most 1/L, so creeping by 1
-    stopped every blind run near 21 whatever the engine's capacity. Durations are
+    `hold:ceiling` and opens no probe.
+
+    Blind mode (no gauges) cannot see a queue, so every doubling is a trial: in slow-start it
+    doubles while throughput keeps improving, and a doubling that does not pay is reverted
+    and ends slow-start. After that it grows by an eighth of the window (at least 1) at each
+    evidence window: growth needs throughput `improve` times the best so far, and a +1 step
+    from a window of L gains at most 1/L, too little to measure. Its plateau probes try 2x,
+    then 4x, then 8x the window, because a flat stretch (SGLang's from 32 to 64) can be wider
+    than any step; a confirmed gain starts the search again at 2x. The search stops when an
+    8x probe fails, or when a probe meets backpressure: the engine's limit is then below the
+    trial window. Gauge mode probes by +step, and a queue above target ends any probe.
+    Durations are
     integrated in seconds from the observed `tick_s` (TICK_S when absent), so
     one slow tick neither shortens nor recomputes a wait.
     """
@@ -143,6 +151,8 @@ class Auto:
         self._best_tok = 0.0  # best evidence-window throughput, scaled down with every reduction
         self._probe_wait, self._probe_cooldown = 0, 4
         self._probe_from: int | None = None
+        self._probe_blind = False  # the pending probe was opened without gauges
+        self._blind_reach = 2  # a blind probe tries this many times the window: 2, 4, 8; 0 = done
         self._probe_age = 0
         self._rules = (self._cooling, self._backpressure, self._kv_pressure, self._stall,
                        self._input_bound, self._queue, self._widen)  # _widen always fires
@@ -179,7 +189,8 @@ class Auto:
             if obs.tok_s is not None:
                 self._toks.append(obs.tok_s)
         if obs.waiting is None:
-            self._void_probe()  # a probe begun in gauge mode cannot settle blind
+            if self._probe_from is not None and not self._probe_blind:
+                self._void_probe()  # a probe begun in gauge mode cannot settle blind
         elif self._acked_ever:
             self._queue_ticks = self._queue_ticks + 1 if obs.waiting >= self.lo else 0
             if self._queue_ticks >= 2:  # a durable queue, not one cold-prefill spike
@@ -220,7 +231,17 @@ class Auto:
         return True, False
 
     def _void_probe(self) -> None:
-        self._probe_from, self._probe_wait = None, 0
+        self._probe_from, self._probe_wait, self._probe_blind = None, 0, False
+
+    def _open_probe(self, limit: int, new: int, blind: bool, reason: str) -> tuple[int, str]:
+        """Widen to `new` on trial: kept if throughput confirms within the settle window,
+        otherwise reverted to `limit` (rule 7)."""
+        new = self._clamp(new)
+        if new == limit:
+            return limit, "hold:ceiling"
+        self._probe_wait, self._probe_from, self._probe_age = 0, limit, 0
+        self._probe_blind = blind
+        return new, reason
 
     def _clamp(self, n: int) -> int:
         return min(self.max, max(self.min, n))
@@ -229,6 +250,8 @@ class Auto:
         """The single way down: ends slow-start, voids any probe, and on an actual reduction
         scales the baseline with it, restarts the evidence window and arms the cooldown."""
         measured_at = limit if self._probe_from is None else self._probe_from  # where the baseline was set
+        if self._probe_from is not None and self._probe_blind:
+            self._blind_reach = 0  # the trial window met the engine's limit: larger ones would too
         self._slow_start = False
         self._void_probe()  # an independent reduction: a pending revert must not climb back over it
         new = self._clamp(new)
@@ -280,27 +303,35 @@ class Auto:
         if self._probe_from is not None:  # a probe is settling: confirm or revert
             if grew is True:
                 self._probe_from, self._probe_cooldown = None, 4  # confirmed
+                self._probe_blind, self._blind_reach = False, 2
             elif due and self._probe_age >= 3:
                 back, self._probe_from = self._probe_from, None
                 self._probe_cooldown = min(self._probe_cooldown * 2, 32)
+                if self._probe_blind:
+                    self._slow_start = False  # a blind doubling that did not pay: step from here
+                    # the flat stretch may be wider: try further, and after 8x stop searching
+                    self._blind_reach = 0 if self._blind_reach >= 8 else self._blind_reach * 2
+                self._probe_blind = False
                 return self._clamp(back), "revert"
         headroom = obs.waiting is None or obs.waiting < self.lo
         if not (headroom and obs.inflight >= int(limit * 0.8)):
             return limit, "hold"
         if not due:
             return limit, "hold:ack"
+        blind = obs.waiting is None
         if grew is not False:
-            if obs.waiting is None:  # blind: no queue to see, so grow in steps big enough to measure
+            if blind and self._slow_start and grew is True and self._probe_from is None:
+                # no queue to see: double on trial, so a doubling into a full engine reverts
+                return self._open_probe(limit, limit * 2, blind=True, reason="grow")
+            if blind:  # grow in steps big enough to measure
                 new = self._clamp(limit + max(1, limit // 8))
             else:
                 new = self._clamp(limit * 2 if self._slow_start else limit + self.step)
             return (new, "grow") if new > limit else (limit, "hold:ceiling")
-        if obs.waiting is not None and self._probe_from is None:  # plateau-blocked: probe on backoff
+        if self._probe_from is None and not (blind and self._blind_reach == 0):  # probe on backoff
             self._probe_wait += 1
             if self._probe_wait >= self._probe_cooldown:
-                new = self._clamp(limit + self.step)
-                if new == limit:
-                    return limit, "hold:ceiling"
-                self._probe_wait, self._probe_from, self._probe_age = 0, limit, 0
-                return new, "probe"
+                # blind, a flat stretch can be wider than any step: try a multiple of the window
+                new = limit * self._blind_reach if blind else limit + self.step
+                return self._open_probe(limit, new, blind, "probe")
         return limit, "hold:plateau"

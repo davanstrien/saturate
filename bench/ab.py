@@ -36,7 +36,7 @@ SUITES = {
         # flush-every 5000: the pipeline's own overhead, not parquet writes
         "overhead-w64": (0, ["--rows", "10000", "--window", "64", "--flush-every", "5000"]),
         "overhead-w512": (0, ["--rows", "10000", "--window", "512", "--flush-every", "5000"]),
-        # the default local flush (10 rows): what an out-of-the-box run pays
+        # the default local flush (1000 rows or 10 s): what an out-of-the-box run pays
         "default-flush-w64": (0, ["--rows", "3000", "--window", "64"]),
         "latency50-w256": (50, ["--rows", "4000", "--window", "256"]),
         "prep-cpu-4workers": (10, ["--rows", "1500", "--window", "64", "--prep-ms", "4",

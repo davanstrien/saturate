@@ -917,13 +917,14 @@ def test_salvage_demotes_a_value_that_does_not_fit_the_widened_type(tmp_path):
     assert sink.existing_ids(retry_errors=True) == {"half"}  # widened to double: 2**60 does not fit
 
 
-def test_flush_defaults_are_small_locally_and_large_on_remote_stores(tmp_path):
-    """A flush blocks the run for two writes; on a remote store that is ~1 s each, so the
-    local 10-row default capped hf:// runs at a few rows/s. Remote outputs flush by size or age."""
+def test_flush_defaults_are_a_thousand_rows_or_an_age(tmp_path):
+    """Every output flushes by size or age: 1000 rows, or the oldest buffered row 10 s old
+    locally and 60 s remotely, where each write is a slow commit. A fast run then writes about
+    one part a second, not one per few rows; a slow one about every 10 s locally."""
     from saturate.sink import ParquetSink
 
     local = ParquetSink(str(tmp_path))
-    assert (local.flush_every, local.flush_interval_s) == (10, None)
+    assert (local.flush_every, local.flush_interval_s) == (1000, 10.0)
     remote = ParquetSink(f"memory://{tmp_path.name}/remote")  # any non-local fsspec store
     assert (remote.flush_every, remote.flush_interval_s) == (1000, 60.0)
     explicit = ParquetSink(f"memory://{tmp_path.name}/explicit", flush_every=5, flush_interval_s=2.0)

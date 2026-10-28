@@ -51,6 +51,10 @@ COMPLETIONS_DIR = f"{SIDECAR_DIR}/completions"
 TELEMETRY_DIR = f"{SIDECAR_DIR}/telemetry"
 
 
+LOCAL_FLUSH_INTERVAL_S = 10.0  # a local output's oldest buffered row is written within this
+REMOTE_FLUSH_INTERVAL_S = 60.0  # a remote output's: each write there is a slow commit or upload
+
+
 def _list_parts(fs, root: str) -> list[str]:
     """The data parts of an output dir, in write order (the CONTRACT part-name pattern)."""
     return sorted(fs.glob(f"{root}/part-*.parquet"))
@@ -78,15 +82,17 @@ class ParquetSink:
         protos = set(proto) if isinstance(proto, (tuple, list)) else {proto}
         local = "file" in protos
         self._local = local
-        # a flush writes two objects and blocks the event loop while it does: ~1 s per write on
-        # hf:// capped a remote run at ~2.5 rows/s with 10-row flushes. Remote outputs flush by
-        # size or age instead. The age is checked when a row is appended, so while rows keep
-        # arriving a crash loses at most about a minute of them; if the stream stalls, the
-        # buffer waits for the next row or the final flush. Rows are counted, not bytes: if
-        # parse returns large payloads (images), pass a smaller flush_every.
-        self.flush_every = flush_every if flush_every is not None else (10 if local else 1000)
+        # a flush writes two objects (a part and its manifest): ~1 s per write on hf://, and
+        # 10-row local flushes capped a fast run (embeddings) at ~1,100 rows/s. Outputs flush
+        # by size or age: 1000 rows, or the oldest buffered row 10 s old locally (60 s remotely,
+        # where every write is slow). The age is checked when a row is appended, so while rows
+        # keep arriving a crash loses at most that many seconds of them (resume re-requests
+        # them); if the stream stalls, the buffer waits for the next row or the final flush.
+        # Rows are counted, not bytes: if parse returns large payloads (images), pass a smaller
+        # flush_every.
+        self.flush_every = flush_every if flush_every is not None else 1000
         self.flush_interval_s = flush_interval_s if flush_interval_s is not None else (
-            None if local else 60.0)
+            LOCAL_FLUSH_INTERVAL_S if local else REMOTE_FLUSH_INTERVAL_S)
         self.read_workers = read_workers  # resume read concurrency; 1 = sequential
         self._buf: list[dict] = []
         self._buf_since: float | None = None  # monotonic time of the oldest buffered row

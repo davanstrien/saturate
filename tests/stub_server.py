@@ -26,6 +26,7 @@ import asyncio
 import json
 import sys
 import threading
+import time
 from collections.abc import Callable
 
 _HEAD_LIMIT = 1 << 20  # header bytes before we give up on a connection
@@ -67,6 +68,12 @@ class StubServer:
         self.probe_log: list[tuple[str, dict]] = []  # (path, body) of every circuit-breaker probe
         self.inflight = 0
         self.peak_inflight = 0
+        # diagnostics for a slow test (conftest.py): requests being handled (any kind), the longest
+        # stretch with none, and the longest a single request took from its head to its answer
+        self.busy = 0
+        self.idle_since: float | None = None
+        self.longest_idle_s = 0.0
+        self.longest_service_s = 0.0
         self.prompt_tokens = 0  # usage reported on 200 responses only
         self.completion_tokens = 0
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -127,6 +134,7 @@ class StubServer:
                     head = await reader.readuntil(b"\r\n\r\n")
                 except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError):
                     return
+                started = self._request_started()
                 request_line, _, header_block = head.decode("latin-1").partition("\r\n")
                 method, path, _ = request_line.split(" ", 2)
                 headers = {k.strip().lower(): v.strip() for k, _, v in
@@ -138,6 +146,7 @@ class StubServer:
                              f"Content-Type: {ctype}\r\nContent-Length: {len(payload)}\r\n"
                              "Connection: keep-alive\r\n\r\n".encode() + payload)
                 await writer.drain()
+                self._request_finished(started)
                 if headers.get("connection", "").lower() == "close":
                     return
         except (ConnectionError, asyncio.IncompleteReadError):
@@ -148,6 +157,20 @@ class StubServer:
                 await writer.wait_closed()
             except (ConnectionError, OSError):
                 pass
+
+    def _request_started(self) -> float:
+        now = time.monotonic()
+        if self.busy == 0 and self.idle_since is not None:
+            self.longest_idle_s = max(self.longest_idle_s, now - self.idle_since)
+        self.busy += 1
+        return now
+
+    def _request_finished(self, started: float) -> None:
+        now = time.monotonic()
+        self.longest_service_s = max(self.longest_service_s, now - started)
+        self.busy -= 1
+        if self.busy == 0:
+            self.idle_since = now
 
     async def _respond(self, method: str, path: str, body: bytes, headers: dict
                        ) -> tuple[int, str, bytes]:

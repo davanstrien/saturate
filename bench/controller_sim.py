@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
@@ -59,6 +60,9 @@ SCENARIOS.append(("blind, 12 s requests, 60 s timeout", dict(curve=[(100, 8.0)],
 for slots, rate in ((1, 0.5), (4, 0.8), (8, 3.0)):  # llama.cpp: a few slots, the rest queue
     SCENARIOS.append((f"blind llama.cpp-like, {slots} slots", dict(curve=[(slots, rate)], cap=slots,
                                                                    gauges=False, noise=0.05)))
+    SCENARIOS.append((f"blind llama.cpp-like, {slots} slots, reports them",
+                      dict(curve=[(slots, rate)], cap=slots, gauges=False, noise=0.05, refill_s=0.15,
+                           reports=True)))
 
 # mid-run changes at tick 300: (name, before, after)
 SHIFTS = [
@@ -94,10 +98,15 @@ def ramp_ticks(ticks) -> int:
 
 def score(auto, kwargs: dict, after: dict | None = None) -> tuple[float, float, float, float, float]:
     best, first, lat, fail, ramp = [], [], [], [], []
+    params = dict(kwargs)
+    reports = params.pop("reports", False)  # the engine reports its capacity before the run
     for seed in range(3):
-        engine = Engine(**kwargs, seed=seed)
-        then = None if after is None else (300, Engine(**{**kwargs, **after}, seed=seed))
-        ticks = run(auto(), engine, 600, then=then)
+        engine = Engine(**params, seed=seed)
+        then = None if after is None else (300, Engine(**{**params, **after}, seed=seed))
+        controller = auto()
+        if reports and hasattr(controller, "begin"):
+            controller.begin(SimpleNamespace(requests=engine.cap, queues=True))
+        ticks = run(controller, engine, 600, then=then)
         tail = ticks[100:] if then is None else ticks[300:]  # after a change: how well it adapted
         best.append(share_of_best(tail))
         first.append(share_of_best(ticks[:30]))

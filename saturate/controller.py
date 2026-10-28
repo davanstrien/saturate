@@ -11,6 +11,10 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # the controller stays free of I/O imports at run time
+    from saturate.signals import Capacity
 
 TICK_S = 2.0  # nominal tick period: the loop sleeps this long, and tick-count floors are multiples of it
 BP_CEILING_RELEASE_S = 300.0  # backpressure-free seconds before the backpressure ceiling is released
@@ -183,9 +187,9 @@ class Auto:
       rarely but never given up on, so a later rise in capacity is found.
     The x4 move crosses a stretch where throughput is flat (SGLang's from 32 to 64) that a
     doubling cannot see past; x7/8 trims a window that overshot the engine's cap. The window
-    starts at `initial` (64), so most of a short run is not spent ramping. On an engine with
-    a few slots and no metrics (llama.cpp without --metrics) that start queues requests and
-    raises latency: pass a smaller `initial`.
+    starts at `initial` if given; else at the engine's reported capacity when the engine
+    reports one (begin: SGLang, llama.cpp, TEI); else at 64, so most of a short run is not
+    spent ramping.
 
     A trial's readings arrive one request latency late, and a wider window has a longer latency
     at flat throughput (Little's law), so a trial is judged only after two latencies at its
@@ -228,7 +232,9 @@ class Auto:
     MOVES: tuple[float, ...] = (2.0, 4.0, 1.5, 1.25, 0.875)
     MAX_BACKOFF = 32  # evidence windows between trials on a long plateau
 
-    def __init__(self, target_waiting: int = 8, initial: int = 64, min_limit: int = 2,
+    DEFAULT_INITIAL = 64  # the start when neither the caller nor the engine says otherwise
+
+    def __init__(self, target_waiting: int = 8, initial: int | None = None, min_limit: int = 2,
                  max_limit: int = 512, step: int = 8, kv_hi: float = 0.9,
                  hits_lo: float = 0.5, improve: float = 1.05, stall_ticks: int = 3,
                  bp_frac: float = 0.05):
@@ -239,12 +245,12 @@ class Auto:
         if not 0.0 <= bp_frac <= 1.0:
             raise ValueError("Auto requires 0 <= bp_frac <= 1")
         self.lo, self.hi = max(1, target_waiting // 4), target_waiting * 2
-        self.min, self.max, self.step = min_limit, max_limit, step
+        self.step = step
         self.kv_hi, self.hits_lo, self.improve = kv_hi, hits_lo, improve
         self.stall_ticks, self.bp_frac = stall_ticks, bp_frac
-        self.initial = min(max_limit, max(min_limit, initial))
-        self.state = State()
-        self.last_reason = "hold"
+        # the caller's configuration, never changed: each run's bounds are worked out from it (begin)
+        self.config = (initial, min_limit, max_limit)
+        self.begin(None)
 
     def decide(self, obs: Obs | dict, limit: int) -> int:
         obs = as_obs(obs)
@@ -255,6 +261,31 @@ class Auto:
                 new, self.last_reason, self.state = decision
                 return new
         raise AssertionError("RULES must end in a rule that always applies")
+
+    def begin(self, capacity: Capacity | None) -> None:
+        """Start a run: this run's bounds and start, from the caller's configuration and the
+        engine's reported `capacity` (None: none reported), and a fresh search state. The same
+        Auto can run again, against the same engine or another.
+
+        An engine that queues past its capacity starts above it, by min(capacity, 2 x
+        target_waiting): a few waiting requests refill a slot as soon as it frees, which a window
+        of exactly the capacity does not (llama.cpp, 8 slots: a window of 16 beat 8 by 9%), and
+        that queue sits inside the band the queue cut allows. An engine that rejects past its
+        capacity (TEI: 429s) starts at it and never goes above it, the caller's own start and
+        bounds included. The caller's `initial` otherwise wins; with neither, DEFAULT_INITIAL."""
+        initial, min_limit, max_limit = self.config
+        self.min, self.max = min_limit, max_limit
+        start = initial
+        if capacity is not None and capacity.requests > 0:
+            n = capacity.requests
+            if not capacity.queues:  # a hard limit: nothing above it is ever admitted
+                self.max, self.min = min(self.max, n), min(self.min, n)
+            if start is None:
+                start = n + min(n, self.hi) if capacity.queues else n
+        start = self.DEFAULT_INITIAL if start is None else start
+        self.initial = min(self.max, max(self.min, start))
+        self.state = State()
+        self.last_reason = "hold"
 
     # --- helpers ----------------------------------------------------------------------------------
 

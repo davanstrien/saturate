@@ -146,7 +146,7 @@ poison rows are excluded — and waits are integrated in seconds from the measur
 best fixed window: past a flat stretch that starts below the initial window, a gain just over
 `improve` can read as flat, and the climber stays below it.
 
-`Fixed(n)` bypasses all of it. Defaults: `Auto(target_waiting=8, initial=16,
+`Fixed(n)` bypasses all of it. Defaults: `Auto(target_waiting=8, initial=64,
 max_limit=512, step=8)`; cap `max_limit` (~128) for vision workloads — in-flight
 images live in host RAM.
 

@@ -183,7 +183,9 @@ class Auto:
       many evidence windows before the next trial (1, 2, 4 ... 32). A plateau is retried
       rarely but never given up on, so a later rise in capacity is found.
     The x4 move crosses a stretch where throughput is flat (SGLang's from 32 to 64) that a
-    doubling cannot see past; x7/8 trims a window that overshot the engine's cap.
+    doubling cannot see past; x7/8 trims a window that overshot the engine's cap. The window
+    starts at `initial` (64): high enough that most of a short run is not spent ramping, low
+    enough that an engine with a few slots (llama.cpp) is not swamped.
 
     A trial's readings arrive one request latency late, and a wider window has a longer latency
     at flat throughput (Little's law), so a trial is judged only after two latencies at its
@@ -226,7 +228,7 @@ class Auto:
     MOVES: tuple[float, ...] = (2.0, 4.0, 1.5, 1.25, 0.875)
     MAX_BACKOFF = 32  # evidence windows between trials on a long plateau
 
-    def __init__(self, target_waiting: int = 8, initial: int = 16, min_limit: int = 2,
+    def __init__(self, target_waiting: int = 8, initial: int = 64, min_limit: int = 2,
                  max_limit: int = 512, step: int = 8, kv_hi: float = 0.9,
                  hits_lo: float = 0.5, improve: float = 1.05, stall_ticks: int = 3,
                  bp_frac: float = 0.05):

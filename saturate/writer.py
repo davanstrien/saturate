@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import dataclasses
 import sys
+import time
 from collections.abc import AsyncIterable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Protocol
@@ -44,7 +45,7 @@ class SinkHooks:
     have is None."""
 
     probe: Callable[[dict], None] | None  # check a record fits before it is buffered
-    flush_interval_s: float | None  # flush buffered rows once none have arrived for this long
+    flush_interval_s: float | None  # flush buffered rows once the oldest has waited this long
     begin_run: Callable | None
     write_telemetry: Callable | None
     write_stats: Callable | None
@@ -166,6 +167,7 @@ class _Writer:
         self._ended = False  # drain said there are no more rows
         self._run_failed = False
         self._appended_since_flush = 0
+        self._oldest_unflushed: float | None = None  # monotonic time of the oldest row not yet flushed
         self._demoted_before = getattr(sink, "rows_demoted", 0)
 
     def start(self) -> None:
@@ -196,21 +198,30 @@ class _Writer:
                     continue
                 if batch:
                     await self._call(self._append, batch)
-                elif self._appended_since_flush:  # quiet for the flush interval
+                elif self._appended_since_flush:  # the oldest buffered row reached the interval
                     await self._call(self._flush)
         finally:
             if self._next_row is not None:
                 self._next_row.cancel()  # a pending get: the row it would take stays in the queue
         await self._call(self._finish)
 
+    def _flush_due_in(self) -> float | None:
+        """Seconds until the oldest buffered row reaches the sink's flush interval (None: no
+        timer, nothing buffered or no interval). A stream that slows down cannot hold a row
+        longer than the interval by trickling rows in just under it."""
+        interval = self.hooks.flush_interval_s
+        if interval is None or self._oldest_unflushed is None:
+            return None
+        return max(0.0, interval - (time.monotonic() - self._oldest_unflushed))
+
     async def _next_batch(self) -> list[Done] | None:
-        """Every row waiting now (at least one); [] when none arrived for the sink's flush
-        interval; None once drain has said there are no more."""
+        """Every row waiting now (at least one); [] once the oldest buffered row has waited the
+        sink's flush interval; None once drain has said there are no more."""
         if self._ended:
             return None
         if self._next_row is None:  # kept across quiet intervals, so no row is ever dropped
             self._next_row = asyncio.ensure_future(self._queue.get())
-        done, _ = await asyncio.wait({self._next_row}, timeout=self.hooks.flush_interval_s)
+        done, _ = await asyncio.wait({self._next_row}, timeout=self._flush_due_in())
         if not done:
             return []
         batch = [self._next_row.result(), *self._take_waiting()]
@@ -242,6 +253,8 @@ class _Writer:
     # --- in the writer thread ------------------------------------------------------------------
 
     def _append(self, batch: list[Done]) -> None:
+        if self._oldest_unflushed is None:
+            self._oldest_unflushed = time.monotonic()
         for done in batch:
             self.sink.append(_record(done, self.hooks.probe, self.stats))
         self._appended_since_flush += len(batch)
@@ -249,6 +262,7 @@ class _Writer:
     def _flush(self) -> None:
         self.sink.flush()
         self._appended_since_flush = 0
+        self._oldest_unflushed = None
 
     def _finish(self) -> None:
         """The last flush, and the demoted-row count. After a failure, a flush that fails too is

@@ -883,6 +883,27 @@ def test_a_buffered_row_is_flushed_by_age_without_new_arrivals(tmp_path):
     assert pq.read_table(landed[0])["id"].to_pylist() == ["r0"]
 
 
+def test_a_trickling_stream_cannot_hold_a_row_past_the_flush_interval(tmp_path):
+    """The flush interval counts from the oldest buffered row, not the latest: a row arriving
+    just before the interval runs out does not restart it for the rows already waiting."""
+    async def go():
+        async def trickle():
+            yield Done("r0", {"text": "row 0"}, {"reply": "x"}, None)
+            await asyncio.sleep(0.45)  # just under the interval
+            yield Done("r1", {"text": "row 1"}, {"reply": "x"}, None)
+            await asyncio.sleep(3.0)
+
+        sink = ParquetSink(str(tmp_path), flush_every=1000, flush_interval_s=0.5)
+        task = asyncio.ensure_future(drain(trickle(), sink))
+        await asyncio.sleep(0.75)  # past r0's interval, well before r1's would end (0.95 s)
+        landed = list(tmp_path.glob("part-*.parquet"))
+        await task
+        return landed
+
+    landed = run_checked(go)
+    gap(bool(landed), "the oldest row waited past the flush interval")
+
+
 # --- retry budget, timeouts, resume reads ----------------------------------------------------
 
 @pytest.mark.parametrize("retry_budget_s, lands", [(None, True), (0.3, False)])

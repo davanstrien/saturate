@@ -68,7 +68,8 @@ lets the paired ratios be recomputed. The 95% bootstrap intervals of the head/ba
 Two baseline facts from the same run, worth knowing before the rewrite:
 - `overhead-w512`: the event loop is blocked up to ~0.45 s per tick at a 512 window with zero
   latency; at window 64 it is ~0.02 s.
-- `default-flush-w64` against `overhead-w64`: the default local flush (10 rows) costs ~40% of
+- `default-flush-w64` against `overhead-w64`: the default local flush of the time (10 rows; 1000
+  rows or 10 s since #66) costs ~40% of
   zero-latency throughput (546 vs 928 rows/s) and ~50% more CPU per row.
 
 ### On a real engine

@@ -149,8 +149,8 @@ never a hard error). A manifest entry without a surviving part still counts as d
 resume trusts manifests; recovering rows from an out-of-band-deleted part means a fresh
 output dir, or deleting its orphaned sidecar. Sidecars are read concurrently (on a remote
 store the cost is per-file round-trips, not parsing); the done-set is independent of read
-order. Past ~1000 sidecars the reader says so on stderr — a larger `flush_every` means
-fewer files.
+order. Past ~1000 sidecars the reader says so on stderr — a larger `flush_every` (fast runs),
+or a longer `flush_interval_s` on `ParquetSink` (slow runs), means fewer files.
 
 While the circuit is open the breaker probes the run's real route about once a second for
 up to `max_open_s` (600 s by default) with a one-token request; against a shared hosted API

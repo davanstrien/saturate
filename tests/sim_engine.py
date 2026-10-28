@@ -38,22 +38,32 @@ class Engine:
     noise: float = 0.0
     read_timeout_s: float = 1800.0
     tokens_per_row: float = 100.0
+    refill_s: float = 0.0  # a slot's idle time between a completion and the client's next request
     seed: int = 0
     _memo: dict = dataclasses.field(default_factory=dict, repr=False, compare=False)
 
-    def rows_per_s(self, window: int) -> float:
-        """Throughput of a fixed window, past any rate limit and timeouts: what Auto competes with."""
-        served = min(window, self.cap, self.rate_limit or window)
+    def _curve_rate(self, running: float) -> float:
         xs = [x for x, _ in self.curve]
-        if served <= xs[0]:
-            rate = self.curve[0][1] * served / xs[0]
-        elif served >= xs[-1]:
-            rate = self.curve[-1][1]
-        else:
-            i = bisect.bisect_right(xs, served)
-            (x0, y0), (x1, y1) = self.curve[i - 1], self.curve[i]
-            rate = y0 + (y1 - y0) * (served - x0) / (x1 - x0)
-        if rate and min(window, self.rate_limit or window) / rate > self.read_timeout_s:
+        if running <= xs[0]:
+            return self.curve[0][1] * running / xs[0]
+        if running >= xs[-1]:
+            return self.curve[-1][1]
+        i = bisect.bisect_right(xs, running)
+        (x0, y0), (x1, y1) = self.curve[i - 1], self.curve[i]
+        return y0 + (y1 - y0) * (running - x0) / (x1 - x0)
+
+    def rows_per_s(self, window: int) -> float:
+        """Throughput of a fixed window, past any rate limit and timeouts: what Auto competes with.
+        With `refill_s`, each request leaves its slot idle for that long before the client's next
+        one arrives, unless one already waits in the queue: a window of exactly the cap keeps
+        fewer than `cap` requests running, and a small queue on top fills the gaps."""
+        admitted = min(window, self.rate_limit or window)
+        running = min(admitted, self.cap)
+        if self.refill_s and running:
+            service_s = running / self._curve_rate(running)  # a request's time in a slot
+            running = min(self.cap, admitted * service_s / (service_s + self.refill_s))
+        rate = self._curve_rate(running)
+        if rate and admitted / rate > self.read_timeout_s:
             return 0.0  # every request waits past the timeout
         return rate
 

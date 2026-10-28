@@ -59,25 +59,65 @@ def test_blind_auto_trims_a_window_past_what_the_engine_uses(name):
     assert share_past_useful(ticks[200:], engine) <= 0.25, [t.limit for t in ticks[-10:]]
 
 
+SEEDS = range(10)  # each a different noise draw and trial schedule: one run can pass by luck
+
+
+def hosted(rate_limit: int, seed: int, **over) -> Engine:
+    return Engine(curve=[(1024, 400.0)], cap=1024, rate_limit=rate_limit, gauges=False, noise=0.05,
+                  seed=seed, **over)
+
+
 @pytest.mark.parametrize("rate_limit", [64, 100, 127, 200])
 def test_a_hosted_api_rate_limit_is_met_without_halving(rate_limit):
     """A hosted API rejects requests past its concurrency limit with 429s. Auto remembers the
     window that met them and grows no closer than an eighth below it. After a clean stretch it
-    looks again (a provider's limit can rise); meeting the same limit then steps just under it,
-    so after warm-up the window never halves, and few rows are rejected."""
-    engine = Engine(curve=[(1024, 400.0)], cap=1024, rate_limit=rate_limit, gauges=False, noise=0.05)
-    ticks = run(Auto(), engine, 600)
-    # starting at 64, Auto can meet a low limit early and halve once: 92% and 3/5, not more
-    assert share_of_best(ticks[100:]) >= 0.92, [t.limit for t in ticks[-10:]]
-    assert min(t.limit for t in ticks[200:]) >= rate_limit * 3 // 5, [t.limit for t in ticks[200:]]
-    assert failed_share(ticks) <= 0.04  # main: about 2%, halving and climbing back
+    looks again (a provider's limit can rise), an eighth past the old limit at most; meeting the
+    same limit then steps just under it, so after warm-up the window never halves, and few rows
+    are rejected. Judged over SEEDS: the mean, and the worst run."""
+    best, failed = [], []
+    for seed in SEEDS:
+        ticks = run(Auto(seed=seed), hosted(rate_limit, seed), 600)
+        best.append(share_of_best(ticks[100:]))
+        failed.append(failed_share(ticks))
+        # starting at 64, Auto can meet a low limit early and halve once: 3/5, not less
+        tail = [t.limit for t in ticks[200:]]
+        assert min(tail) >= rate_limit * 3 // 5, (seed, tail)
+    assert sum(best) / len(best) >= 0.94 and min(best) >= 0.90, best
+    assert sum(failed) / len(failed) <= 0.03 and max(failed) <= 0.04, failed  # about 1-2%
 
 
 def test_a_hosted_api_limit_that_rises_mid_run_is_found():
     """The limit doubles from 100 to 200 at tick 300: released ceilings let Auto find it."""
-    kw = dict(curve=[(1024, 400.0)], cap=1024, gauges=False, noise=0.05)
-    ticks = run(Auto(), Engine(rate_limit=100, **kw), 900, then=(300, Engine(rate_limit=200, **kw)))
-    assert share_of_best(ticks[300:]) >= 0.85, [t.limit for t in ticks[-10:]]
+    shares = []
+    for seed in SEEDS:
+        ticks = run(Auto(seed=seed), hosted(100, seed), 900, then=(300, hosted(200, seed)))
+        shares.append(share_of_best(ticks[300:]))
+    assert sum(shares) / len(shares) >= 0.85 and min(shares) >= 0.78, shares
+
+
+@given(cap=st.integers(8, 400), initial=st.integers(2, 512), seed=st.integers(0, 2**16),
+       reject=st.sampled_from([4, 12, 50]))
+def test_a_hard_429_wall_is_never_crossed_far_once_met(cap, initial, seed, reject):
+    """An API that rejects everything past `cap` (1 in `reject` of the served rows come back as
+    429s while over it). Once Auto has met the wall, every later window stays within two
+    eighths of the lowest window that met it: growth stops an eighth below a ceiling, and a
+    released ceiling is probed an eighth past, never by a move of x2 or x4."""
+    ctrl = Auto(initial=initial, max_limit=512, seed=seed)
+    limit, hist, met = ctrl.initial, [ctrl.initial], None
+    for tick in range(1500):
+        seen = hist[max(0, len(hist) - 2)]
+        served = min(seen, cap)
+        bp = max(1, served // reject) if seen > cap else 0
+        obs = dict(waiting=None, running=None, inflight=limit, backpressure=bp, successes=served,
+                   input_bound=False, kv=None, hits=None, tok_s=served * 100.0)
+        limit = ctrl.decide(obs, limit)
+        hist.append(limit)
+        if ctrl.last_reason == "cut:bp" and seen > cap:
+            met = tick if met is None else met
+        if met is not None and tick > met + 60:  # past the first cuts down to the wall
+            wall = ctrl.state.ceiling or ctrl.state.seen_ceiling
+            assert wall is not None and limit <= max(wall.limit * 9 // 8, wall.limit + 1), \
+                (tick, limit, wall, hist[-20:])
 
 
 def test_long_generations_survive_a_trial_past_the_read_timeout():

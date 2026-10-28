@@ -44,6 +44,7 @@ packages = ["saturate"]
 # a deadlock fails one test instead of hanging the suite (the 0.3 refactor rewrites shutdown)
 timeout = 120
 markers = [
+    "slow: long sweeps (many seeds, many clients); skipped unless `pytest --runslow` (SATURATE_DEEP=1 also deepens the Hypothesis runs); run before a release and for any controller change",
     "internals: reaches into plumbing the 0.3 refactor replaces (Window, the events dict, through()'s hooks); rewritten with it, so `-m 'not internals'` is the suite that must pass unchanged",
 ]
 

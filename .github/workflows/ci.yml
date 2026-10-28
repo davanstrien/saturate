@@ -1,5 +1,10 @@
 name: ci
-on: [push, pull_request, workflow_call]
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_call:
+  workflow_dispatch:
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -34,6 +39,21 @@ jobs:
           set -euo pipefail
           uv run pytest tests/ -m 'not internals' --collect-only -q | tail -n 1
       - run: uv run --extra hf python -c "from huggingface_hub import HfFileSystem; HfFileSystem()"
+  slow:
+    # the slow tier: many seeds, several clients on one engine, deep Hypothesis runs. On demand
+    # (Actions > ci > Run workflow) or on a PR labelled `slow`; not on every push
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'slow')
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.13"
+      SATURATE_DEEP: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.13
+      - run: uv sync --locked
+      - run: uv run pytest -q --runslow tests/test_controller_slow.py
+      - run: uv run pytest -q tests/test_controller_properties.py tests/test_controller_perf.py
   types:
     # ty (pinned in the dev group) over the whole package
     runs-on: ubuntu-latest

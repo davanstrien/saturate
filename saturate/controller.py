@@ -9,6 +9,7 @@ engine, nowhere) — that's the SignalSource seam's job.
 from __future__ import annotations
 
 import dataclasses
+import random
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
@@ -103,6 +104,7 @@ class Steady:
     backoff: int = 1
     move: int = 0
     anchor: Reading | None = None
+    ready_at: float | None = None  # the clock from which the next trial may open (drawn once due)
 
 
 @dataclass(frozen=True)
@@ -206,7 +208,8 @@ class Auto:
        halve, and remember the window as a ceiling; growth then stops an eighth under it. A
        share, not any event: one row that always fails is not overload. At a ceiling met
        before (this one, or one released earlier), step just under it instead of halving.
-       A ceiling is released after BP_CEILING_RELEASE_S, because a provider's limit can rise.
+       A ceiling is released after BP_CEILING_RELEASE_S, because a provider's limit can rise;
+       the first move past it then goes at most an eighth past it, never x2 or x4.
     3. cut:kv — KV high with a low (or absent) prefix-hit rate: halve.
     4. cut:stall — window full and nothing completing for `stall_ticks` ticks, or 3x the
        latency when known, whichever is longer: halve. Once per episode: the next needs a
@@ -217,9 +220,11 @@ class Auto:
        the first completion ever: a cold engine queues the whole initial window.
     7. hold:kept / revert / hold:ack — a trial is open: judge it once its evidence is in.
     8. hold — window under 80% used (the source sets the pace), or a queue in band.
-    9. hold:ack / hold:plateau / trial:up / trial:down / hold:ceiling / hold:floor — steady:
-       wait for an evidence window (`limit` completions and two throughput samples), wait out
-       the backoff, then open the next trial. A move that the bounds or the ceiling make empty
+    9. hold:ack / hold:plateau / hold:jitter / trial:up / trial:down / hold:ceiling / hold:floor
+       — steady: wait for an evidence window (`limit` completions and two throughput samples),
+       wait out the backoff and, after a failed trial, a random 0 to JITTER_TICKS ticks more
+       (clients sharing one endpoint must not open trials in lockstep; `seed` fixes the
+       schedule), then open the next trial. A move that the bounds or the ceiling make empty
        is skipped; there is no move down at a backpressure ceiling (nothing waits there).
 
     A cut during a trial counts as a failed trial: the window goes no higher than where the
@@ -231,25 +236,37 @@ class Auto:
 
     MOVES: tuple[float, ...] = (2.0, 4.0, 1.5, 1.25, 0.875)
     MAX_BACKOFF = 32  # evidence windows between trials on a long plateau
+    JITTER_TICKS = 4  # a due trial waits a random 0 to this many ticks
 
     DEFAULT_INITIAL = 64  # the start when neither the caller nor the engine says otherwise
 
     def __init__(self, target_waiting: int = 8, initial: int | None = None, min_limit: int = 2,
                  max_limit: int = 512, step: int = 8, kv_hi: float = 0.9,
                  hits_lo: float = 0.5, improve: float = 1.05, stall_ticks: int = 3,
-                 bp_frac: float = 0.05):
+                 bp_frac: float = 0.05, seed: int | None = None):
         if min_limit < 1 or max_limit < min_limit or step < 1:
             raise ValueError("Auto requires 1 <= min_limit <= max_limit and step >= 1")  # 0 deadlocks
         if stall_ticks < 1:
             raise ValueError("Auto requires stall_ticks >= 1")
         if not 0.0 <= bp_frac <= 1.0:
             raise ValueError("Auto requires 0 <= bp_frac <= 1")
+        if target_waiting < 1:
+            raise ValueError("Auto requires target_waiting >= 1")  # 0 cuts on any queue at all
+        if initial is not None and initial < 1:
+            raise ValueError("Auto requires initial >= 1 (or None)")
+        if not 0.0 < kv_hi <= 1.0 or not 0.0 <= hits_lo <= 1.0:
+            raise ValueError("Auto requires 0 < kv_hi <= 1 and 0 <= hits_lo <= 1")
+        if not improve > 1.0:  # at 1 or below, noise alone keeps moves up: the window drifts up
+            raise ValueError("Auto requires improve > 1")
         self.lo, self.hi = max(1, target_waiting // 4), target_waiting * 2
         self.step = step
         self.kv_hi, self.hits_lo, self.improve = kv_hi, hits_lo, improve
         self.stall_ticks, self.bp_frac = stall_ticks, bp_frac
         # the caller's configuration, never changed: each run's bounds are worked out from it (begin)
         self.config = (initial, min_limit, max_limit)
+        # trial jitter: clients sharing one endpoint must not open trials in lockstep, so each
+        # draws its own delays (None: from the OS, so no two Autos share a schedule)
+        self.rng = random.Random(seed)
         self.begin(None)
 
     def decide(self, obs: Obs | dict, limit: int) -> int:
@@ -449,11 +466,23 @@ def _open_trial(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
     if phase.waits + 1 < phase.backoff:
         waiting = replace(phase, waits=phase.waits + 1)
         return limit, "hold:plateau", replace(state, phase=waiting, samples=())
+    ready_at = phase.ready_at
+    if ready_at is None:  # due: draw this trial's jitter (none in slow-start: backoff 1)
+        delay = auto.rng.uniform(0, auto.JITTER_TICKS * _tick(obs)) if phase.backoff > 1 else 0.0
+        ready_at = state.clock + delay
+        phase = replace(phase, ready_at=ready_at)
+        state = replace(state, phase=phase)
+    if state.clock < ready_at:
+        return limit, "hold:jitter", state
     factor = auto.MOVES[phase.move % len(auto.MOVES)]
     new = auto.clamp(state, round(limit * factor))
+    seen = state.seen_ceiling
+    if seen is not None and limit < seen.limit < new:  # a released ceiling: probe past it by an eighth
+        new = max(limit + 1, min(new, seen.limit * 9 // 8))
     at_ceiling = state.ceiling is not None and limit >= _below(state.ceiling.limit)
     if new == limit or (factor < 1 and at_ceiling):  # nothing to try this way: the next move
-        skipped = replace(state, phase=replace(phase, waits=0, move=phase.move + 1), samples=())
+        skipped = replace(state, phase=replace(phase, waits=0, move=phase.move + 1, ready_at=None),
+                          samples=())
         at_floor = factor < 1 and not at_ceiling
         return limit, "hold:floor" if at_floor else "hold:ceiling", skipped
     ref = phase.anchor if new < limit and phase.anchor is not None else reading

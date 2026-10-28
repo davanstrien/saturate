@@ -11,7 +11,7 @@ from saturate.controller import BP_CEILING_RELEASE_S, TICK_S, Auto
 STEP = 8
 REASONS = {"hold:cooldown", "cut:bp", "cut:kv", "cut:stall", "hold:input_bound", "cut:queue",
            "hold:kept", "revert", "hold:ack", "hold", "hold:plateau", "trial:up", "trial:down",
-           "hold:ceiling", "hold:floor"}
+           "hold:ceiling", "hold:floor", "hold:jitter"}
 
 
 def healthy(limit, **over):
@@ -580,10 +580,12 @@ def test_a_ceiling_is_released_after_the_release_time():
     traj, _ = climb(ctrl, traj[-1], 200, knee(512), latency_s=1.0)
     assert max(traj) > 64, max(traj)
 
-    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP, seed=0)
     limit = ceiling_at_64(ctrl)
-    climb(ctrl, limit, ticks, flat, latency_s=1.0)  # released; flat, so the window stays near 32..56
-    new = ctrl.decide(healthy(64, backpressure=64, latency_s=1.0), 64)
+    traj, _ = climb(ctrl, limit, ticks - 5, knee(512), latency_s=1.0)  # held at 56, not yet released
+    _, limit, _, _ = climb_until(ctrl, traj[-1], "trial:up", knee(512), latency_s=1.0)
+    assert 64 < limit <= 72, limit  # the first probe past the released ceiling goes an eighth past it
+    new = ctrl.decide(healthy(limit, backpressure=limit, latency_s=1.0), limit)
     assert (ctrl.last_reason, new) == ("cut:bp", 56)
 
 

@@ -127,8 +127,9 @@ Notes on what you didn't have to do:
   (SGLang's running-request limit, llama.cpp's slots, TEI's concurrency limit), a little
   above it so a waiting request refills a free slot (TEI rejects past its limit, so it starts
   there and never goes above); otherwise (vLLM, a hosted API) at 64. For a next batch
-  against the same endpoint, start where the last one ended:
-  `window=Auto(initial=stats.final_limit)`.
+  against the same endpoint, start near where the last one ended,
+  `window=Auto(initial=stats.final_limit)`: Auto corrects from there (the run may have ended
+  during a trial).
 - **Ids are yours if you want them.** Pass `(id, row)` tuples, or `id_key="my_column"`, or
   an `id_fn=` callable. Default: a stable content-hash of the row — identical input rows
   then dedupe for free.

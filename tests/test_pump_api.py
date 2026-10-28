@@ -1,5 +1,5 @@
 """pump() is the front door: its docstring must document every parameter and the
-shard= contract (labels output, never selects input)."""
+shard= contract (selects input, with an escape hatch)."""
 
 import inspect
 
@@ -13,7 +13,7 @@ def test_pump_docstring_covers_every_parameter():
         assert f"{name}:" in doc, name
 
 
-def test_pump_docstring_warns_that_shard_does_not_select_input():
+def test_pump_docstring_says_shard_selects_input():
     doc = pump.__doc__
-    assert "shard_select" in doc
-    assert "does" in doc and "not select input rows" in doc
+    assert "processes only" in doc and "shard_of" in doc
+    assert "split by `shard_of`" in doc

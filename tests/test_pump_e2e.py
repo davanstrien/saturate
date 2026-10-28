@@ -433,3 +433,42 @@ def test_duplicate_rows_are_named_in_the_log(stub, tmp_path, capsys):
                  output=str(tmp_path), window=Fixed(2))
     assert (stats.rows_processed, stats.rows_deduped) == (1, 4)
     assert "dedup: 4 rows had the id of an earlier row" in capsys.readouterr().err
+
+
+# --- fan-out: shard= selects input (CONTRACT §2) ---------------------------------------------
+
+def test_shard_processes_only_its_own_rows(stub, tmp_path):
+    """pump(shard=(k, n)) labelled output but processed every row: an 8-Job fan-out paid for
+    the whole input 8 times (#19). Each shard must process a disjoint slice, and the slices
+    together must cover the input exactly once."""
+    per_shard = []
+    for rank in range(3):  # one output per shard, so a resume cannot hide an overlap
+        stats = pump(rows(60), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path / str(rank)),
+                     window=Fixed(4), shard=(rank, 3))
+        per_shard.append(existing_ids(str(tmp_path / str(rank))))
+        assert stats.rows_total == stats.rows_processed == len(per_shard[-1])
+    assert stub.requests == 60  # no row paid twice
+    assert len(set.union(*per_shard)) == 60 and sum(len(ids) for ids in per_shard) == 60
+    from saturate import shard_of
+
+    for rank, ids in enumerate(per_shard):
+        assert ids and {shard_of(i, 3) for i in ids} == {rank}
+
+
+def test_invalid_shard_raises(tmp_path):
+    for bad in [(4, 4), (-1, 2), (0, 0)]:
+        with pytest.raises(ValueError, match="shard"):
+            pump(rows(1), to_request, parse, endpoint="http://127.0.0.1:9", output=str(tmp_path),
+                 shard=bad)
+
+
+def test_input_split_by_shard_select_runs_every_row_of_the_shard(stub, tmp_path):
+    """Input split with shard_select (the shard_of rule) and pump(shard=) select the same rows:
+    pump's own selection keeps every one of them."""
+    from saturate import shard_select, stream
+
+    mine = list(shard_select(stream(rows(40)), 1, 4))
+    stats = pump(iter(mine), to_request, parse, endpoint=stub.endpoint,
+                 output=str(tmp_path), window=Fixed(4), shard=(1, 4))
+    assert mine and stats.rows_processed == len(mine)
+    assert (tmp_path / "completions" / "shard-1.done").exists()

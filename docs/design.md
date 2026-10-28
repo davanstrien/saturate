@@ -63,7 +63,7 @@ errored id is called healing; readers let the success win.
 | `signals.py` | `SignalSource`: engine `/metrics` scrape (vLLM/SGLang/llama.cpp/TRT-LLM dialects, TEI queue-depth only) or none |
 | `transport.py` | typed `Request` (json ⊕ multipart), retry ladder, circuit breaker |
 | `core.py` | `AdaptiveLimiter` (slot/observe) → `AdaptiveClient` (+HTTP) → `through()` (stream of `Done` results — id, row, output, error, token usage) |
-| `source.py` | `stream` (lazy normalize, content-hash ids), `skip_done` (anti-join + dedup), `shard_select` |
+| `source.py` | `stream` (lazy normalize, content-hash ids), `skip_done` (anti-join + dedup), `shard_of` / `shard_select` (fan-out by a hash of the id) |
 | `sources.py` | HF-native inputs (`[hf]` extra, lazy): `dataset_rows` (streaming Hub datasets), `bucket_rows` (raw objects by fsspec glob, bounded prefetch) |
 | `sink.py` | Sink protocol: `ParquetSink` (full contract), `FileSink`; `drain`, `read_output` |
 | `engine.py` | optional server lifecycle: boot templates, readiness gate, process-group kill |

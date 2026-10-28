@@ -24,7 +24,15 @@ from saturate.engine import Engine, wait_for_health
 from saturate.pipeline import through
 from saturate.signals import CEILING_FLAG
 from saturate.sink import FileSink, ParquetSink, as_sink, read_output
-from saturate.source import content_id, prepare_ahead, shard_select, skip_done, stream
+from saturate.source import (
+    check_shard,
+    content_id,
+    prepare_ahead,
+    shard_of,
+    shard_select,
+    skip_done,
+    stream,
+)
 from saturate.sources import bucket_rows, dataset_rows
 from saturate.telemetry import advise, advise_input, bound_by_counts, cut_reasons
 from saturate.transport import (
@@ -41,7 +49,7 @@ __all__ = [
     "Request", "make_json_request", "make_multipart_request", "existing_ids",
     "AdaptiveClient", "AdaptiveLimiter", "Done", "through", "stream", "skip_done",
     "drain", "read_output", "Sink", "sink_hooks", "ParquetSink", "FileSink", "shard_select",
-    "content_id", "prepare_ahead",
+    "shard_of", "content_id", "prepare_ahead",
     "FatalTransportError", "dataset_rows", "bucket_rows"]
 try:
     __version__ = importlib.metadata.version("saturate")
@@ -137,7 +145,16 @@ def pump(
     endpoint: base URL of the OpenAI-compatible server, e.g. "http://host:8000/v1".
     output: output directory or URI (local, hf://, s3://...) or a sink object.
     window: Auto (default) adapts concurrency to the engine; Fixed(n) pins it.
-    shard: (rank, world) label written into output file names and completion markers.
+    shard: (rank, world) for a fan-out over `world` Jobs into one output. The run processes only
+        the rows whose id belongs to shard `rank` — `shard_of(id, world) == rank`, a hash of the
+        id (CONTRACT §2) — and labels its telemetry, stats and completion marker with it. Give
+        every Job the same `rows` and its own rank; the shards are disjoint and together cover
+        the input. For large objects, pass the same `shard`
+        to the source too (`bucket_rows(..., shard=)`, `dataset_rows(..., shard=)`): it then
+        skips the other shards' rows before it fetches or decodes them. A source sharded
+        differently from pump() leaves the run nothing to process. Input you split yourself
+        must be split by `shard_of` (or `shard_select`); split any other way, pass no `shard`
+        and give each Job its own output.
     flush_every: rows buffered before a parquet part is written. None (default) = 10 rows for
         a local output; a remote output (hf://, s3://...) flushes every 1000 rows or 60 s,
         whichever comes first, because each flush blocks the run for a remote write. The age
@@ -172,31 +189,31 @@ def pump(
         bad token, a parse bug), before any of them is stored, so a fixed re-run retries
         them. 0 disables the check. Off when retry_errors=True: that input is mostly rows that
         already failed, and some rows fail for good.
-
-    Warning: `shard=(rank, world)` labels output files and completion markers only. It does
-    not select input rows — every shard given the same `rows` processes all of them. Pre-shard
-    the input yourself: `pump(shard_select(stream(rows), rank, world), ..., shard=(rank, world))`.
     """
+    shard = check_shard(shard)
+    select_shard = shard[1] > 1
+    if select_shard:
+        _log(f"shard={shard}: processing only the rows whose id hashes to shard {shard[0]} "
+             f"of {shard[1]}")
     return asyncio.run(_pump(rows, to_request, parse, endpoint, output, window, shard,
                              flush_every, read_timeout, route, headers, retry_errors,
                              id_key, id_fn, signal_source, schema, prepare_workers,
-                             fail_fast, retry_budget_s, timeouts, proxy))
+                             fail_fast, retry_budget_s, timeouts, proxy, select_shard))
 
 
 async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_every,
                 read_timeout, route, extra_headers, retry_errors, id_key, id_fn,
                 signal_source, schema=None, prepare_workers=0, fail_fast=32,
-                retry_budget_s=None, timeouts=None, proxy=None) -> Stats:
+                retry_budget_s=None, timeouts=None, proxy=None, select_shard=False) -> Stats:
     stats = Stats()
-    if shard[1] > 1:
-        _log(f"shard={tuple(shard)}: labels output only — input must be pre-sharded with "
-             "shard_select(stream(rows), rank, world)")
     sink = as_sink(output, flush_every, schema=schema)
     hdrs = {"User-Agent": USER_AGENT + (" (agent)" if agent_mode() else ""),
             **(extra_headers or {})}
     t0 = time.monotonic()
 
     pending = stream(rows, id_key=id_key, id_fn=id_fn)
+    if select_shard:
+        pending = shard_select(pending, *shard)
     pending = skip_done(pending, sink, retry_errors=retry_errors, stats=stats)
 
     hooks = sink_hooks(sink)

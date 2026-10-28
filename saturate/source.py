@@ -5,13 +5,15 @@ disk-death lesson: a naive load_dataset killed a Job on disk). Works with any
 iterable of dicts, including a streaming HF `IterableDataset`.
 
 The v1 default id is a content hash (CONTRACT §2): order-independent,
-re-shard-safe, no cleverness.
+re-shard-safe, no cleverness. Fan-out assigns each id to a shard by a hash of
+the id (`shard_of`), never by position.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import numbers
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Executor, ThreadPoolExecutor
@@ -136,7 +138,6 @@ def prepare_ahead(rows: Iterable[tuple[str, dict]], fn: Callable[[dict], dict], 
     picklable (a module-level function, not a lambda). An exception in `fn` is raised at
     the consumer. Work done here happens before the pump sees the row, so a pump fed by
     prepare_ahead reads that cost as source wait (SOURCE-BOUND), not prep."""
-
     apply = partial(_apply_to_row, fn)  # module-level + partial: picklable for a process pool
     if executor is not None:
         yield from rolling_map(rows, apply, executor, workers)
@@ -148,10 +149,34 @@ def prepare_ahead(rows: Iterable[tuple[str, dict]], fn: Callable[[dict], dict], 
         pool.shutdown(wait=False, cancel_futures=True)
 
 
-def shard_select(rows: Iterable[tuple[str, dict]], rank: int = 0, world: int = 1,
-                 skip: int = 0) -> Iterator[tuple[str, dict]]:
-    """Strided fan-out assignment over the global stream (CONTRACT §2):
-    keep(idx) = (idx - skip) % world == rank."""
-    for idx, pair in enumerate(rows):
-        if idx >= skip and (idx - skip) % world == rank:
-            yield pair
+def check_shard(shard: tuple[int, int]) -> tuple[int, int]:
+    """`shard` as a validated (rank, world) pair of ints: world >= 1 and 0 <= rank < world.
+    A float or a bool raises: truncating (0.9, 2) to (0, 2) would run the wrong shard quietly."""
+    try:
+        rank, world = shard
+    except (TypeError, ValueError):
+        raise TypeError(f"shard must be a pair of ints (rank, world), got {shard!r}") from None
+    for value in (rank, world):
+        if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+            raise TypeError(f"shard must be a pair of ints (rank, world), got {tuple(shard)!r}")
+    if world < 1 or not 0 <= rank < world:
+        raise ValueError(f"shard must be (rank, world) with 0 <= rank < world, got {tuple(shard)!r}")
+    return int(rank), int(world)
+
+
+def shard_of(row_id: str, world: int) -> int:
+    """The shard that owns `row_id` in a fan-out over `world` shards (CONTRACT §2): the first
+    8 bytes of sha1(row_id as UTF-8), read as a big-endian integer, modulo `world`.
+
+    It depends on the id alone, so a row keeps its shard across re-runs, input order, resume
+    filtering and widened inputs, and a source can shard before it reads or decodes a row."""
+    digest = hashlib.sha1(row_id.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % world
+
+
+def shard_select(rows: Iterable[tuple[str, dict]], rank: int = 0,
+                 world: int = 1) -> Iterator[tuple[str, dict]]:
+    """The (id, row) pairs that belong to shard `rank` of `world`: those with
+    `shard_of(id, world) == rank` (CONTRACT §2). pump(shard=) applies this to its input."""
+    rank, world = check_shard((rank, world))  # checked now, not at the first row
+    return ((id_, row) for id_, row in rows if shard_of(id_, world) == rank)

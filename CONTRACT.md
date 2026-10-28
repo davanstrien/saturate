@@ -21,7 +21,9 @@ Plus one discipline: **record, never guess** — every written value is an obser
 (tokens from the API, latency we timed); dollar cost is a reader-side computation.
 
 Stability: additive changes are allowed within v1 (new columns, sidecar files, keys);
-renames, retypes and removals are not. The controller, transport and engine lifecycle are
+renames, retypes and removals are not. One exception before 0.3.0: §2 replaced strided
+fan-out with the id-hash rule and changed the `dataset_rows` and `bucket_rows` id formats,
+so an output written by 0.2 with those ids is not resumed by 0.3 (its rows run again). The controller, transport and engine lifecycle are
 implementation — free to change.
 
 ## 1. Output layout
@@ -81,9 +83,36 @@ equally conformant. Width caveat: the default hash is 16 hex chars (~64 bits) �
 odds are negligible at the ~10M-row scale v1 targets but reach coin-flip around 5×10⁹
 rows; beyond that, widen the hash or supply your own ids.
 
-Fan-out: each of K shards selects its slice by strided assignment
-(`(idx - skip) % world == rank`); ids derive from row content or global position, never a
-per-shard counter.
+An id names the data, not the query that found it. The built-in sources make ids this way:
+
+- `dataset_rows` index ids are `{repo}[@{revision}]:{config}:{split}:{i:09d}`. The config
+  is the one the loaded dataset reports, so leaving `config` out and naming the default
+  config give the same ids. The revision is part of the id only when the caller pins one:
+  a position names the same row only within one snapshot, so a new pin re-runs every row,
+  while an unpinned run follows the branch and trusts that rows were not reordered. For an
+  already-loaded dataset object the prefix is `{config}:{split}` from the arguments given,
+  or `{split}`.
+- `bucket_rows` path ids are the paths fsspec lists, without the scheme (the absolute path
+  for a local file), or relative to a caller-given `root`. The glob plays no part, so sibling globs never
+  share an id and widening a glob keeps every existing id.
+
+Fan-out: K shards share one output. A row belongs to shard
+
+```
+shard_of(id, K) = int.from_bytes(sha1(id.encode("utf-8")).digest()[:8], "big") % K
+```
+
+and the shard of rank `r` processes only rows with `shard_of(id, K) == r`
+(`pump(shard=(r, K))`). The rule reads only the id, so it is stable across re-runs,
+input order, resume filtering and a growing input; the shards are disjoint and cover the
+input; a source can apply it before it reads or decodes a row; and applying it twice
+with the same `(r, K)` keeps the same rows. Changing K between runs moves rows between
+shards, which is safe: resume is per id over the whole output (§3). Ids never come from a
+per-shard counter. pump applies the rule to whatever input it is given, so input already
+split by the same rule passes through whole; input split by any other rule does not, and
+belongs in its own output without `shard`. A source given `shard` applies the same rule
+before it fetches or decodes; given a different `(r, K)` from pump's, the run has nothing
+to process. A source's `limit` counts input rows before sharding.
 
 ## 3. Resume semantics
 

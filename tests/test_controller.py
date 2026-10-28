@@ -478,3 +478,53 @@ def test_blind_growth_against_a_hard_429_wall_stays_bounded(cap):
     tail = hist[500:]
     assert max(tail) <= cap + 2 * (cap // 8 + 1), max(tail)
     assert sum(min(h, cap) for h in tail) / len(tail) >= 0.6 * cap, sum(tail) / len(tail)
+
+
+def blind(limit, tok_s, **over):
+    """A saturated blind tick: no gauges, the window full, `tok_s` delivered."""
+    obs = dict(waiting=None, running=None, inflight=limit, backpressure=0, successes=limit * 4,
+               input_bound=False, kv=None, hits=None, tok_s=tok_s, latency_s=1.0)
+    obs.update(over)
+    return obs
+
+
+def flat_until(ctrl, limit, reason, tok_s=1000.0, ticks=200):
+    """Feed flat blind ticks until `reason` fires; returns (limit before, limit after)."""
+    for _ in range(ticks):
+        new = ctrl.decide(blind(limit, tok_s), limit)
+        if ctrl.last_reason == reason:
+            return limit, new
+        limit = new
+    raise AssertionError(f"{reason} never fired")
+
+
+def test_a_reverted_slow_start_trial_leaves_the_first_plateau_probe_at_2x():
+    ctrl = Auto(initial=32)
+    before, after = flat_until(ctrl, 32, "grow:trial")  # the first reading beats nothing: a gain
+    assert after == 2 * before
+    flat_until(ctrl, after, "revert")
+    before, after = flat_until(ctrl, before, "probe")
+    assert after == 2 * before
+
+
+def test_a_measured_gain_outside_a_probe_restarts_the_search_at_2x():
+    """With the search for a wider window ended, a measured gain starts it again at 2x."""
+    ctrl = Auto(initial=16)
+    ctrl._slow_start, ctrl._blind_reach, ctrl._best_tok = False, 0, 1000.0
+    limit = 16
+    for _ in range(6):
+        limit = ctrl.decide(blind(limit, 1000.0), limit)
+    limit = ctrl.decide(blind(limit, 2000.0), limit)  # throughput doubles: a gain
+    limit = ctrl.decide(blind(limit, 2000.0), limit)
+    assert ctrl._blind_reach == 2
+
+
+def test_backpressure_during_a_blind_probe_returns_to_where_the_probe_began():
+    """A probe that meets backpressure goes back to the window it started from, not to half the
+    probe window."""
+    ctrl = Auto(initial=32, max_limit=1024)
+    ctrl._slow_start, ctrl._blind_reach, ctrl._best_tok = False, 4, 1000.0
+    before, after = flat_until(ctrl, 32, "probe")
+    assert after == 4 * before
+    new = ctrl.decide(blind(after, 1000.0, backpressure=50, successes=50), after)
+    assert (ctrl.last_reason, new) == ("cut:bp", before)

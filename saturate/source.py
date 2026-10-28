@@ -149,10 +149,13 @@ def prepare_ahead(rows: Iterable[tuple[str, dict]], fn: Callable[[dict], dict], 
         pool.shutdown(wait=False, cancel_futures=True)
 
 
-def check_shard(shard) -> tuple[int, int]:
+def check_shard(shard: tuple[int, int]) -> tuple[int, int]:
     """`shard` as a validated (rank, world) pair of ints: world >= 1 and 0 <= rank < world.
     A float or a bool raises: truncating (0.9, 2) to (0, 2) would run the wrong shard quietly."""
-    rank, world = shard
+    try:
+        rank, world = shard
+    except (TypeError, ValueError):
+        raise TypeError(f"shard must be a pair of ints (rank, world), got {shard!r}") from None
     for value in (rank, world):
         if isinstance(value, bool) or not isinstance(value, numbers.Integral):
             raise TypeError(f"shard must be a pair of ints (rank, world), got {tuple(shard)!r}")

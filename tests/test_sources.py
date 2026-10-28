@@ -230,3 +230,53 @@ def test_empty_and_transformed_datasets_shard():
 
     shouted = list(dataset_rows(ds().with_transform(shout), columns=["text"], shard=(0, 1)))
     assert [row["text"] for _, row in shouted] == ["ALPHA", "BETA", "GAMMA", "ALPHA"]
+
+
+def _loaded(monkeypatch, dataset):
+    """dataset_rows("org/x") loads `dataset`, as if load_dataset had fetched it."""
+    import datasets
+
+    monkeypatch.setattr(datasets, "load_dataset", lambda *a, **kw: dataset)
+
+
+def test_a_sharded_load_decodes_only_the_selected_columns(monkeypatch):
+    """With shard=, the late decode read every column: an unreadable image in a column left
+    out by columns= raised UnidentifiedImageError, where the unsharded run yielded rows."""
+    import datasets
+
+    features = datasets.Features({"text": datasets.Value("string"), "img": datasets.Image()})
+    bad = Dataset.from_dict({"text": ["a", "b"], "img": [{"bytes": b"not an image", "path": None}] * 2},
+                            features=features)
+    for loaded in (bad, bad.to_iterable_dataset()):  # streaming=False, streaming=True
+        _loaded(monkeypatch, loaded)
+        rows = list(dataset_rows("org/x", columns=["text"], shard=(0, 1),
+                                 streaming=loaded is not bad))
+        assert [row for _, row in rows] == [{"text": "a"}, {"text": "b"}]
+
+
+def test_a_sharded_load_without_known_features_is_selected_after_reading(monkeypatch):
+    """A JSON or CSV repo without dataset_info loads with features=None, and decode(False)
+    raised for it. Such rows have nothing to decode late, so they are read and selected."""
+    from datasets import IterableDataset
+
+    from saturate import shard_of
+
+    untyped = IterableDataset.from_generator(lambda: ({"key": f"k{i}"} for i in range(20)))
+    assert untyped.features is None
+    _loaded(monkeypatch, untyped)
+    whole = list(dataset_rows("org/x"))
+    assert list(dataset_rows("org/x", shard=(1, 3))) == [(i, r) for i, r in whole if shard_of(i, 3) == 1]
+
+
+def test_a_sharded_empty_load_yields_nothing(monkeypatch):
+    """streaming=False with shard= raised "Unable to shard a dataset of size 0"."""
+    _loaded(monkeypatch, Dataset.from_dict({"key": []}))
+    assert list(dataset_rows("org/x", streaming=False, shard=(0, 4))) == []
+
+
+def test_a_shard_that_is_not_a_pair_raises_a_clear_error():
+    from saturate.source import check_shard
+
+    for bad in [3, (1, 2, 3), None]:
+        with pytest.raises(TypeError, match="pair of ints"):
+            check_shard(bad)

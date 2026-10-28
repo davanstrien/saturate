@@ -23,7 +23,7 @@ Needs `datasets` (the [hf] extra); the import is lazy so the core never pays.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 
 from saturate.source import check_shard, content_id, rolling_map, shard_of
 
@@ -114,6 +114,7 @@ def dataset_rows(
     """
     if shard is not None:
         shard = check_shard(shard)
+    repo = None
     if isinstance(dataset, str):
         try:
             from datasets import load_dataset
@@ -126,10 +127,7 @@ def dataset_rows(
             repo, name=config, split=split, streaming=streaming,
             revision=revision, token=token,
         )
-        loaded_config = getattr(getattr(dataset, "info", None), "config_name", None)
-        prefix = _index_id_prefix(repo, revision, config or loaded_config or "default", split)
-        if shard is not None and not callable(ids) and ids != "content":
-            return _iter_decoding_late(dataset, repo, token, ids, columns, limit, prefix, shard)
+        prefix = _index_id_prefix(repo, revision, config or dataset.info.config_name or "default", split)
     elif revision is not None or token is not None:
         raise ValueError(
             "revision=/token= only apply when `dataset` is a repo id string; "
@@ -144,17 +142,32 @@ def dataset_rows(
         # column of an image-bearing dataset (392k page scans would have been
         # decoded just to be discarded; ImportError: Pillow was the symptom).
         # A column-name id joins the selection; callable ids see the full
-        # example, so no pushdown there.
+        # example, so no pushdown there. An object passed in without
+        # select_columns is iterated whole.
         keep = set(columns) | ({ids} if ids not in ("index", "content") else set())
         if keep and hasattr(dataset, "select_columns"):
             try:
                 dataset = dataset.select_columns(sorted(keep))
             except Exception:
                 pass  # unknown names surface naturally at first iteration
+    # Decoding only this shard's examples needs the id before the decode (an index or a
+    # column), a dataset loaded here (so nothing upstream decoded it already), and known
+    # features to decode with (a JSON or CSV repo without dataset_info has none).
+    if (shard is not None and repo is not None and not callable(ids) and ids != "content"
+            and dataset.features is not None):
+        from datasets import Dataset
+
+        if isinstance(dataset, Dataset):  # streaming=False
+            if len(dataset) == 0:  # to_iterable_dataset() cannot shard an empty Dataset
+                return iter(())
+            dataset = dataset.to_iterable_dataset()
+        return _iter_decoding_late(dataset, repo, token, ids, columns, limit, prefix, shard)
     return _iter_dataset(dataset, ids, columns, limit, prefix, shard)
 
 
-def _iter_dataset(dataset, ids, columns, limit, prefix, shard) -> Iterator[tuple[str, dict]]:
+def _iter_dataset(dataset: Iterable[dict], ids: str | Callable, columns: list[str] | None,
+                  limit: int | None, prefix: str,
+                  shard: tuple[int, int] | None) -> Iterator[tuple[str, dict]]:
     """(id, row) for each example as `dataset` yields it, keeping only shard `shard`'s rows."""
     for i, ex in enumerate(dataset):
         if limit is not None and i >= limit:
@@ -166,13 +179,12 @@ def _iter_dataset(dataset, ids, columns, limit, prefix, shard) -> Iterator[tuple
         yield rid, row
 
 
-def _iter_decoding_late(dataset, repo, token, ids, columns, limit, prefix,
-                        shard) -> Iterator[tuple[str, dict]]:
-    """Like `_iter_dataset` for a dataset loaded here from `repo`, with an index or column id:
-    the id is known before the example is decoded, so the examples are read undecoded and only
-    shard `shard`'s are decoded (an image or audio decode is the cost)."""
-    if not hasattr(dataset, "decode"):  # streaming=False loads a map-style Dataset
-        dataset = dataset.to_iterable_dataset()
+def _iter_decoding_late(dataset, repo: str, token: str | None, ids: str, columns: list[str] | None,
+                        limit: int | None, prefix: str,
+                        shard: tuple[int, int]) -> Iterator[tuple[str, dict]]:
+    """Like `_iter_dataset` for an IterableDataset loaded here from `repo`, with an index or
+    column id: the id is known before the example is decoded, so the examples are read
+    undecoded and only shard `shard`'s are decoded (an image or audio decode is the cost)."""
     features = dataset.features
     token_per_repo_id = {repo: token} if token is not None else None
     for i, ex in enumerate(dataset.decode(False)):
@@ -246,12 +258,17 @@ def bucket_rows(
     # never a re-parse of the original URI. Globbing, IO and URI chaining are all
     # fsspec/HfFileSystem's.
     fs, glob_path = fsspec.core.url_to_fs(pattern)
+    base_path = ""
+    if root is not None:
+        root_fs, root_path = fsspec.core.url_to_fs(root)
+        if type(root_fs) is not type(fs):
+            raise ValueError(f"root {root!r} is not on the same filesystem as {pattern!r}: "
+                             "give it with the same scheme (e.g. hf://buckets/org/name/scans)")
+        base_path = root_path.rstrip("/") + "/"
     infos = fs.glob(glob_path, detail=True)
     paths = sorted(p for p, i in infos.items() if i.get("type") != "directory")
     if not paths:
         return iter(())
-
-    base_path = fsspec.core.url_to_fs(root)[1].rstrip("/") + "/" if root is not None else ""
 
     def rid_of(path: str) -> str:
         if callable(ids):

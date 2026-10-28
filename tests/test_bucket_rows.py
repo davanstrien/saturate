@@ -188,3 +188,10 @@ def test_default_ids_are_the_listed_paths(tmp_path):
     store layout is guessed."""
     scans = make_volumes(tmp_path)
     assert ids_of(f"{scans}/vol1/*.png") == [f"{scans}/vol1/p1.png", f"{scans}/vol1/p2.png"]
+
+
+def test_a_root_on_another_filesystem_raises_before_listing(tmp_path):
+    """root="buckets/org/b" for an hf:// pattern resolved to a local path, so every match
+    was "not under root", and an empty glob said nothing."""
+    with pytest.raises(ValueError, match="same filesystem"):
+        bucket_rows(f"{tmp_path}/*.png", root="memory://scans")

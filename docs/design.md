@@ -85,15 +85,29 @@ Terms used below:
 - **delivered throughput** — tokens/sec actually completed this tick; the primary
   signal. Gauges speed decisions up; throughput decides them.
 
-Per tick, first match wins; the winner names itself as the tick's `reason` (telemetry
-§6) and `Stats.cut_reasons` counts the `cut:*` ones:
+**The search is a hill climber.** Holding a window, `Auto` measures its throughput (tokens/s,
+or completions/s when tokens are not reported). Then it tries one move, a *trial*: the window
+times the next factor of `MOVES` (×2, ×4, ×1.5, ×1.25, ×⅞, then over again). Once the trial
+window's own readings have arrived (two latencies at that window, by Little's law, and three
+ticks), its throughput is compared with the reading just before the move. A gain of 5% keeps
+a wider window and starts `MOVES` over at ×2, so while each doubling pays it keeps doubling
+(slow-start). A narrower window is kept unless throughput fell 5%, and a run of moves down is
+judged against the reading where the run began. Anything else reverts, moves on to the next
+factor, and doubles the wait before the next trial (1, 2, 4 … 32 evidence windows): a plateau
+is retried rarely but never given up on. The ×4 move crosses a flat stretch that a doubling
+cannot see past (SGLang's from 32 to 64); ×⅞ trims a window that overshot the engine's cap.
+The same search runs with or without gauges: gauges only feed the cuts below.
+
+Per tick, the first rule that applies wins and names itself as the tick's `reason` (telemetry
+§6); `Stats.cut_reasons` counts the `cut:*` ones. Each rule is a pure function in
+`saturate/controller.py`'s `RULES`, over a frozen `State` whose phase is `Steady`, `Trial` or
+`Settling`:
 
 ```mermaid
 flowchart TD
-    T[tick] --> CD{cooling down after\na reduction?}
-    CD -- yes --> HOLD[hold]
-    CD -- no --> BP{backpressure?\n429 / timeout / 5xx}
-    BP -- yes --> CUT[halve]
+    CD{settling after a cut\nor revert?} -- yes --> HOLD[hold]
+    CD -- no --> BP{backpressure share?\n429 / timeout / 5xx}
+    BP -- yes --> CUT[halve, or step under\na known ceiling]
     BP -- no --> KV{KV high AND\nhit rate low?}
     KV -- yes --> CUT
     KV -- no --> ST{window full, nothing\ncompleting past patience?}
@@ -102,33 +116,33 @@ flowchart TD
     IB -- yes --> HOLD
     IB -- no --> HI{queue above band?}
     HI -- yes --> DOWN[−step]
-    HI -- no --> LO{queue below band,\nwindow ≥80% used?}
-    LO -- no --> HOLD
-    LO -- yes --> ACK{limit completions\nsince last evaluation?}
-    ACK -- no --> HOLD
-    ACK -- yes --> G{throughput over that\nwindow improved?}
-    G -- yes --> GROW[slow-start: double\nafter: +step]
-    G -- no --> PROBE[hold; probe +step on a\nbackoff schedule, revert\nif no gain]
+    HI -- no --> TR{trial open?}
+    TR -- yes --> J[judge once its readings\nare in: keep or revert]
+    TR -- no --> U{window ≥80% used\nand queue in band?}
+    U -- no --> HOLD
+    U -- yes --> S[after the backoff:\nopen the next trial]
 ```
 
 | reason | when | action |
 |---|---|---|
-| `hold:cooldown` | a reduction is draining: at least max(2 ticks, p50 latency) (3 ticks when unknown), extended while the oldest request in flight predates the reduction, capped at the stall patience | hold; the old window's completions are not evidence |
-| `cut:bp` | saturation-shaped 429 / timeout / 5xx this tick | halve |
+| `hold:cooldown` | after a cut or revert: at least max(2 ticks, the last latency) (3 ticks when unknown), longer while the oldest request in flight predates the change, capped at the stall patience | hold; the old window's completions are not evidence |
+| `cut:bp` | backpressure (429 / timeout / 5xx) on at least `bp_frac` of this tick's outcomes | halve and remember the window as a ceiling (growth stops ⅛ under it); at a ceiling met before, step under it instead. A ceiling is released after 300 s; each re-meet doubles that wait |
 | `cut:kv` | KV ≥ 0.9 AND prefix-hit rate < 0.5 or absent | halve — high KV with healthy hits is cache reuse |
-| `cut:stall` | window full and nothing completed for max(3 ticks, 3× p50 latency); once per episode, and never before the first completion | halve — a wedged engine reads as an empty queue because nothing new is admitted |
+| `cut:stall` | window full and nothing completed for max(3 ticks, 3× latency); once per episode | halve — a wedged engine reads as an empty queue because nothing new is admitted |
 | `hold:input_bound` | the source, not the engine, starves admission | hold; starved ticks are not evidence |
-| `cut:queue` | queue above band | −step, then the same cooldown as a halving |
-| `hold` | window under 80% used, or queue in band | hold |
-| `hold:ack` | fewer than `limit` completions since the last evaluation | hold — growth is clocked by evidence: one tick for cheap text, one window of completions for long generations |
-| `grow` | headroom, and throughput averaged over the evidence window beat the best seen | slow-start: double (until a queue durably forms, a plateau, or a reduction); after: +step |
-| `probe` / `hold:plateau` / `revert` | throughput flat | hold; probe +step on an exponential-backoff schedule (4→32 evaluations); keep it if the next window improves, else revert |
-| `hold:floor` | a reduction could not go below `min_limit` | hold; arms nothing |
+| `cut:queue` | queue above band (not before the first completion ever) | −step |
+| `hold:kept` / `revert` | a trial's readings are in: kept on a gain (up) or no loss (down), else reverted | a kept move up restarts `MOVES`; a revert advances it and doubles the backoff |
+| `hold` | window under 80% used, or the queue not in band | hold |
+| `hold:ack` | waiting for an evidence window (`limit` completions and two throughput samples), or for a trial to settle | hold |
+| `hold:plateau` | waiting out the backoff between trials | hold |
+| `trial:up` / `trial:down` | the next move opens | move the window; judged later |
+| `hold:ceiling` / `hold:floor` | the move would cross `max_limit` or a backpressure ceiling / `min_limit` | skip to the next move |
 
-Every reduction scales the throughput baseline with it (throughput proportional to a smaller
-window is a plateau, not growth). Blind mode (no gauges) creeps +1 per evidence window instead
-of doubling. Latency is the p50 of successful attempts only — retries, backoff, breaker waits
-and poison rows are excluded — and waits are integrated in seconds from the measured tick.
+A cut during a trial counts as a failed trial: the window goes no higher than where the trial
+began. Latency is the p50 of successful attempts only — retries, backoff, breaker waits and
+poison rows are excluded — and waits are integrated in seconds from the measured tick.
+`bench/controller_sim.py` scores any version of the controller against simulated engines
+(tests/sim_engine.py).
 
 `Fixed(n)` bypasses all of it. Defaults: `Auto(target_waiting=8, initial=16,
 max_limit=512, step=8)`; cap `max_limit` (~128) for vision workloads — in-flight

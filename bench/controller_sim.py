@@ -7,7 +7,8 @@ and run against the scenarios below with tests/sim_engine.py, three seeds each. 
 version, all after the first 100 ticks unless noted: `best` is the delivered share of the best
 fixed window's throughput, `1st-min` the same over the first 30 ticks (a minute), `lat` the
 latency as a multiple of the latency at the smallest window that reaches the best throughput,
-`fail` the share of rows rejected or timed out over the whole run.
+`fail` the share of rows rejected or timed out over the whole run, `ramp` the ticks until the
+delivered throughput first reaches 90% of the best fixed window's.
 """
 
 from __future__ import annotations
@@ -43,6 +44,8 @@ for gauges in (False, True):
 for limit in (64, 100, 127, 200, 500):
     SCENARIOS.append((f"hosted, 429 past {limit}", dict(curve=[(1024, 400.0)], cap=1024, rate_limit=limit,
                                                         gauges=False, noise=0.05)))
+SCENARIOS.append(("blind, flat 32 -> 64 as on real SGLang", dict(curve=[(32, 64.0), (64, 64.0), (192, 150.0)],
+                                                              cap=256, gauges=False, noise=0.07)))
 SCENARIOS.append(("blind, 32 s requests", dict(curve=[(256, 8.0)], cap=256, gauges=False, noise=0.05)))
 SCENARIOS.append(("blind, 12 s requests, 60 s timeout", dict(curve=[(100, 8.0)], cap=100, gauges=False,
                                                              noise=0.05, read_timeout_s=60)))
@@ -77,8 +80,13 @@ def load_auto(ref: str):
     return module.Auto
 
 
-def score(auto, kwargs: dict, after: dict | None = None) -> tuple[float, float, float, float]:
-    best, first, lat, fail = [], [], [], []
+def ramp_ticks(ticks) -> int:
+    """Ticks until the delivered throughput first reaches 90% of the best fixed window's."""
+    return next((i for i, t in enumerate(ticks) if t.rows_per_s >= 0.9 * t.engine.best(512)[1]), len(ticks))
+
+
+def score(auto, kwargs: dict, after: dict | None = None) -> tuple[float, float, float, float, float]:
+    best, first, lat, fail, ramp = [], [], [], [], []
     for seed in range(3):
         engine = Engine(**kwargs, seed=seed)
         then = None if after is None else (300, Engine(**{**kwargs, **after}, seed=seed))
@@ -88,28 +96,32 @@ def score(auto, kwargs: dict, after: dict | None = None) -> tuple[float, float, 
         first.append(share_of_best(ticks[:30]))
         lat.append(latency_inflation(tail))
         fail.append(failed_share(ticks))
-    return statistics.mean(best), statistics.mean(first), statistics.mean(lat), statistics.mean(fail)
+        ramp.append(ramp_ticks(ticks))
+    return (statistics.mean(best), statistics.mean(first), statistics.mean(lat), statistics.mean(fail),
+            statistics.mean(ramp))
 
 
 def main(refs: list[str]) -> None:
     autos = [(ref, load_auto(ref)) for ref in refs]
-    print("| scenario | " + " | ".join(f"{ref}: best / 1st-min / lat / fail" for ref, _ in autos) + " |")
+    columns = [f"{ref}: best / 1st-min / lat / fail / ramp" for ref, _ in autos]
+    print("| scenario | " + " | ".join(columns) + " |")
     print("|---|" + "---|" * len(autos))
-    totals: dict[str, list[tuple[float, float, float, float]]] = {ref: [] for ref, _ in autos}
+    totals: dict[str, list[tuple[float, float, float, float, float]]] = {ref: [] for ref, _ in autos}
     rows = [(name, kwargs, None) for name, kwargs in SCENARIOS]
     rows += [(name, {**before, "gauges": False, "noise": 0.05}, after) for name, before, after in SHIFTS]
     for name, kwargs, after in rows:
         cells = []
         for ref, auto in autos:
-            b, f, la, fa = score(auto, kwargs, after)
-            totals[ref].append((b, f, la, fa))
-            cells.append(f"{b:.0%} / {f:.0%} / {la:.1f}x / {fa:.1%}")
+            b, f, la, fa, ra = score(auto, kwargs, after)
+            totals[ref].append((b, f, la, fa, ra))
+            cells.append(f"{b:.0%} / {f:.0%} / {la:.1f}x / {fa:.1%} / {ra:.0f}")
         print(f"| {name} | " + " | ".join(cells) + " |")
     means = []
     for ref, _ in autos:
         t = totals[ref]
         means.append(f"{statistics.mean(x[0] for x in t):.0%} / {statistics.mean(x[1] for x in t):.0%} / "
-                     f"{statistics.mean(x[2] for x in t):.1f}x / {statistics.mean(x[3] for x in t):.1%}")
+                     f"{statistics.mean(x[2] for x in t):.1f}x / {statistics.mean(x[3] for x in t):.1%} / "
+                     f"{statistics.mean(x[4] for x in t):.0f}")
     print("| **mean** | " + " | ".join(means) + " |")
     worst = [f"{min(x[0] for x in totals[ref]):.0%}" for ref, _ in autos]
     print("| **worst best** | " + " | ".join(worst) + " |")

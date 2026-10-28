@@ -65,23 +65,27 @@ def busy_ms(ms: float) -> None:
         pass
 
 
-def make_to_request(prep_ms: float, prep_kind: str, model: str, max_tokens: int):
+def make_to_request(prep_ms: float, prep_kind: str, model: str, max_tokens: int, kind: str = "chat"):
     def to_request(row: dict) -> dict:
         if prep_ms:
             if prep_kind == "cpu":
                 busy_ms(prep_ms)
             else:
                 time.sleep(prep_ms / 1000)  # releases the GIL, like image decoding in C
+        if kind == "embeddings":
+            return {"model": model, "input": row["text"]}
         messages = [{"role": "user", "content": row["text"]}]
         return {"model": model, "max_tokens": max_tokens, "messages": messages}
 
     return to_request
 
 
-def make_parse(parse_ms: float):
+def make_parse(parse_ms: float, kind: str = "chat"):
     def parse(row: dict, resp: dict) -> dict:
         if parse_ms:
             busy_ms(parse_ms)
+        if kind == "embeddings":
+            return {"dim": len(resp["data"][0]["embedding"])}
         return {"reply": resp["choices"][0]["message"]["content"]}
 
     return parse
@@ -159,6 +163,8 @@ def main() -> None:
     ap.add_argument("--write-delay-ms", type=float, default=0.0,
                     help="slowmem: milliseconds each write takes")
     ap.add_argument("--flush-every", type=int, default=None)
+    ap.add_argument("--kind", choices=["chat", "embeddings"], default="chat",
+                    help="chat completions, or /embeddings with the row text as input")
     ap.add_argument("--signal-source", choices=["auto", "none"], default="auto",
                     help="'none' never reads the engine's metrics (blind mode)")
     args = ap.parse_args()
@@ -182,8 +188,9 @@ def main() -> None:
     cpu0 = time.process_time()
     local = args.output_uri is None
     watcher = FirstPartWatcher(fs, root, t0, interval_s=0.01 if local else 0.5).start()
-    stats = pump(rows, make_to_request(args.prep_ms, args.prep_kind, args.model, args.max_tokens),
-                 make_parse(args.parse_ms),
+    stats = pump(rows, make_to_request(args.prep_ms, args.prep_kind, args.model, args.max_tokens, args.kind),
+                 make_parse(args.parse_ms, args.kind),
+                 route="/embeddings" if args.kind == "embeddings" else "/chat/completions",
                  endpoint=args.endpoint, output=out_uri, window=window, flush_every=args.flush_every,
                  prepare_workers=args.prepare_workers, fail_fast=0, signal_source=args.signal_source)
     wall = time.perf_counter() - t0

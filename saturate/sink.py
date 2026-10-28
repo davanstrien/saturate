@@ -15,7 +15,6 @@ manifest, overwrites are idempotent; failed rows leave no record (they retry).
 
 from __future__ import annotations
 
-import contextlib
 import os
 import sys
 import time
@@ -26,21 +25,20 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .schema import (
+    cast_columns,
+    check_storable,
+    fit,
+    is_nested,
+    is_untyped,
+    outside_declared,
+    without_untyped,
+    without_untyped_schema,
+)
+
 
 def _log(msg: str) -> None:
     print(f"[pump] {msg}", file=sys.stderr, flush=True)
-
-
-def _untyped(t: pa.DataType) -> bool:
-    """A type with no typed leaf (null, list<null>, struct<>, ...): inferred from values that
-    carry no information, so it can never be a pin — a later real value must be free to set it."""
-    if pa.types.is_null(t):
-        return True
-    if pa.types.is_list(t) or pa.types.is_large_list(t):
-        return _untyped(t.value_type)
-    if pa.types.is_struct(t):
-        return all(_untyped(f.type) for f in t)
-    return False
 
 
 def _list_parts(fs, root: str) -> list[str]:
@@ -56,58 +54,6 @@ UNSTORABLE = (TypeError, ValueError, OverflowError, pa.ArrowException)
 def error_row(id_, exc: BaseException) -> dict:
     """The record a row that cannot be stored leaves behind (CONTRACT §4)."""
     return {"id": str(id_), "error": f"parse output not storable: {exc}"}
-
-
-def _has_untyped_leaf(t: pa.DataType) -> bool:
-    """Whether some leaf of `t` is null-typed (a struct field only ever seen as None)."""
-    if pa.types.is_null(t):
-        return True
-    if pa.types.is_list(t) or pa.types.is_large_list(t):
-        return _has_untyped_leaf(t.value_type)
-    if pa.types.is_struct(t):
-        return any(_has_untyped_leaf(f.type) for f in t)
-    return False
-
-
-def _nested(t: pa.DataType) -> bool:
-    return pa.types.is_struct(t) or pa.types.is_list(t) or pa.types.is_large_list(t)
-
-
-def _storable(t: pa.DataType, top: bool = True) -> bool:
-    """Parquet cannot write a struct with no fields below the top level (a nested `{}`);
-    a top-level one is an untyped column and is simply dropped."""
-    if pa.types.is_struct(t):
-        return (top or len(t) > 0) and all(_storable(f.type, False) for f in t)
-    if pa.types.is_list(t) or pa.types.is_large_list(t):
-        return _storable(t.value_type, False)
-    return True
-
-
-def _accepts(got: pa.DataType, pinned: pa.DataType) -> bool:
-    """Whether values of type `got` may be stored in a column pinned to `pinned`: same type,
-    untyped (nulls), or the same kind of thing with the value-level check left to a safe cast
-    (2 fits int32; 0.5 into int64 is refused by the cast). Kinds never cross: a float into an
-    int column, an int into a string column, a bool into an int column are conflicts, because
-    a cast there rewrites the value rather than records it. Recursive through lists and structs
-    (a struct may lack pinned fields, never carry extra ones)."""
-    if got == pinned or _untyped(got):
-        return True
-    num = lambda t: pa.types.is_integer(t) or pa.types.is_floating(t)  # noqa: E731 (bool is not an integer here)
-    if num(got) and num(pinned):
-        return not (pa.types.is_floating(got) and pa.types.is_integer(pinned))
-    for same in (pa.types.is_decimal, pa.types.is_timestamp, pa.types.is_date, pa.types.is_time,
-                 pa.types.is_duration, pa.types.is_boolean,
-                 lambda t: pa.types.is_string(t) or pa.types.is_large_string(t),
-                 lambda t: pa.types.is_binary(t) or pa.types.is_large_binary(t)):
-        if same(got) and same(pinned):
-            return True
-    if (pa.types.is_list(got) or pa.types.is_large_list(got)) and \
-            (pa.types.is_list(pinned) or pa.types.is_large_list(pinned)):
-        return _accepts(got.value_type, pinned.value_type)
-    if pa.types.is_struct(got) and pa.types.is_struct(pinned):
-        names = {f.name for f in pinned}
-        return all(f.name in names and _accepts(f.type, pinned.field(f.name).type) for f in got)
-    return False
 
 
 class ParquetSink:
@@ -146,15 +92,16 @@ class ParquetSink:
             if bad:  # r7: error rows write user fields as null — non-nullable would crash the flush
                 raise ValueError(f"declared schema: fields must be nullable (error rows are sparse): {bad}")
         self._declared = schema
-        self._schema: pa.Schema | None = None  # dynamic mode: pinned at first sight, widened by new columns
+        # dynamic mode: pinned at first sight, extended by new columns and new nested fields
+        self._schema: pa.Schema | None = None
         self._pinned: dict[str, pa.DataType] = {}  # name -> pinned type (empty until pinned)
+        self._fits: dict[tuple[str, pa.DataType], pa.DataType | None] = {}  # (column, value type) -> fit()
         if schema is not None:
             self._pin(schema)
         self._seeded = schema is not None  # dynamic mode reads its pin back from existing parts
         self.rows_demoted = 0  # rows flush turned into error rows (type conflicts, cumulative)
         self._seq = 0  # per-sink flush counter: sorted(part names) == write order on ms collisions
         self._telemetry_names: dict[int, str] = {}  # shard rank -> this run's telemetry file
-        self._accepted: dict[tuple[str, pa.DataType], bool] = {}  # (name, got) -> _accepts verdict
         self._buf_schema: pa.Schema | None = None  # types of the rows buffered so far (dynamic mode)
         self._parts: list[str] | None = None  # part listing from existing_ids(), reused by the seed
         self._probe_cache: tuple[dict, pa.Schema] | None = None  # the record probe() last typed
@@ -261,8 +208,13 @@ class ParquetSink:
         return done if retry_errors else done | failed
 
     def _pin(self, schema: pa.Schema) -> pa.Schema:
+        """Pins the typed part of `schema` (`without_untyped`): an untyped column or nested field
+        never pins, so its first typed value is free to set it."""
+        if self._declared is None:
+            schema = without_untyped_schema(schema)
         self._schema = schema
-        self._pinned = {f.name: f.type for f in schema if not _untyped(f.type)}  # untyped never pins
+        self._pinned = {f.name: f.type for f in schema if not is_untyped(f.type)}
+        self._fits = {}  # the cached verdicts were for the old pin
         return schema
 
     def _seed_schema(self) -> None:
@@ -285,66 +237,41 @@ class ParquetSink:
         if parts:
             _log("no existing part has a readable schema, starting unpinned")
 
-    def _conform_type(self, name: str, got: pa.DataType) -> pa.DataType | None:
-        """The pinned type values of type `got` in column `name` must be cast to, or None when
-        `got` already is it. `got` is acceptable when it is the same kind of thing (`_accepts`):
-        int64 -> double, int64 -> int32 (the cast checks the value), list<int64> -> list<double>,
-        struct<a> -> struct<a, b>, all-null -> anything. Everything else raises: a float into an
-        int column, an int into a string column, a struct field the pin lacks."""
-        pinned = self._pinned[name]
-        if got == pinned:
+    def _conform_type(self, name: str, value_type: pa.DataType) -> pa.DataType | None:
+        """The type that values of type `value_type` in column `name` are cast to before they are
+        stored; None when `value_type` already is the pinned type. The rules are `fit`'s: int64 ->
+        double, int64 -> int32 (the cast checks the value), list<int64> -> list<double>,
+        struct<a> -> struct<a, b>, all-null -> anything, and struct<a, c> -> struct<a, b, c>
+        when the pin is struct<a, b> (a struct field the pin lacks is appended). Everything
+        else raises, at any depth: a float into an int column, an int into a string column.
+        This only reads the pin: an extension joins the pin when a flush writes a part that
+        carries it."""
+        pinned_type = self._pinned[name]
+        if value_type == pinned_type:
             return None
-        if not _storable(got):
-            raise TypeError(f"{name}: {got} has a nested empty object, which parquet cannot store")
-        if _has_untyped_leaf(pinned):  # a struct field only ever seen as None: the pin fills in
-            widened = pa.unify_schemas([pa.schema([pa.field(name, pinned)]),
-                                        pa.schema([pa.field(name, got)])]).field(0).type  # raises on a clash
-            if widened != pinned:
-                schema = self._schema
-                assert schema is not None  # a pinned column implies a pinned schema (_pin sets both)
-                self._pinned[name] = widened
-                self._schema = schema.set(schema.get_field_index(name), pa.field(name, widened))
-            return widened
-        key = (name, got)
-        ok = self._accepted.get(key)
-        if ok is None:
-            ok = self._accepted[key] = _accepts(got, pinned)
-        if not ok:
-            hint = ("; nested fields are fixed by the first rows written: declare them with "
-                    "schema=, or store this object as a JSON string") if _nested(pinned) else ""
-            raise TypeError(f"{name}: {got} does not widen into the pinned type {pinned}{hint}")
-        return pinned  # the caller's safe cast refuses values that do not fit (0.5 -> int64, overflow)
-
-    @contextlib.contextmanager
-    def _pin_rollback(self):
-        """Widening the pin (a struct field first seen as None, typed later) happens field by
-        field while a record or batch is checked; if a later field then fails, the record is
-        rejected, and the widening it caused must be undone with it — or a row that was never
-        stored changes what every later row may hold. `_accepted` needs no rollback: it only
-        caches verdicts for pins with no untyped leaf, and those never widen."""
-        saved = (dict(self._pinned), self._schema)
-        try:
-            yield
-        except BaseException:
-            self._pinned, self._schema = saved
-            raise
+        check_storable(name, value_type)
+        key = (name, value_type)
+        if key not in self._fits:
+            self._fits[key] = fit(value_type, pinned_type)
+        stored_type = self._fits[key]
+        if stored_type is None:
+            hint = ("; a nested field's type is fixed by its first typed value: declare it with "
+                    "schema=, or store this object as a JSON string") if is_nested(pinned_type) else ""
+            raise TypeError(f"{name}: {value_type} does not fit the pinned type {pinned_type}{hint}")
+        return stored_type  # the caller's safe cast refuses values that do not fit (0.5 -> int64, overflow)
 
     def _conform(self, table: pa.Table) -> pa.Table:
-        """Cast the columns the table shares with the pin to their pinned types; raise
-        TypeError/ValueError when a column does not widen into its pin (or the cast refuses,
-        e.g. an int64 beyond 2**53 into a double column). All or nothing: a raise leaves the
-        pin as it was."""
-        with self._pin_rollback():
-            return self._conform_columns(table)
-
-    def _conform_columns(self, table: pa.Table) -> pa.Table:
-        for i, f in enumerate(table.schema):
-            if f.name in self._pinned:
-                to = self._conform_type(f.name, f.type)
-                if to is not None:
-                    table = table.set_column(i, pa.field(f.name, to), table.column(i).cast(to))
-            elif not _storable(f.type):
-                raise TypeError(f"{f.name}: {f.type} has a nested empty object: parquet cannot store it")
+        """Cast the columns the table shares with the pin to the types they are stored as;
+        raise TypeError/ValueError when a column does not fit its pin (or the cast refuses,
+        e.g. an int64 beyond 2**53 into a double column). The pin is not changed."""
+        for i, field in enumerate(table.schema):
+            if field.name in self._pinned:
+                stored_type = self._conform_type(field.name, field.type)
+                if stored_type is not None:
+                    stored = table.column(i).cast(stored_type)
+                    table = table.set_column(i, pa.field(field.name, stored_type), stored)
+            else:
+                check_storable(field.name, field.type)
         return table
 
     def probe(self, record: dict) -> None:
@@ -355,40 +282,52 @@ class ParquetSink:
         if self._declared is None:
             if not self._seeded:
                 self._seed_schema()
-            arr = pa.array([record])  # one serialisation: a struct typed per field
-            with self._pin_rollback():  # a rejected record leaves the pin as it found it
-                for i, f in enumerate(arr.type):  # equal types (the common case) cost a dict lookup
-                    if f.name in self._pinned and not pa.types.is_null(f.type):  # a null fits any pin
-                        to = self._conform_type(f.name, f.type)
-                        if to is not None:
-                            arr.field(i).cast(to)
-                    elif not _storable(f.type):
-                        raise TypeError(f"{f.name}: {f.type} has a nested empty object: "
-                                        "parquet cannot store it")
-                # and against the rows already buffered: two types for one not-yet-pinned column
-                # inside one batch cannot both be stored — the newcomer is the row that does not fit
-                got = pa.schema(list(arr.type))
-                self._widen_buffer(got)
-            self._probe_cache = (record, got)  # append() reuses the types without re-serialising
+            stored = self._stored_types(pa.array([record]))  # one serialisation
+            # and against the rows already buffered: two types for one not-yet-pinned column
+            # (or nested field) inside one batch cannot both be stored — the newcomer is the row
+            # that does not fit
+            self._widen_buffer(stored)
+            self._probe_cache = (record, stored)  # append() reuses the types without re-serialising
             return
-        extra = record.keys() - set(self._declared.names)
-        if extra:
-            raise ValueError(f"fields outside the declared schema: {sorted(extra)}")
+        outside = outside_declared(record, self._declared)
+        if outside:
+            raise ValueError(f"fields outside the declared schema: {outside}")
         pa.Table.from_pylist([{n: record.get(n) for n in self._declared.names}], schema=self._declared)
 
-    def _widen_buffer(self, got: pa.Schema) -> pa.Schema:
+    def _stored_types(self, row: pa.StructArray) -> pa.Schema:
+        """The types one row (`row`, a struct array of length 1) is stored as, as flush would
+        conform it: a pinned column takes its conformed type (`_conform_type`), so a nested
+        field with no type yet is left out exactly as flush leaves it out. Raises
+        (TypeError/ValueError) when the row does not fit the pin. Only reads the pin, so a
+        rejected row leaves no trace on it."""
+        fields = []
+        for i, field in enumerate(row.type):  # equal types (the common case) cost a dict lookup
+            if field.name in self._pinned and not pa.types.is_null(field.type):  # a null fits any pin
+                stored_type = self._conform_type(field.name, field.type)
+                if stored_type is not None:
+                    row.field(i).cast(stored_type)  # the values must fit too (0.5 -> int64, overflow)
+                    fields.append(pa.field(field.name, stored_type))
+                    continue
+            else:
+                check_storable(field.name, field.type)
+            typed = without_untyped(field.type)
+            if typed is not None:  # what has no type yet is never written, so it cannot clash
+                fields.append(pa.field(field.name, typed))
+        return pa.schema(fields)
+
+    def _widen_buffer(self, stored: pa.Schema) -> pa.Schema:
         """The buffer's types widened by one more row's; raises (ArrowTypeError) on a clash."""
         if self._buf_schema is None:
-            return got
-        return pa.unify_schemas([self._buf_schema, got], promote_options="permissive")
+            return stored
+        return pa.unify_schemas([self._buf_schema, stored], promote_options="permissive")
 
     def append(self, record: dict) -> None:
         if self._declared is None:  # track the buffer's types so probe() can see the whole batch
             cached = self._probe_cache
             try:
-                got = (cached[1] if cached and cached[0] is record
-                       else pa.schema(list(pa.array([record]).type)))
-                self._buf_schema = self._widen_buffer(got)
+                stored = (cached[1] if cached and cached[0] is record
+                       else self._stored_types(pa.array([record])))
+                self._buf_schema = self._widen_buffer(stored)
             except UNSTORABLE:
                 pass  # a direct append of a row that does not fit: flush demotes it (the guarantee)
         if not self._buf:
@@ -411,7 +350,9 @@ class ParquetSink:
         name = f"part-{int(time.time() * 1000)}-{self._seq:06d}-{uuid.uuid4().hex[:8]}.parquet"
         self._seq += 1
         if self._declared is not None:  # declared mode: exact frame — missing fields null, extras raise
-            extra = {k for r in self._buf for k in r} - set(self._declared.names)
+            extra = set()
+            for r in self._buf:
+                extra.update(outside_declared(r, self._declared))
             if extra:
                 raise ValueError(f"rows carry fields outside the declared schema: {sorted(extra)}")
             table = pa.Table.from_pylist([{n: r.get(n) for n in self._declared.names}
@@ -423,21 +364,14 @@ class ParquetSink:
                 table = self._conform(self._batch(self._buf))
             except UNSTORABLE:  # some row does not fit: find it
                 table = self._salvage()
-            # an all-null user column with no pinned type yet is unknowable — drop it rather
-            # than guess a type a later real value (float, list) would conflict with on disk.
-            # Once a type IS pinned, the column is kept and materialized below. Residual gap
-            # (§8): a column whose first-ever appearance is all-null stays absent from that
-            # part until its first typed value arrives.
-            table = table.drop_columns([f.name for f in table.schema
-                                        if _untyped(f.type) and f.name != "error"
-                                        and f.name not in self._pinned])
+            table = self._drop_untyped(table)
             if pa.types.is_null(table.schema.field("error").type):  # error is required: pin to string
                 i = table.schema.get_field_index("error")
                 table = table.set_column(i, pa.field("error", pa.string()),
                                          table["error"].cast(pa.string()))
             # pin seen columns at first sight; pinned columns already conform, so the unify
-            # only ever appends new columns — a pinned type never moves, since widening only
-            # the NEW part would break multi-part reads
+            # only ever appends new columns and new struct fields — a pinned type never moves,
+            # since retyping only the NEW part would break multi-part reads
             schema = self._pin(table.schema if self._schema is None else
                                pa.unify_schemas([self._schema, table.schema]))
             # every part carries the FULL pinned schema — absent or all-null columns become
@@ -447,7 +381,7 @@ class ParquetSink:
             for f in schema:
                 if f.name not in table.schema.names:
                     table = table.append_column(f, pa.nulls(len(table), type=f.type))
-            table = table.select(schema.names).cast(schema)
+            table = cast_columns(table.select(schema.names), schema).cast(schema)
         self._write(f"{self.root}/{name}", table)
         try:  # manifest second: a crash in between leaves an uncovered part -> scanned
             self.fs.makedirs(f"{self.root}/_manifest", exist_ok=True)
@@ -488,23 +422,47 @@ class ParquetSink:
                 _log(f"write failed, retrying ({i + 1}/{attempts - 1}): {path}: {e}")
                 time.sleep(2**i)
 
+    def _drop_untyped(self, table: pa.Table) -> pa.Table:
+        """`table` with its untyped columns and untyped nested fields removed: a user column
+        with no pinned type whose values are all null (or empty lists) is dropped, and struct
+        fields only ever seen as None are cast out of their column (`without_untyped`).
+        Guessing a type there would conflict with a later real value (a float, a list) on
+        disk, and writing the null type makes the parts unreadable together once a later part
+        types it. Residual gap (§8): such a column or
+        field is absent from the parts written before its first typed value arrives."""
+        for field in list(table.schema):
+            if field.name == "error":
+                continue
+            typed = without_untyped(field.type)
+            if typed is None:
+                if field.name not in self._pinned:  # a pinned column is materialized by the caller
+                    table = table.drop_columns([field.name])
+            elif typed != field.type:
+                i = table.schema.get_field_index(field.name)
+                table = table.set_column(i, pa.field(field.name, typed), table.column(i).cast(typed))
+        return table
+
     @staticmethod
     def _batch(rows: list[dict]) -> pa.Table:
         keys = {k for r in rows for k in r}  # union: row 0 alone must not set the schema
         return pa.Table.from_pylist([{k: r.get(k) for k in keys} for r in rows])
 
     def _salvage(self) -> pa.Table:
-        """Per-row fallback when the batch does not build or conform as a whole: each row is
-        built alone and checked against the running schema (the pin, widened by the rows
-        accepted before it in this batch — first typed value wins, as batch inference would);
-        a row that fails is demoted in place to an error row. A type conflict costs one row,
-        never the buffer, and flush never raises for it."""
+        """Per-row fallback when the batch does not build or conform as a whole. Each row is
+        built alone and conformed to the pin; a row that does not conform, or whose types clash
+        with an earlier row's in this batch (first typed value wins, as batch inference would),
+        is demoted in place to an error row. The rows kept are then cast to the types they
+        share; a row whose VALUES do not fit those (2**60 into a double column that a later
+        row's 0.5 made) is demoted too, and the shared types are worked out again without it,
+        so a demoted row never shapes the part, nor the pin taken from it. A type conflict
+        costs one row, never the buffer, and flush never raises for it."""
         running = self._schema
-        tables: list[pa.Table] = []
+        conformed: list[pa.Table | None] = []
         bad = 0
         for i, rec in enumerate(self._buf):
             try:
-                t = self._conform(pa.Table.from_pylist([rec]))
+                # without what has no type yet: it is never written, so it cannot clash
+                t = self._drop_untyped(self._conform(pa.Table.from_pylist([rec])))
                 # THE check for not-yet-pinned columns: the unify raises (ArrowTypeError, a
                 # TypeError) when this row's type clashes with an earlier row's in the batch
                 running = (t.schema if running is None else
@@ -513,24 +471,41 @@ class ParquetSink:
                 self._buf[i] = error_row(rec.get("id"), e)
                 t = None
                 bad += 1
-            tables.append(t)
-        for i, t in enumerate(tables):  # the VALUES must fit the widened types too: a row accepted
-            if t is None or running is None:  # before a later row widened its column (2**60, then
-                continue  # 0.5) may not; no accepted row at all leaves running unset
-            try:
-                for j, f in enumerate(t.schema):
-                    to = running.field(f.name).type
-                    if to != f.type:
-                        t = t.set_column(j, pa.field(f.name, to), t.column(j).cast(to))
-                tables[i] = t
-            except UNSTORABLE as e:
-                self._buf[i] = error_row(self._buf[i].get("id"), e)
-                tables[i] = None
-                bad += 1
+            conformed.append(t)
+        tables = self._cast_to_shared_types(conformed)
+        bad += sum(1 for c, t in zip(conformed, tables, strict=True) if c is not None and t is None)
         tables = [pa.Table.from_pylist([self._buf[i]]) if t is None else t for i, t in enumerate(tables)]
         self.rows_demoted += bad
         _log(f"{bad} of {len(self._buf)} rows do not fit the pinned schema: written as error rows")
         return pa.concat_tables(tables, promote_options="permissive")
+
+    def _cast_to_shared_types(self, conformed: list[pa.Table | None]) -> list[pa.Table | None]:
+        """Each kept row cast to the types the kept rows share. The first row whose values do
+        not fit is demoted in place (None in the result, an error row in the buffer), and the
+        shared types are worked out again from the rows still kept before any other row is
+        checked: a type only the demoted row brought (a double that 2**60 does not fit) must
+        not cost another row. Repeats until every kept row fits."""
+        kept = list(conformed)
+        while True:
+            schemas = [t.schema for t in kept if t is not None]
+            if not schemas:
+                return kept
+            shared = pa.unify_schemas(schemas, promote_options="permissive")
+            cast: list[pa.Table | None] = []
+            demoted = False
+            for i, t in enumerate(kept):
+                if t is None:
+                    cast.append(None)
+                    continue
+                try:
+                    cast.append(cast_columns(t, shared))
+                except UNSTORABLE as e:
+                    self._buf[i] = error_row(self._buf[i].get("id"), e)
+                    kept[i] = None
+                    demoted = True
+                    break  # the shared types may change without this row: work them out again
+            if not demoted:
+                return cast
 
     def begin_run(self, shard: tuple[int, int]) -> None:
         """A new run on this shard: its telemetry lands in a new file (a crashed run's partial

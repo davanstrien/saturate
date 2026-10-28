@@ -416,7 +416,7 @@ def test_mixed_types_in_new_column_after_pin_cost_one_row(tmp_path):
 def test_nested_widening_follows_the_scalar_rule(tmp_path):
     """The conform rule is recursive: [1] widens into a pinned list<double> exactly as 1
     widens into double; a struct missing a pinned field is filled with null; a struct with
-    a field the pin lacks, or a retyped field, is a conflict."""
+    a field the pin lacks extends the pin; a retyped field is a conflict."""
     import asyncio
 
     import pyarrow.dataset as ds
@@ -428,19 +428,20 @@ def test_nested_widening_follows_the_scalar_rule(tmp_path):
     async def results():
         yield Done("p", {}, {"v": [1.5], "m": {"a": 1, "b": "x"}}, None, {})  # pins list<double>, struct<a,b>
         yield Done("w", {}, {"v": [1], "m": {"a": 2}}, None, {})              # widens: list<int64>, struct<a>
-        yield Done("x", {}, {"v": [1.5], "m": {"a": 3, "c": 1}}, None, {})    # struct field the pin lacks
+        yield Done("x", {}, {"v": [1.5], "m": {"a": 3, "c": 1}}, None, {})    # extends: struct<a,b,c>
         yield Done("y", {}, {"v": [1.5], "m": {"a": "z"}}, None, {})          # struct field retyped
         yield Done("z", {}, {"v": [0.5, "s"]}, None, {})                      # unserializable list
 
     sink = ParquetSink(str(tmp_path), flush_every=1)
     stats = asyncio.run(drain(results(), sink))
-    assert (stats.rows_processed, stats.rows_failed) == (2, 3)
-    assert sink.existing_ids(retry_errors=True) == {"p", "w"}
+    assert (stats.rows_processed, stats.rows_failed) == (3, 2)
+    assert sink.existing_ids(retry_errors=True) == {"p", "w", "x"}
     parts = sorted(str(p) for p in tmp_path.glob("part-*.parquet"))
     t = ds.dataset(parts, format="parquet").to_table()
     assert t.schema.field("v").type == pa.list_(pa.float64())
     got = dict(read_output(str(tmp_path)))
     assert got["w"] == {"v": [1.0], "m": {"a": 2, "b": None}}
+    assert got["x"] == {"v": [1.5], "m": {"a": 3, "b": None, "c": 1}}
 
 
 def test_pinned_schema_is_read_back_on_resume(tmp_path):
@@ -1004,18 +1005,20 @@ def test_a_persistent_part_write_error_still_raises_and_leaves_no_partial_part(t
 
 
 def _pinned_with_null_leaf(tmp_path):
-    """A sink whose pin has meta: struct<a: null, b: int64> (a only ever seen as None)."""
+    """A sink that has written meta = {"a": None, "b": 1}: a, only ever seen as None, is left
+    out of the pin, so meta pins as struct<b: int64>."""
     from saturate.sink import ParquetSink
 
     sink = ParquetSink(str(tmp_path), flush_every=1)
     sink.append({"id": "r1", "meta": {"a": None, "b": 1}, "count": 1, "error": None})
-    assert pa.types.is_null(sink._pinned["meta"].field("a").type)
+    assert sink._pinned["meta"] == pa.struct([("b", pa.int64())])
     return sink
 
 
 def test_a_rejected_record_does_not_change_the_pin(tmp_path):
-    """probe() widened the null leaf from meta.a before a later field (count) failed; the
-    record was rejected but the widening stayed, so later valid rows were demoted."""
+    """probe() once widened the pin with meta.a before a later field (count) failed; the
+    record was rejected but the widening stayed, so later valid rows were demoted. probe()
+    only reads the pin."""
     import pytest
 
     sink = _pinned_with_null_leaf(tmp_path)
@@ -1028,7 +1031,7 @@ def test_a_rejected_record_does_not_change_the_pin(tmp_path):
 
 def test_a_row_demoted_at_flush_does_not_change_the_pin(tmp_path):
     """The same, on the flush path: a buffered row that fails on a later column is demoted to
-    an error row, and must not leave its nested widening on the pin either."""
+    an error row, and must not leave its nested extension on the pin either."""
     sink = _pinned_with_null_leaf(tmp_path)
     before = sink._pinned["meta"]
     sink.flush_every = 10
@@ -1062,7 +1065,7 @@ def test_a_value_arrow_cannot_convert_is_an_error_row_not_a_crash(tmp_path):
     assert sink.existing_ids(retry_errors=True) == {"good", "after"}
 
 
-def test_a_new_nested_key_error_names_the_way_out(tmp_path):
+def test_a_retyped_nested_field_error_names_the_way_out(tmp_path):
     import pytest
 
     from saturate.sink import ParquetSink
@@ -1070,20 +1073,20 @@ def test_a_new_nested_key_error_names_the_way_out(tmp_path):
     sink = ParquetSink(str(tmp_path), flush_every=1)
     sink.append({"id": "a", "meta": {"lang": "en"}, "error": None})
     with pytest.raises(TypeError, match="schema=.*JSON string"):
-        sink.probe({"id": "b", "meta": {"lang": "fr", "script": "Latn"}, "error": None})
+        sink.probe({"id": "b", "meta": {"lang": 5}, "error": None})
 
 
 
-def test_salvage_keeps_an_accepted_widening_and_undoes_only_the_rejected_row(tmp_path):
-    """One batch: r2 legitimately types meta.a (the pin widens and stays), r3 would widen it
-    differently and fails on another column (demoted, its widening undone)."""
+def test_salvage_keeps_an_accepted_extension_and_undoes_only_the_rejected_row(tmp_path):
+    """One batch: r2 legitimately types meta.a (the pin is extended with it), r3 would type
+    it differently and fails on another column (demoted, it leaves no trace)."""
     sink = _pinned_with_null_leaf(tmp_path)
     sink.flush_every = 10
     sink.append({"id": "r2", "meta": {"a": "en", "b": 2}, "count": 2, "error": None})
     sink.append({"id": "r3", "meta": {"a": {"x": 5}, "b": 3}, "count": "not-a-number", "error": None})
     sink.flush()
     assert sink.rows_demoted == 1
-    assert pa.types.is_string(sink._pinned["meta"].field("a").type)  # r2's widening kept
+    assert pa.types.is_string(sink._pinned["meta"].field("a").type)  # r2's extension kept
     assert sink.existing_ids(retry_errors=True) == {"r1", "r2"}
 
 
@@ -1206,3 +1209,207 @@ def test_hf_a_missing_output_read_then_created_is_writable(monkeypatch):
     sink = ParquetSink(uri)  # creates it
     assert exists["repo"]
     sink.fs.resolve_path(f"{sink.root}/part-0.parquet")  # raised FileNotFoundError before the fix
+
+
+def _read_whole_dir(out):
+    """The output read as one table by the two whole-directory readers people reach for first;
+    either raises if two parts disagree on a type."""
+    import pyarrow.dataset as ds
+
+    return pq.read_table(str(out)), ds.dataset(str(out), format="parquet").to_table()
+
+
+def _null_typed_paths(t: pa.DataType, path: str = "") -> list[str]:
+    if pa.types.is_null(t):
+        return [path]
+    if pa.types.is_list(t) or pa.types.is_large_list(t):
+        return _null_typed_paths(t.value_type, f"{path}[]")
+    if pa.types.is_struct(t):
+        return [p for f in t for p in _null_typed_paths(f.type, f"{path}.{f.name}")]
+    return []
+
+
+def test_a_nested_field_first_seen_as_none_keeps_the_parts_readable_together(tmp_path):
+    """#33 (1): {"meta": {"lang": None}} was written as struct<lang: null>, and a later part
+    typed it as string; pq.read_table(dir) and pyarrow.dataset then failed with "Unsupported
+    cast from string to null". No part carries a null-typed field."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    rows = [Done("a", {}, {"meta": {"model": "x", "lang": None, "tags": []}}, None, {}),
+            Done("b", {}, {"meta": {"model": "y", "lang": "en", "tags": ["t"]}}, None, {})]
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    stats = asyncio.run(drain(iter_async(rows), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (2, 0)
+    for table in _read_whole_dir(tmp_path):
+        assert table.num_rows == 2
+    for part in tmp_path.glob("part-*.parquet"):
+        schema = pq.read_schema(part)
+        assert [p for f in schema for p in _null_typed_paths(f.type, f.name)] == [], part.name
+    got = dict(read_output(str(tmp_path)))
+    assert got["b"] == {"meta": {"model": "y", "lang": "en", "tags": ["t"]}}
+    assert got["a"] == {"meta": {"model": "x"}}  # lang and tags join the pin with b's part
+
+
+def test_a_row_demoted_in_salvage_does_not_shape_the_part_or_the_pin(tmp_path):
+    """#33 (2), the batch path: r2 types meta.a and is accepted on types, then demoted because
+    its x value (2**60) does not fit the double column r3's 0.5 makes. The pin must be what the
+    written rows say, so a later meta.a of another type (r4) is still free to set it."""
+    from saturate import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "r1", "meta": {"a": None, "b": 1}, "error": None})
+    sink.flush_every = 10
+    sink.append({"id": "r2", "meta": {"a": "x", "b": 2}, "x": 2**60, "error": None})
+    sink.append({"id": "r3", "meta": {"b": 3}, "x": 0.5, "error": None})
+    sink.flush()
+    assert sink.rows_demoted == 1
+    sink.flush_every = 1
+    sink.append({"id": "r4", "meta": {"a": 5, "b": 4}, "error": None})
+    assert sink.rows_demoted == 1  # r4 stored: no written row ever typed meta.a
+    assert sink.existing_ids(retry_errors=True) == {"r1", "r3", "r4"}
+    assert dict(read_output(str(tmp_path)))["r4"] == {"meta": {"a": 5, "b": 4}, "x": None}
+
+
+def test_a_new_nested_key_extends_the_struct_like_a_new_column(tmp_path):
+    """#33 (3): a nested key missing from the first part was an error row on every retry,
+    while a new top-level key added a column. A new nested key now extends the struct; every
+    part stays readable with the whole-directory readers, and the unified schema of the parts
+    reads every field."""
+    import asyncio
+
+    import pyarrow.dataset as ds
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    rows = [Done("a", {}, {"meta": {"lang": "en"}}, None, {}),
+            Done("b", {}, {"meta": {"lang": "fr", "script": "Latn"}}, None, {}),
+            Done("c", {}, {"meta": {"lang": "de"}}, None, {})]
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    stats = asyncio.run(drain(iter_async(rows), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (3, 0)
+    for table in _read_whole_dir(tmp_path):
+        assert table.num_rows == 3
+    parts = sorted(tmp_path.glob("part-*.parquet"))
+    unified = pa.unify_schemas([pq.read_schema(p) for p in parts])
+    full = ds.dataset([str(p) for p in parts], format="parquet", schema=unified).to_table()
+    by_id = {r["id"]: r["meta"] for r in full.to_pylist()}
+    assert by_id == {"a": {"lang": "en", "script": None}, "b": {"lang": "fr", "script": "Latn"},
+                     "c": {"lang": "de", "script": None}}
+    assert dict(read_output(str(tmp_path)))["b"] == {"meta": {"lang": "fr", "script": "Latn"}}
+
+
+def test_a_field_typed_after_it_was_first_none_is_stored_on_every_pyarrow(tmp_path):
+    """The pin keeps struct fields in pin order and appends new ones (meta: struct<b, a>), while
+    inference orders them as they arrive (struct<a, b>). The cast matches struct fields by name,
+    so pin order and arrival order may differ."""
+    from saturate import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "r1", "m": {"a": None, "b": 1}, "error": None})
+    sink.append({"id": "r2", "m": {"a": "x", "b": 2}, "error": None})
+    assert sink.rows_demoted == 0
+    assert dict(read_output(str(tmp_path)))["r2"] == {"m": {"b": 2, "a": "x"}}
+
+
+def test_probe_checks_a_row_against_the_types_flush_stores(tmp_path):
+    """m.new arrives as [] (dropped: no type yet), then as "x" in the same batch. Flush keeps
+    both rows; probe compared the raw list<null> with string and rejected the second."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "p", "m": {"old": 0}, "error": None})
+    sink.flush_every = 10
+    rows = [Done("a", {}, {"m": {"old": 1, "new": []}}, None, {}),
+            Done("b", {}, {"m": {"old": 2, "new": "x"}}, None, {})]
+    stats = asyncio.run(drain(iter_async(rows), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (2, 0)
+    assert dict(read_output(str(tmp_path)))["b"] == {"m": {"old": 2, "new": "x"}}
+
+
+def test_salvage_works_out_the_shared_types_again_after_each_demotion(tmp_path):
+    """Row a's 2**60 does not fit the double x that row b's 0.5 makes, so a is demoted. Without
+    a, y is int64 and b's 2**60 fits; b was demoted too, against types a had contributed."""
+    from saturate import ParquetSink
+
+    sink = ParquetSink(str(tmp_path), flush_every=2)
+    sink.append({"id": "a", "x": 2**60, "y": 0.5, "error": None})
+    sink.append({"id": "b", "x": 0.5, "y": 2**60, "error": None})
+    assert sink.rows_demoted == 1
+    assert sink.existing_ids(retry_errors=True) == {"b"}
+    assert dict(read_output(str(tmp_path)))["b"] == {"x": 0.5, "y": 2**60}
+
+
+def test_a_declared_schema_rejects_undeclared_nested_keys(tmp_path):
+    """A declared struct<a> silently dropped m.b: the row succeeded and b was lost. An undeclared
+    key at any depth (inside lists too) is refused like a top-level one, naming the key."""
+    import asyncio
+
+    import pytest
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    schema = pa.schema([("id", pa.string()), ("error", pa.string()),
+                        ("m", pa.struct([("a", pa.int64())])),
+                        ("items", pa.list_(pa.struct([("k", pa.string())])))])
+    sink = ParquetSink(str(tmp_path), flush_every=1, schema=schema)
+    rows = [Done("ok", {}, {"m": {"a": 1}, "items": [{"k": "x"}]}, None, {}),
+            Done("nested", {}, {"m": {"a": 1, "b": "lost"}}, None, {}),
+            Done("in-list", {}, {"items": [{"k": "x", "z": 2}]}, None, {})]
+    stats = asyncio.run(drain(iter_async(rows), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (1, 2)
+    assert sink.existing_ids(retry_errors=True) == {"ok"}
+    with pytest.raises(ValueError, match=r"m\.b"):
+        sink.probe({"id": "x", "m": {"a": 1, "b": "lost"}, "error": None})
+    with pytest.raises(ValueError, match=r"items\[\]\.z"):
+        sink.append({"id": "y", "items": [{"k": "x", "z": 2}], "error": None})
+
+
+def test_an_untyped_nested_field_does_not_clash_within_one_batch(tmp_path):
+    """m is not pinned yet. m.new arrives as [] (no type: never written), then as "x" in the
+    same batch. Both probe and flush compared the raw list<null> with string and refused the
+    second row."""
+    import asyncio
+
+    from saturate import ParquetSink
+    from saturate.core import Done
+    from saturate.sink import drain
+
+    rows = [Done("a", {}, {"m": {"new": [], "k": 1}}, None, {}),
+            Done("b", {}, {"m": {"new": "x", "k": 2}}, None, {})]
+    sink = ParquetSink(str(tmp_path), flush_every=10)
+    stats = asyncio.run(drain(iter_async(rows), sink))
+    assert (stats.rows_processed, stats.rows_failed) == (2, 0)
+    direct = ParquetSink(str(tmp_path / "direct"), flush_every=10)
+    direct.append({"id": "a", "m": {"new": [], "k": 1}, "error": None})
+    direct.append({"id": "b", "m": {"new": "x", "k": 2}, "error": None})
+    direct.flush()
+    assert direct.rows_demoted == 0
+    assert dict(read_output(str(tmp_path / "direct")))["b"] == {"m": {"new": "x", "k": 2}}
+
+
+def test_a_struct_with_a_repeated_field_name_is_an_error_row(tmp_path):
+    """A dict cannot repeat a key, but an Arrow StructScalar can repeat a field name. A cast
+    would keep one of the two values without a word, so the row is an error row instead."""
+    from saturate import ParquetSink
+
+    repeated = pa.StructArray.from_arrays([pa.array([1]), pa.array([2])], names=["x", "x"])[0]
+    sink = ParquetSink(str(tmp_path), flush_every=1)
+    sink.append({"id": "first", "m": {"x": 0}, "error": None})
+    sink.append({"id": "repeated", "m": repeated, "error": None})
+    rows = {r["id"]: r for r in _read_whole_dir(tmp_path)[0].to_pylist()}
+    assert rows["first"]["m"] == {"x": 0}
+    assert rows["repeated"]["m"] is None
+    assert "repeated field name" in rows["repeated"]["error"]
+    assert sink.rows_demoted == 1

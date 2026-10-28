@@ -54,9 +54,18 @@ Success rows: `{id, <parse columns…>, error: null}`. Error rows: `{id, error}`
 columns null. Schema stability: once a column's type is first seen, **every subsequent part
 carries the full schema** (absent values as typed nulls); a column whose values are all null
 before its type is ever seen is absent from those early parts, so readers doing strict
-unions should expect nullable user columns. For a fixed schema from part one, declare it —
+unions should expect nullable user columns. Struct columns follow the same rule one level
+down: a struct field seen only as null (or as empty lists) is left out of the part, and a
+field first seen in a later part — typed for the first time, or a new key — is appended to
+the struct from that part on. **No part ever carries a null-typed column or field**, and a
+pinned type, top level or nested, never changes, so every part reads beside every other:
+`pq.read_table(dir)` and `pyarrow.dataset` never fail on a type mismatch. They take the
+schema of the first part they open, though, so columns and struct fields added by later
+parts are dropped from that read; read every field with the parts' unified schema
+(`ds.dataset(dir, schema=pa.unify_schemas([pq.read_schema(p) for p in parts]))`),
+`read_output`, or DuckDB `union_by_name`. For a fixed schema from part one, declare it —
 `pump(schema=...)` — every part is cast to it, and a row carrying fields outside the
-declared schema becomes an error row (§4; a direct sink append raises instead). Without a
+declared schema (at any depth, inside lists too) becomes an error row (§4; a direct sink append raises instead). Without a
 declared schema, a row whose value does not widen losslessly into an already-pinned column
 type (§8) likewise becomes an error row — at flush, whichever way it was appended. The library itself writes no token/latency columns — they
 appear when your `parse` emits them. Standard names when written: `prompt_tokens`,
@@ -172,12 +181,15 @@ counted). `input_bound` is true when any tick's `input_bound` was true.
 ## 8. Non-guarantees
 
 No output ordering · no dedup beyond `id` · no schema migration (keep `parse` types stable
-per output dir; a pinned column type never moves and is read back from the newest readable
+per output dir; an output dir written before null-typed fields were left out of parts can
+hold such fields on disk, and a whole-folder read of it can still fail; a pinned column type never moves and is read back from the newest readable
 existing part on resume — a value of the same kind that fits is accepted and cast (an int
 into a double or int32 column, `[1]` into a `list<double>` column, a struct missing a pinned
-field), any other type change (a float into an int column, an int into a string column, a
-struct field the pin lacks, an int that overflows) becomes an error row at flush, never a
-raise; a column seen only as nulls or empty lists is not pinned until a typed value arrives;
+field), a struct field the pin lacks extends the pinned struct (§1), any other type change (a
+float into an int column, an int into a string column or struct field, an int that
+overflows) becomes an error row at flush, never a raise; a column or struct field seen only
+as nulls or empty lists is not pinned until a typed value arrives, and only rows that are
+written shape the pin — a row demoted to an error row never does;
 K shards writing one output dir concurrently each pin from their own first rows, so fan-out
 with a dynamic schema can leave parts that disagree — a declared schema is the fully stable
 option and the right one for fan-out) · one request per row (rollouts/trajectories are a different primitive) ·

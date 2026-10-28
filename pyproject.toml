@@ -9,7 +9,7 @@ authors = [{ name = "Daniel van Strien" }]
 dependencies = [
     "anyio>=4.15.1",  # CapacityLimiter: 4.14.2/4.15.0 fixed over-admission on resize and release
     "aiohttp>=3.14.4",  # the HTTP client (saturate/http.py); vLLM requires >=3.14.3
-    "pyarrow>=19",
+    "pyarrow>=21",  # struct casts match fields by name (schema.cast_columns, ParquetSink._conform)
     "fsspec>=2024.3",
 ]
 

@@ -159,6 +159,8 @@ def main() -> None:
     ap.add_argument("--write-delay-ms", type=float, default=0.0,
                     help="slowmem: milliseconds each write takes")
     ap.add_argument("--flush-every", type=int, default=None)
+    ap.add_argument("--signal-source", choices=["auto", "none"], default="auto",
+                    help="'none' never reads the engine's metrics (blind mode)")
     args = ap.parse_args()
 
     if args.window == "auto":
@@ -183,7 +185,7 @@ def main() -> None:
     stats = pump(rows, make_to_request(args.prep_ms, args.prep_kind, args.model, args.max_tokens),
                  make_parse(args.parse_ms),
                  endpoint=args.endpoint, output=out_uri, window=window, flush_every=args.flush_every,
-                 prepare_workers=args.prepare_workers, fail_fast=0)
+                 prepare_workers=args.prepare_workers, fail_fast=0, signal_source=args.signal_source)
     wall = time.perf_counter() - t0
     cpu = time.process_time() - cpu0
     watcher.stop()

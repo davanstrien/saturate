@@ -211,12 +211,12 @@ def test_a_large_model_with_a_full_kv_cache_and_no_preemption_is_not_cut():
 
 
 @pytest.mark.parametrize("past", [160, 192])
-def test_preemptions_set_a_ceiling_under_which_the_window_stays(past):
-    """Past `past` requests the engine preempts and throughput falls: the first preemption
-    remembers the window as a ceiling, so the window does not keep climbing into preemption."""
+def test_an_engine_that_preempts_is_cut_back_from_preemption(past):
+    """Past `past` requests the engine preempts and throughput falls: with the cache full and
+    preemptions counted, cut:kv halves the window, so it does not stay in preemption."""
     curve = [(16, 10.2), (64, 25.8), (past, 29.4), (past + 96, 22.0)]
     got = shares(lambda seed: kv_engine(seed, curve=curve, preempt_past=past))
-    assert statistics.mean(got) >= 0.82 and min(got) >= 0.78, sorted(got)[:3]
+    assert statistics.mean(got) >= 0.85 and min(got) >= 0.8, sorted(got)[:3]
 
 
 def test_an_engine_that_does_not_count_preemptions_is_still_cut_on_a_full_kv_cache():

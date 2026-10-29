@@ -797,46 +797,52 @@ def test_evidence_counts_only_the_completions_of_the_samples_kept():
     assert ctrl.evidence(ctrl.state, limit) is None
 
 
+FULL = dict(kv=0.99, hits=0.0)  # a full KV cache, unique prompts
+
+
 def test_preemptions_are_counted_from_the_first_reading_and_a_reset_is_not_a_preemption():
     """The engine's counter is cumulative: its first reading is the baseline (preemptions
     before this run are not this window's), and a counter that goes down (a restarted engine)
-    counts none. Preemptions on bp_frac of the tick's outcomes set a ceiling, as a 429 does."""
+    counts none. A full cache with a preemption this tick halves the window."""
     ctrl = Auto(target_waiting=8, initial=64, step=STEP)
-    ctrl.decide(healthy(64, preempts=500), 64)
+    ctrl.decide(healthy(64, preempts=500, **FULL), 64)
     assert ctrl.state.preempted == 0 and ctrl.last_reason != "cut:kv"
-    ctrl.decide(healthy(64, preempts=3), 64)
-    assert ctrl.state.preempted == 0
-    new = ctrl.decide(healthy(64, preempts=103), 64)  # 100 of 356 outcomes
-    assert ctrl.state.preempted == 100 and ctrl.last_reason == "cut:kv" and new == 32
-    assert ctrl.state.ceiling is not None and ctrl.state.ceiling.limit == 64
+    ctrl.decide(healthy(64, preempts=3, **FULL), 64)
+    assert ctrl.state.preempted == 0 and ctrl.last_reason != "cut:kv"
+    new = ctrl.decide(healthy(64, preempts=4, **FULL), 64)
+    assert (ctrl.state.preempted, ctrl.last_reason, new) == (1, "cut:kv", 32)
 
 
-def test_an_occasional_preemption_is_not_a_cut():
-    """One preemption among hundreds of completions, now and then, is a busy engine: the window
-    is kept (a cut each time would walk it down to the floor)."""
+def test_a_full_kv_cache_without_preemptions_is_not_a_cut_where_they_are_counted():
     ctrl = Auto(target_waiting=8, initial=64, step=STEP)
-    limit = 64
-    for tick in range(200):
-        limit = ctrl.decide(healthy(limit, preempts=tick // 20), limit)
-        assert ctrl.last_reason != "cut:kv", tick
-    assert limit >= 64
+    for _ in range(5):
+        ctrl.decide(healthy(64, preempts=7, **FULL), 64)
+        assert ctrl.last_reason != "cut:kv"
+
+
+def test_a_preemption_with_room_in_the_cache_is_not_a_cut():
+    """A preemption while KV is low (another client's burst passed) is not this window's limit."""
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    ctrl.decide(healthy(64, preempts=0), 64)
+    ctrl.decide(healthy(64, preempts=5), 64)
+    assert ctrl.last_reason != "cut:kv"
 
 
 def test_preemptions_during_a_cooldown_are_not_charged_to_the_next_window():
     """A cut's cooldown sees the old window drain: preemptions then belong to it. The counter's
     baseline moves every tick, so the first tick after the cooldown counts only its own."""
     ctrl = Auto(target_waiting=8, initial=64, step=STEP)
-    ctrl.decide(healthy(64, preempts=0), 64)
-    limit = ctrl.decide(healthy(64, preempts=200), 64)
+    ctrl.decide(healthy(64, preempts=0, **FULL), 64)
+    limit = ctrl.decide(healthy(64, preempts=10, **FULL), 64)
     assert (ctrl.last_reason, limit) == ("cut:kv", 32)
-    count, cooled = 200, 0
+    count, cooled = 10, 0
     while isinstance(ctrl.state.phase, Settling) and ctrl.state.clock + TICK_S <= ctrl.state.phase.until:
-        count += 100  # the draining old window keeps preempting
-        limit = ctrl.decide(healthy(limit, preempts=count), limit)
+        count += 10  # the draining old window keeps preempting
+        limit = ctrl.decide(healthy(limit, preempts=count, **FULL), limit)
         assert ctrl.last_reason == "hold:cooldown"
         cooled += 1
     assert cooled >= 1
-    limit = ctrl.decide(healthy(limit, preempts=count), limit)  # the new window: no preemption
+    limit = ctrl.decide(healthy(limit, preempts=count, **FULL), limit)  # the new window: none
     assert ctrl.last_reason != "cut:kv" and limit == 32
 
 
@@ -844,7 +850,7 @@ def test_a_gap_in_the_counter_starts_a_new_baseline():
     """A reading missing (the scrape failed) between two counts: what happened in the gap is
     not charged to the window that follows it."""
     ctrl = Auto(target_waiting=8, initial=64, step=STEP)
-    ctrl.decide(healthy(64, preempts=100), 64)
-    ctrl.decide(healthy(64, preempts=None), 64)
-    ctrl.decide(healthy(64, preempts=900), 64)
+    ctrl.decide(healthy(64, preempts=100, **FULL), 64)
+    ctrl.decide(healthy(64, preempts=None, kv=None, hits=None), 64)
+    ctrl.decide(healthy(64, preempts=900, **FULL), 64)
     assert ctrl.state.preempted == 0 and ctrl.last_reason != "cut:kv"

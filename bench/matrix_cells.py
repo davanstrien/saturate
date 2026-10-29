@@ -120,19 +120,21 @@ def complete(record: dict) -> bool:
 
 
 def summarise(paths: list[str]) -> None:
-    """Per cell and saturate revision: Auto's median rows/s over the best Fixed window's median
-    rows/s (medians over rounds for both), and where Auto settled. Failed or incomplete runs
-    are left out and counted."""
+    """Per cell, saturate revision and harness revision: Auto's median rows/s over the best
+    Fixed window's median rows/s (medians over rounds for both), and where Auto settled.
+    Failed or incomplete runs are left out and counted."""
     runs = collections.defaultdict(list)
     for path in paths:
         with open(path) as f:
             for line in f:
                 if line.strip():
                     record = json.loads(line)
-                    runs[(record["cell"], record.get("saturate", ""))].append(record)
-    print(f"{'cell':22} {'saturate':9} {'auto rows/s':>11} {'best fixed':>16} {'ratio':>6}  "
+                    key = (record["cell"], record.get("saturate", ""), record.get("harness", ""))
+                    runs[key].append(record)
+    print(f"{'cell':22} {'sat/harness':15} {'auto rows/s':>11} {'best fixed':>16} {'ratio':>6}  "
           "settles  cuts  dropped")
-    for (cell, revision), records in sorted(runs.items()):
+    for (cell, revision, harness), records in sorted(runs.items()):
+        version = f"{revision}/{harness}"
         dropped = sum(not complete(r) for r in records if r["arm"] != "warmup")
         by_arm = collections.defaultdict(list)
         for r in records:
@@ -141,7 +143,7 @@ def summarise(paths: list[str]) -> None:
         auto = by_arm.pop("auto", [])
         fixed = {arm: statistics.median(r["rows_per_s"] for r in rs) for arm, rs in by_arm.items()}
         if not auto or not fixed:
-            print(f"{cell:22} {revision:9} incomplete ({len(auto)} auto runs, {len(fixed)} fixed windows)")
+            print(f"{cell:22} {version:15} incomplete ({len(auto)} auto runs, {len(fixed)} fixed windows)")
             continue
         auto_rate = statistics.median(r["rows_per_s"] for r in auto)
         best_arm = max(fixed, key=fixed.get)
@@ -149,7 +151,7 @@ def summarise(paths: list[str]) -> None:
         cuts = collections.Counter()
         for r in auto:
             cuts.update(r.get("cut_reasons") or {})
-        print(f"{cell:22} {revision:9} {auto_rate:11.1f} {best_arm:>9} {fixed[best_arm]:6.1f} "
+        print(f"{cell:22} {version:15} {auto_rate:11.1f} {best_arm:>9} {fixed[best_arm]:6.1f} "
               f"{auto_rate / fixed[best_arm]:6.0%}  {settles}  {dict(cuts)}  {dropped}")
 
 

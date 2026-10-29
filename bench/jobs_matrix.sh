@@ -32,7 +32,8 @@ SHA=$(git rev-parse --short HEAD)
 echo "saturate at $SHA"
 uv venv -q --python 3.12 /work/v && uv pip install -q --python /work/v/bin/python ".[hf]" pillow
 git checkout -q "$HARNESS_REF"  # bench/ itself (saturate is installed, not run from the tree)
-echo "harness at $(git rev-parse --short HEAD)"
+HARNESS=$(git rev-parse --short HEAD)
+echo "harness at $HARNESS"
 
 n=0
 until curl -sf localhost:8000/health >/dev/null; do
@@ -44,7 +45,7 @@ echo "engine ready"
 out="/tmp/${CELL}.jsonl"
 eval "set -- $CELL_ARGS"  # CELL_ARGS is shell-quoted (shlex.join in matrix_cells.py)
 /work/v/bin/python bench/matrix.py --cell "$CELL" --endpoint http://127.0.0.1:8000/v1 --model "$MODEL" \
-  --label "$SHA" --out "$out" "$@" || { tail -c 4000 /tmp/engine.log; exit 1; }
+  --label "$SHA" --harness "$HARNESS" --out "$out" "$@" || { tail -c 4000 /tmp/engine.log; exit 1; }
 
 /work/v/bin/python bench/matrix_cells.py summarise "$out"
 if [ -n "${HF_TOKEN:-}" ]; then

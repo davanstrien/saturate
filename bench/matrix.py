@@ -23,6 +23,7 @@ import base64
 import glob
 import io
 import json
+import os
 import random
 import statistics
 import tempfile
@@ -36,9 +37,10 @@ WORDS = ("archive ledger river harbour engine signal library county parish volum
 
 
 def make_rows(args, label: str, rep: int) -> list[dict]:
-    """Rows for one run. The run's tag leads every text (and seeds every image), so no run
-    reuses another run's prefix or image cache: each arm sees the engine's caches alike."""
-    run = f"{label}-{rep}"
+    """Rows for one run. The run's tag (with a nonce per invocation) leads every text and seeds
+    every image, so no run reuses another run's prefix or image cache, in this invocation or an
+    earlier one against the same engine: each arm sees the engine's caches alike."""
+    run = f"{args.nonce}-{label}-{rep}"
     rows = []
     for i in range(args.rows):
         row = {"id": f"{run}-{i}", "i": i, "seed": zlib.crc32(f"{run}-{i}".encode())}
@@ -124,7 +126,7 @@ def one_run(args, label: str, window, rep: int) -> dict:
               "wall_s": round(wall, 1), "rows_per_s": round(stats.rows_processed / wall, 2),
               "tok_s": stats.tokens_per_sec, "final_limit": stats.final_limit,
               "cut_reasons": stats.cut_reasons, "bound_by": stats.bound_by, "hints": stats.hints,
-              "saturate": args.label, **telemetry_summary(out_dir)}
+              "saturate": args.label, "harness": args.harness, **telemetry_summary(out_dir)}
     print(json.dumps(record), flush=True)
     with open(args.out, "a") as f:
         f.write(json.dumps(record) + "\n")
@@ -151,8 +153,10 @@ def main() -> None:
                     help="Fixed windows to sweep, comma-separated")
     ap.add_argument("--no-warmup", action="store_true")
     ap.add_argument("--label", default="", help="recorded as `saturate`: the version under test")
+    ap.add_argument("--harness", default="", help="recorded as `harness`: the bench/ revision")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
+    args.nonce = os.urandom(4).hex()
 
     if not args.no_warmup:
         one_run(args, "warmup", Fixed(32), 0)

@@ -1,6 +1,7 @@
-"""Codex r3 #6 / r5 #5: a readiness failure inside Engine.__enter__ previously
-leaked the spawned server (own session, __exit__ never ran), and teardown only
-waited on the group leader. The GROUP is the teardown unit."""
+"""A readiness failure inside Engine.__enter__ tears down the spawned server: Python does not
+call __exit__ when __enter__ raises, so __enter__ calls it itself (the server runs in its own
+session). The GROUP is the teardown unit: teardown kills every member of the process group,
+not only the leader."""
 
 import os
 import socket
@@ -20,9 +21,8 @@ def test_failed_boot_kills_process_group():
 
 
 def test_accept_validator_gates_readiness(monkeypatch):
-    """Codex r6 blocker #5: route=/payload= alone still accepted a 404 — the
-    accept= predicate makes readiness require the workload's expected answer,
-    while the default keeps the documented alive-only semantics."""
+    """route=/payload= alone accepts a 404 as ready. The accept= predicate makes readiness
+    require the workload's expected answer; the default keeps the alive-only semantics."""
     import saturate.engine as engmod
     from saturate import wait_for_health
 
@@ -36,12 +36,12 @@ def test_accept_validator_gates_readiness(monkeypatch):
         wait_for_health("http://x/v1", timeout_s=1, poll_interval=0.05,
                         route="/embeddings", payload={"input": "hi"},
                         accept=lambda r: r.status_code == 200)
-    # default semantics unchanged: a live server answering 404 counts as alive
+    # default readiness: a live server answering 404 counts as alive
     wait_for_health("http://x/v1", timeout_s=5, poll_interval=0.05)
 
 
 def test_group_members_killed_when_leader_exits():
-    """r5: leader exits immediately, leaving a SIGTERM-ignoring child in the
+    """The leader exits immediately, leaving a SIGTERM-ignoring child in the
     group — teardown must sweep the group, not just wait on the leader."""
     eng = Engine(model="x", cmd=["sh", "-c", "(trap '' TERM; sleep 60) & exit 0"],
                  boot_timeout=5, port=59998)

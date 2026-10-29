@@ -1,4 +1,4 @@
-"""Codex r3 findings #11/#12: Retry-After sleeps are capped by the retry
+"""Retry-After sleeps are capped by the retry
 budget (a 3600s header must not overrun RETRY_BUDGET_S); multipart requests
 never retry (their file objects are consumed — a re-send posts empty bodies)."""
 
@@ -57,18 +57,18 @@ def test_retry_after_capped_by_budget(monkeypatch):
         Breaker(), _Observed()))
     assert body is None and "429" in err
     assert time.monotonic() - t0 < 2.0  # not the header's 3600s
-    assert client.posts == 1  # r4: the budget-capped sleep must not buy another request
+    assert client.posts == 1  # the budget-capped sleep does not buy another request
 
 
 @pytest.mark.internals
 def test_retry_attempts_get_budget_capped_timeouts(monkeypatch):
-    """Codex r5 blocker #2: a retry starting with little budget left must not
+    """A retry starting with little budget left does not
     inherit the client's full 1800s read window — its timeout is capped to the
     remaining budget. The first attempt keeps the full window (long generations
     are legitimate, the budget governs retrying)."""
     monkeypatch.setattr(transport, "RETRY_BUDGET_S", 1.0)
     # backoff draws up to BACKOFF_BASE_S; at the default 1 s a single draw could spend the whole
-    # 1 s budget and leave no retry to inspect (it did, on a slow CI runner)
+    # 1 s budget and leave no retry to inspect (a slow runner can take that long)
     monkeypatch.setattr(transport, "BACKOFF_BASE_S", 0.01)
     client = _Client(_Resp(500))
     body, err = asyncio.run(call_endpoint(
@@ -96,8 +96,9 @@ def test_a_retry_keeps_the_configured_phase_timeouts_under_its_budget(monkeypatc
 
 @pytest.mark.internals
 def test_no_timeout_floor_below_budget(monkeypatch):
-    """Codex r6 blocker #2: max(1.0, remaining) granted a full second when only
-    milliseconds remained. Retry timeouts must be the exact remaining budget."""
+    """Retry phase timeouts are capped at the remaining budget, with no floor (shorter
+    configured limits stay in effect): a 1 s minimum would grant a full second when only
+    milliseconds remain."""
     monkeypatch.setattr(transport, "RETRY_BUDGET_S", 0.05)
     client = _Client(_Resp(429, {"retry-after": "0"}))  # zero backoff: attempts spin freely
     body, err = asyncio.run(call_endpoint(
@@ -109,8 +110,8 @@ def test_no_timeout_floor_below_budget(monkeypatch):
 
 @pytest.mark.internals
 def test_breaker_open_time_credited_back_to_budget(monkeypatch):
-    """Codex r6 blocker #2: the docstring promises breaker-open waits don't
-    consume row budgets — now the code makes it true (t0 is credited)."""
+    """Breaker-open waits do not consume row budgets: the wait is credited back to t0, so a
+    retry survives two breaker waits that are each longer than the whole budget."""
     monkeypatch.setattr(transport, "RETRY_BUDGET_S", 0.05)
 
     class SlowGate(Breaker):
@@ -206,9 +207,9 @@ def test_redirect_is_poison_not_pressure():
 
 @pytest.mark.internals
 def test_a_row_that_always_fails_counts_as_backpressure_once(monkeypatch):
-    """Every failed attempt used to add backpressure, so one row that always returns 500
-    (an image the model's processor rejects) cut the window on each of its retries and a 1%
-    poison rate held it at the floor. The row now counts once; the breaker sees every attempt."""
+    """A row that always returns 500 (an image the model's processor rejects) reports
+    backpressure once, not once per attempt, so its retries do not multiply the controller's
+    backpressure signal. The breaker sees every attempt."""
     monkeypatch.setattr(transport, "RETRY_BUDGET_S", 30.0)
 
     async def no_sleep(_):
@@ -231,8 +232,8 @@ def test_a_row_that_always_fails_counts_as_backpressure_once(monkeypatch):
 
 @pytest.mark.internals
 def test_retry_after_is_jittered_so_rows_do_not_wake_together(monkeypatch):
-    """Rows told the same Retry-After used to sleep exactly that long and hit the server in
-    one burst. The wait is now the header's value times uniform(1, 1.2)."""
+    """Rows told the same Retry-After wait the header's value times uniform(1, 1.2), so they
+    do not all wake at once and hit the server in one burst."""
     monkeypatch.setattr(transport, "RETRY_BUDGET_S", 30.0)
     waits = []
 

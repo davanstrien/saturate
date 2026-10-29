@@ -52,7 +52,7 @@ class Engine:
         self.extra_args = extra_args or []
         self.boot_timeout = boot_timeout
         self.cmd = cmd  # full command override (e.g. sgl-omni, vendor images)
-        self.ready_route, self.ready_payload = ready_route, ready_payload  # workload probe (r5)
+        self.ready_route, self.ready_payload = ready_route, ready_payload  # workload probe
         self.ready_accept = ready_accept  # response validator, e.g. lambda r: r.status_code == 200
         self.proc: subprocess.Popen | None = None
 
@@ -89,14 +89,14 @@ class Engine:
                 os.killpg(pgid, signal.SIGTERM)
                 self.proc.wait(timeout=30)
             except ProcessLookupError:
-                pass  # r6: group exited between poll() and the signal — that IS teardown
+                pass  # the group exited between poll() and the signal: that is teardown
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(pgid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
         self.proc.wait()  # reap the leader so a zombie can't hold the group open below
-        for _ in range(50):  # r5: the GROUP is the teardown unit — a leader that exited on
+        for _ in range(50):  # the GROUP is the teardown unit: a leader that exited on
             try:            # SIGTERM can leave children behind; kill and confirm they're gone
                 os.killpg(pgid, signal.SIGKILL)
             except ProcessLookupError:
@@ -120,7 +120,7 @@ def wait_for_health(endpoint: str, timeout_s: int = 1800, proc: subprocess.Popen
     "this workload works" — a 404/400 is a live server. To gate on the workload
     itself, pass route=/payload= AND accept= (a response predicate, e.g.
     `lambda r: r.status_code == 200`) — readiness then requires YOUR route to
-    answer the way you expect (r6)."""
+    answer the way you expect."""
     base = endpoint.rsplit("/v1", 1)[0]
     deadline = time.time() + timeout_s
     ok_streak = 0

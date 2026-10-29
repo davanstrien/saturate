@@ -233,12 +233,12 @@ async def call_endpoint(client: HttpClient, base: str, req: Request,
 
     for attempt in range(5):
         if attempt and (not RETRY_ACTIVE or left() <= 0):
-            return None, _row_error(errors)  # hard wall-clock deadline: no attempt starts past it (r6)
+            return None, _row_error(errors)  # hard wall-clock deadline: no attempt starts past it
         if attempt:
             observe(Attempt(retry=True))
         g0 = time.monotonic()
         await breaker.gate(client, url, (req.json or {}).get("model"))  # an open breaker pauses retries too
-        t0 += time.monotonic() - g0  # r6: breaker-open time never consumes the row budget (docstring)
+        t0 += time.monotonic() - g0  # breaker-open time never consumes the row budget
         a0 = time.monotonic()
         try:
             result = _read(await _send(client, url, req, retry=attempt > 0, left=left()))

@@ -95,7 +95,7 @@ class ParquetSink:
         self.read_workers = read_workers  # resume read concurrency; 1 = sequential
         self._buf: list[dict] = []
         self._buf_since: float | None = None  # monotonic time of the oldest buffered row
-        # declared mode (r5): an immutable schema every part is cast to — the only fully
+        # declared mode: an immutable schema every part is cast to — the only fully
         # schema-stable option for arbitrary parse output. Must carry contract-typed id + error.
         if schema is not None:
             if not {"id", "error"} <= set(schema.names):
@@ -104,7 +104,7 @@ class ParquetSink:
                     or not schema.field("error").nullable):
                 raise ValueError("declared schema: id and error must be string, error nullable")
             bad = [f.name for f in schema if f.name != "id" and not f.nullable]
-            if bad:  # r7: error rows write user fields as null — non-nullable would crash the flush
+            if bad:  # error rows write user fields as null: a non-nullable field would crash the flush
                 raise ValueError(f"declared schema: fields must be nullable (error rows are sparse): {bad}")
         self._declared = schema
         # dynamic mode: pinned at first sight, extended by new columns and new nested fields
@@ -601,7 +601,7 @@ def as_sink(output, flush_every: int | None = None, schema: pa.Schema | None = N
     existing_ids/append/flush passes through."""
     if isinstance(output, (str, Path)):
         return ParquetSink(str(output), flush_every, schema=schema)
-    if schema is not None:  # r6: never silently ignore a declared schema
+    if schema is not None:  # a declared schema is never silently ignored
         raise ValueError("schema= applies to ParquetSink outputs; pass it to your sink directly")
     return output
 

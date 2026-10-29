@@ -298,7 +298,9 @@ def slow_to_request(row):
 def test_prepare_stage_offloads_to_request_and_the_verdict_names_it(stub, tmp_path, monkeypatch):
     """to_request at 50 ms/row on the loop serialises the pump: the endpoint idles and the
     ticks say `prep`. prepare_workers=4 runs it ahead in threads, the window fills, the run is
-    at least 2x faster, and the ticks stop blaming prep."""
+    at least 1.5x faster, and the ticks stop blaming prep. (About 3x on an idle machine: 3.0 s
+    of to_request on the loop against about 1.2 s with four threads. A loaded machine measured
+    1.95x; an offload that does nothing is about 1x.)"""
     stub.latency_s = 0.2
     timings = {}
     for workers in (0, 4):
@@ -324,7 +326,7 @@ def test_prepare_stage_offloads_to_request_and_the_verdict_names_it(stub, tmp_pa
             assert not any(h.startswith("PREP-BOUND") for h in stats.hints), stats.hints
     print(f"prepare_workers=0: {timings[0]:.2f}s  prepare_workers=4: {timings[4]:.2f}s  "
           f"speedup {timings[0] / timings[4]:.1f}x")
-    assert timings[0] >= 2 * timings[4], timings
+    assert timings[0] >= 1.5 * timings[4], timings
 
 
 def test_window_ramps_and_endpoint_sees_concurrency(stub, tmp_path):

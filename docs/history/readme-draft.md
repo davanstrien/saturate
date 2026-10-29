@@ -22,13 +22,13 @@ The most common shape — boot the model and pump a dataset through it, all in o
 ```python
 from pumpjack import pump, Engine
 
-with Engine("lightonai/LightOnOCR-2-1B", engine="vllm") as endpoint:  # vllm | sglang | llamacpp
+with Engine("lightonai/LightOnOCR-2-1B", engine="vllm") as endpoint:   # vllm | sglang | llamacpp
     stats = pump(
-        rows,  # any iterable of dicts — streams, never materializes
-        to_request=lambda row: {...},  # row -> OpenAI-style request body
-        parse=lambda row, resp: {...},  # response -> your output columns
+        rows,                              # any iterable of dicts — streams, never materializes
+        to_request=lambda row: {...},      # row -> OpenAI-style request body
+        parse=lambda row, resp: {...},     # response -> your output columns
         endpoint=endpoint,
-        output="hf://datasets/you/results/data",  # or a local path, or hf://buckets/...
+        output="hf://datasets/you/results/data",   # or a local path, or hf://buckets/...
     )
 print(stats.rows_processed, stats.tokens_per_sec)
 ```
@@ -73,12 +73,12 @@ stream lands.
 ```python
 from pumpjack import AdaptiveClient, Auto, stream, skip_done, through, drain
 
-rows = stream(load_dataset("...", streaming=True))  # (id, row) pairs, lazy
-rows = skip_done(rows, sink)  # exact resume filter
+rows = stream(load_dataset("...", streaming=True))     # (id, row) pairs, lazy
+rows = skip_done(rows, sink)                            # exact resume filter
 
 async with AdaptiveClient(endpoint, window=Auto()) as client:
     results = through(client, rows, to_request, parse)  # unordered async map, adaptive
-    stats = await drain(results, sink)  # parquet + manifest + markers
+    stats = await drain(results, sink)                  # parquet + manifest + markers
 
 # chaining is just more piping — e.g. OCR then judge:
 #   pages -> through(ocr_client, ...) -> drain(stage1_out)
@@ -109,7 +109,8 @@ Two sinks ship with that contract:
   next run — there's no error record. That's the trade.)
 
 ```python
-stats = pump(pages, to_request, parse, endpoint, output=FileSink("ocr-out/", ext=".md", key="markdown"))
+stats = pump(pages, to_request, parse, endpoint,
+             output=FileSink("ocr-out/", ext=".md", key="markdown"))
 ```
 
 Or skip sinks entirely and consume the stream yourself — no resume, full freedom:
@@ -123,9 +124,9 @@ Embedding just the adaptive part in your own stack (your IO, your loop, your tra
 this is the datatrove-shaped seam):
 
 ```python
-limiter = AdaptiveLimiter(window=Auto())  # a drop-in for your fixed semaphore
+limiter = AdaptiveLimiter(window=Auto())          # a drop-in for your fixed semaphore
 async with limiter.slot():
-    result = await your_send(payload)  # your client, unchanged
+    result = await your_send(payload)             # your client, unchanged
 limiter.observe(ok=True, tokens=n)
 ```
 
@@ -134,7 +135,7 @@ limiter.observe(ok=True, tokens=n)
 K Jobs, one output directory, no coordinator:
 
 ```python
-rows = shard_select(stream(source), rank=RANK, world=4)  # strided, disjoint by construction
+rows = shard_select(stream(source), rank=RANK, world=4)   # strided, disjoint by construction
 stats = pump(rows, to_request, parse, endpoint, output, shard=(RANK, 4))
 ```
 
@@ -146,14 +147,9 @@ when finished (datatrove's marker convention — a coordinator can watch the dir
 Same client, different route — a "row" can be a pre-grouped batch:
 
 ```python
-stats = pump(
-    batches,
-    to_request=lambda b: {"model": "m", "input": b["texts"]},
-    parse=parse_embeddings,
-    endpoint=endpoint,
-    output=output,
-    route="/embeddings",
-)
+stats = pump(batches, to_request=lambda b: {"model": "m", "input": b["texts"]},
+             parse=parse_embeddings, endpoint=endpoint, output=output,
+             route="/embeddings")
 ```
 
 ## Running under an agent

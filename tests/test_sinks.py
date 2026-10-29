@@ -34,26 +34,45 @@ def test_filesink_rejects_unsafe_ids_and_writes_atomically(tmp_path):
     assert not list((tmp_path / "out").glob("*.tmp"))  # atomic replace leaves no temp files
 
 
-def test_filesink_unwritable_rows_become_error_rows_through_pump(tmp_path):
-    """Through pump(), a row FileSink cannot write (an unsafe id, or no `key` field in its
-    record) is an error row, and the other rows land: the run does not abort."""
+def _filesink_pump(rows, parse, out):
     from stub_server import StubServer
 
     from saturate import Fixed, pump
 
-    rows = [{"id": "ok-1"}, {"id": "a/b"}, {"id": "no-key"}, {"id": "ok-2"}]
-
     def to_request(row):
         return {"model": "stub", "messages": [{"role": "user", "content": row["id"]}]}
 
-    def parse(row, body):
-        return {} if row["id"] == "no-key" else {"text": body["choices"][0]["message"]["content"]}
-
     with StubServer() as stub:
-        stats = pump(rows, to_request, parse, endpoint=stub.endpoint, output=FileSink(tmp_path / "out"),
-                     window=Fixed(2), id_key="id", fail_fast=0)
-    assert (stats.rows_processed, stats.rows_failed) == (2, 2)
+        return pump(rows, to_request, parse, endpoint=stub.endpoint, output=FileSink(out),
+                    window=Fixed(2), id_key="id")
+
+
+def test_filesink_unwritable_rows_become_error_rows_through_pump(tmp_path, caplog):
+    """Through pump(), a row FileSink cannot write (an unsafe id, or no `key` value in its
+    record) is a logged error row, and the other rows land: the run does not abort."""
+    rows = [{"id": "ok-1"}, {"id": "a/b"}, {"id": "no-key"}, {"id": "none-value"}, {"id": "ok-2"}]
+
+    def parse(row, body):
+        if row["id"] == "no-key":
+            return {}
+        if row["id"] == "none-value":
+            return {"text": None}
+        return {"text": body["choices"][0]["message"]["content"]}
+
+    stats = _filesink_pump(rows, parse, tmp_path / "out")
+    assert (stats.rows_processed, stats.rows_failed) == (2, 3)
     assert FileSink(tmp_path / "out").existing_ids() == {"ok-1", "ok-2"}
+    logged = [r.getMessage() for r in caplog.records if r.getMessage().startswith("FileSink: row")]
+    assert len(logged) == 3 and all("runs again next run" in m for m in logged), logged
+
+
+def test_filesink_with_a_wrong_key_stops_the_run(tmp_path):
+    """A wrong key= rejects every record: the first 32 rejected with none accepted stop the
+    run, instead of spending requests on the whole input for no files."""
+    rows = [{"id": f"r{i}"} for i in range(200)]
+    with pytest.raises(RuntimeError, match="the first 32 rows could not be written"):
+        _filesink_pump(rows, lambda row, body: {"markdown": "x"}, tmp_path / "out")
+    assert FileSink(tmp_path / "out").existing_ids() == set()
 
 
 def test_read_output_healing_rule(tmp_path):

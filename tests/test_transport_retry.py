@@ -68,7 +68,7 @@ def test_retry_attempts_get_budget_capped_timeouts(monkeypatch):
     are legitimate, the budget governs retrying)."""
     monkeypatch.setattr(transport, "RETRY_BUDGET_S", 1.0)
     # backoff draws up to BACKOFF_BASE_S; at the default 1 s a single draw could spend the whole
-    # 1 s budget and leave no retry to inspect (it did, on a slow CI runner)
+    # 1 s budget and leave no retry to inspect (a slow runner can take that long)
     monkeypatch.setattr(transport, "BACKOFF_BASE_S", 0.01)
     client = _Client(_Resp(500))
     body, err = asyncio.run(call_endpoint(
@@ -96,8 +96,9 @@ def test_a_retry_keeps_the_configured_phase_timeouts_under_its_budget(monkeypatc
 
 @pytest.mark.internals
 def test_no_timeout_floor_below_budget(monkeypatch):
-    """Retry timeouts are the exact remaining budget, with no floor: a 1 s minimum
-    (max(1.0, remaining)) would grant a full second when only milliseconds remain."""
+    """Retry phase timeouts are capped at the remaining budget, with no floor (shorter
+    configured limits stay in effect): a 1 s minimum would grant a full second when only
+    milliseconds remain."""
     monkeypatch.setattr(transport, "RETRY_BUDGET_S", 0.05)
     client = _Client(_Resp(429, {"retry-after": "0"}))  # zero backoff: attempts spin freely
     body, err = asyncio.run(call_endpoint(
@@ -206,9 +207,9 @@ def test_redirect_is_poison_not_pressure():
 
 @pytest.mark.internals
 def test_a_row_that_always_fails_counts_as_backpressure_once(monkeypatch):
-    """A row that always returns 500 (an image the model's processor rejects) adds
-    backpressure once, not on each retry: per-attempt counting would cut the window on every
-    retry, and a 1% poison rate would hold it at the floor. The breaker sees every attempt."""
+    """A row that always returns 500 (an image the model's processor rejects) reports
+    backpressure once, not once per attempt, so its retries do not multiply the controller's
+    backpressure signal. The breaker sees every attempt."""
     monkeypatch.setattr(transport, "RETRY_BUDGET_S", 30.0)
 
     async def no_sleep(_):

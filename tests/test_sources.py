@@ -149,7 +149,7 @@ def decode_counter(monkeypatch):
 
 
 def test_shard_keeps_only_its_rows_and_decodes_nothing_else(monkeypatch):
-    """Fan-out decoded every row on every shard, then threw (K-1)/K of them away (#34). With
+    """Decoding before shard selection would waste the work on (K-1)/K of the rows (#34). With
     shard= and a repo id, a row of another shard is never decoded, streaming or not. An
     already-loaded object is iterated as it is: every row is decoded, and the shards are still
     disjoint and complete."""

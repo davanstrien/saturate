@@ -52,7 +52,7 @@ class Engine:
         self.extra_args = extra_args or []
         self.boot_timeout = boot_timeout
         self.cmd = cmd  # full command override (e.g. sgl-omni, vendor images)
-        self.ready_route, self.ready_payload = ready_route, ready_payload  # workload probe (r5)
+        self.ready_route, self.ready_payload = ready_route, ready_payload  # workload probe
         self.ready_accept = ready_accept  # response validator, e.g. lambda r: r.status_code == 200
         self.proc: subprocess.Popen | None = None
 
@@ -120,7 +120,7 @@ def wait_for_health(endpoint: str, timeout_s: int = 1800, proc: subprocess.Popen
     "this workload works" — a 404/400 is a live server. To gate on the workload
     itself, pass route=/payload= AND accept= (a response predicate, e.g.
     `lambda r: r.status_code == 200`) — readiness then requires YOUR route to
-    answer the way you expect (r6)."""
+    answer the way you expect."""
     base = endpoint.rsplit("/v1", 1)[0]
     deadline = time.time() + timeout_s
     ok_streak = 0

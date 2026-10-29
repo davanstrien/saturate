@@ -1,6 +1,7 @@
-"""A readiness failure inside Engine.__enter__ tears down the spawned server, even though
-__exit__ never runs for it (the server runs in its own session). The GROUP is the teardown
-unit: teardown kills every member of the process group, not only the leader."""
+"""A readiness failure inside Engine.__enter__ tears down the spawned server: Python does not
+call __exit__ when __enter__ raises, so __enter__ calls it itself (the server runs in its own
+session). The GROUP is the teardown unit: teardown kills every member of the process group,
+not only the leader."""
 
 import os
 import socket
@@ -35,7 +36,7 @@ def test_accept_validator_gates_readiness(monkeypatch):
         wait_for_health("http://x/v1", timeout_s=1, poll_interval=0.05,
                         route="/embeddings", payload={"input": "hi"},
                         accept=lambda r: r.status_code == 200)
-    # default semantics unchanged: a live server answering 404 counts as alive
+    # default readiness: a live server answering 404 counts as alive
     wait_for_health("http://x/v1", timeout_s=5, poll_interval=0.05)
 
 

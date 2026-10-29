@@ -53,7 +53,7 @@ def test_read_output_healing_rule(tmp_path):
 
 def test_mixed_success_error_parts_union(tmp_path):
     """A dir holding success-only AND error-only parts must stay readable by
-    external consumers (the shapes-run finding: null-typed error column)."""
+    external consumers (a null-typed error column must not break the union)."""
     import pyarrow.dataset as ds
 
     from saturate import ParquetSink
@@ -230,10 +230,9 @@ def test_dynamic_type_change_becomes_error_row_at_flush(tmp_path):
 
 
 def test_dynamic_type_conflict_becomes_error_row_under_drain(tmp_path):
-    """Under drain, a row whose type conflicts with the pinned dynamic schema must
-    become a durable error row: probe() checks the pinned types, not only serializability.
-    A conflict left to surface at flush would discard the buffered rows and crash the run
-    (and every resume of it, since the same rows arrive in the same order)."""
+    """Under drain, a row whose type conflicts with the pinned dynamic schema becomes a
+    durable error row: probe() checks the pinned types before the row is buffered, not only
+    serializability, so drain counts the row as failed at once."""
     import asyncio
 
     from saturate import ParquetSink
@@ -355,10 +354,10 @@ def test_dynamic_value_rewrite_is_error_row_at_flush(tmp_path):
 
 
 def test_mixed_types_in_first_buffer_cost_one_row(tmp_path, caplog):
-    """Before any type is pinned, probe cannot see the buffer: {score: 1} then {score: "a"}
-    in ONE buffer fail batch type inference at flush. flush falls back to a per-row pass,
-    so no buffered row is lost: the first typed value pins, the conflicting row is written
-    as an error row, and the flush is logged once with the count."""
+    """{score: 1} then {score: "a"} appended directly (no probe) into ONE buffer fail batch
+    type inference at flush. flush falls back to a per-row pass, so no buffered row is lost:
+    the first typed value pins, the conflicting row is written as an error row, and the flush
+    is logged once with the count. Under drain, probe checks the buffered types first."""
     import asyncio
 
     from saturate import ParquetSink
@@ -969,9 +968,9 @@ def _flaky_open(sink, fail_times: int, monkeypatch, match: str = "part-"):
 
 
 def test_a_transient_part_write_error_is_retried_under_the_same_name(tmp_path, monkeypatch):
-    """One 503 on a part upload is retried: it does not abort the run (re-paying every request
-    in flight). The retry uses the same name, so a write that landed despite the error is
-    overwritten, not duplicated."""
+    """Transient errors on a part upload (two 503s here) are retried: they do not abort the
+    run (re-paying every request in flight). The retry uses the same name, so a write that
+    landed despite the error is overwritten, not duplicated."""
     import saturate.sink as sink_mod
     from saturate.sink import ParquetSink
 
@@ -1378,8 +1377,8 @@ def test_a_declared_schema_rejects_undeclared_nested_keys(tmp_path):
 
 def test_an_untyped_nested_field_does_not_clash_within_one_batch(tmp_path):
     """m is not pinned yet. m.new arrives as [] (no type: never written), then as "x" in the
-    same batch. Both probe and flush compared the raw list<null> with string and refused the
-    second row."""
+    same batch. Probe and flush do not compare the untyped list<null> with string, so both
+    rows are written."""
     import asyncio
 
     from saturate import ParquetSink

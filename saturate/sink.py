@@ -95,7 +95,7 @@ class ParquetSink:
         self.read_workers = read_workers  # resume read concurrency; 1 = sequential
         self._buf: list[dict] = []
         self._buf_since: float | None = None  # monotonic time of the oldest buffered row
-        # declared mode (r5): an immutable schema every part is cast to — the only fully
+        # declared mode: an immutable schema every part is cast to — the only fully
         # schema-stable option for arbitrary parse output. Must carry contract-typed id + error.
         if schema is not None:
             if not {"id", "error"} <= set(schema.names):

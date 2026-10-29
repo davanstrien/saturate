@@ -3,10 +3,9 @@
 Streaming by default. `load_dataset(streaming=True)` runs at local-SSD
 speed for exactly this access pattern — one sequential pass, no shuffle, no
 epochs (persistent file cache, bundled resolution, prefetching:
-hf.co/blog/streaming-datasets) — and a naive materializing load killed a real
-Job on disk (EBDC input-side notes, 2026-07-16), so materializing is never the
-default. `streaming=False` stays one flag away for small datasets and
-repeated local runs.
+hf.co/blog/streaming-datasets) — and materializing a large input can exhaust
+a Job's local disk, so materializing is never the default. `streaming=False`
+stays one flag away for small datasets and repeated local runs.
 
 Ids are a trust contract, not an enforced policy: whichever strategy (or
 callable) produces them, the caller is asserting uniqueness within the output
@@ -91,8 +90,7 @@ def dataset_rows(
     column or callable id instead. Cheap and safe for any column type (images, audio).
     "content" — order-independent content hash via `content_id` over the
     *yielded* row (after `columns` filtering — that is the lever for keeping
-    the hash JSON-safe; strict, refuses images. Dedups identical rows,
-    receipt: 38 real dolly dupes caught).
+    the hash JSON-safe; strict, refuses images. Dedups identical rows).
     A column name — a natural key, looked up on the FULL example, so the id
     column does not need to be in `columns`.
     A callable `example -> id` — your own scheme, also given the full
@@ -138,9 +136,8 @@ def dataset_rows(
         prefix = _index_id_prefix(None, None, config, split)
     if columns is not None and not callable(ids):
         # column pushdown: select BEFORE iterating so unused features are
-        # neither downloaded nor decoded — found live embedding the text
-        # column of an image-bearing dataset (392k page scans would have been
-        # decoded just to be discarded; ImportError: Pillow was the symptom).
+        # neither downloaded nor decoded (embedding the text column of an
+        # image-bearing dataset would otherwise decode every image, and need Pillow).
         # A column-name id joins the selection; callable ids see the full
         # example, so no pushdown there. An object passed in without
         # select_columns is iterated whole.
@@ -237,7 +234,7 @@ def bucket_rows(
     without fetching (manifest / counting passes). `prefetch` reads ahead with
     a BOUNDED window of that many in-flight fetches — sequential remote reads
     would starve a fast consumer, and an unbounded prefetch would hold a
-    bucket's worth of bytes in RAM (the vision-OOM lesson).
+    bucket's worth of bytes in RAM.
 
     No decode, no transforms (PDF-to-pages etc. stay a caller concern —
     decode explodes one object into N rows, which silently changes id

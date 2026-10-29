@@ -8,6 +8,9 @@ The score of a cell is Auto's rows/s over the best Fixed window's rows/s (bench/
 summarises a results directory). Workloads (--kind):
 
 - chat: one --prompt per row (default: one sentence), up to --max-tokens out.
+
+Each round (--reps) runs Auto and every Fixed window once, in a shuffled order; every run's
+prompts are its own, so no arm reads another arm's prefix cache.
 - long-prompt: a prompt of about --prompt-words words per row, --max-tokens out.
 - image: one generated image per row (a data URL) and a one-line caption request.
 - embeddings: one short passage per row to /embeddings.
@@ -20,9 +23,11 @@ import base64
 import glob
 import io
 import json
+import random
 import statistics
 import tempfile
 import time
+import zlib
 
 from saturate import Auto, Fixed, pump
 
@@ -31,28 +36,34 @@ WORDS = ("archive ledger river harbour engine signal library county parish volum
 
 
 def make_rows(args, label: str, rep: int) -> list[dict]:
+    """Rows for one run. The run's tag leads every text (and seeds every image), so no run
+    reuses another run's prefix or image cache: each arm sees the engine's caches alike."""
+    run = f"{label}-{rep}"
     rows = []
     for i in range(args.rows):
-        row = {"id": f"{label}-{rep}-{i}", "i": i}
+        row = {"id": f"{run}-{i}", "i": i, "seed": zlib.crc32(f"{run}-{i}".encode())}
         if args.kind == "long-prompt":
             words = [WORDS[(i * 7 + j * 3) % len(WORDS)] for j in range(args.prompt_words)]
-            row["text"] = f"Summarise in one sentence (item {i}): " + " ".join(words)
+            row["text"] = f"[{run}] Summarise in one sentence (item {i}): " + " ".join(words)
         elif args.kind == "embeddings":
-            row["text"] = f"A short passage about the number {i}, for an embedding benchmark."
+            row["text"] = f"[{run}] A short passage about the number {i}, for an embedding benchmark."
+        elif args.kind == "image":
+            row["text"] = f"[{run}] Describe this image in one line."
         else:
-            row["text"] = args.prompt.format(i=i)
+            row["text"] = f"[{run}] " + args.prompt.format(i=i)
         rows.append(row)
     return rows
 
 
-def image_data_url(i: int, size: int) -> str:
-    """A small generated PNG: different per row, so no image cache serves it twice."""
+def image_data_url(seed: int, size: int) -> str:
+    """A small generated PNG, different per seed, so no image cache serves it twice."""
     from PIL import Image, ImageDraw
 
-    image = Image.new("RGB", (size, size), ((i * 37) % 256, (i * 91) % 256, (i * 53) % 256))
+    colour = (seed % 256, (seed >> 8) % 256, (seed >> 16) % 256)
+    image = Image.new("RGB", (size, size), colour)
     draw = ImageDraw.Draw(image)
     draw.rectangle([size // 4, size // 4, 3 * size // 4, 3 * size // 4], outline=(255, 255, 255), width=4)
-    draw.text((size // 3, size // 2), str(i), fill=(255, 255, 255))
+    draw.text((size // 3, size // 2), str(seed), fill=(255, 255, 255))
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
@@ -65,8 +76,9 @@ def make_to_request(args):
         if args.kind == "embeddings":
             return {"model": args.model, "input": row["text"]}
         if args.kind == "image":
-            content = [{"type": "image_url", "image_url": {"url": image_data_url(row["i"], args.image_size)}},
-                       {"type": "text", "text": "Describe this image in one line."}]
+            url = image_data_url(row["seed"], args.image_size)
+            content = [{"type": "text", "text": row["text"]},
+                       {"type": "image_url", "image_url": {"url": url}}]
         else:
             content = row["text"]
         return {"model": args.model, "max_tokens": args.max_tokens,
@@ -133,8 +145,10 @@ def main() -> None:
     ap.add_argument("--image-size", type=int, default=448)
     ap.add_argument("--prepare-workers", type=int, default=0, help="threads for to_request (image: 4)")
     ap.add_argument("--no-think", action="store_true", help="chat_template_kwargs enable_thinking=False")
-    ap.add_argument("--auto-reps", type=int, default=3)
-    ap.add_argument("--fixed", default="16,32,64,128,256,512", help="Fixed windows to sweep, comma-separated")
+    ap.add_argument("--reps", type=int, default=2,
+                    help="rounds; each round runs every arm once, in a shuffled order")
+    ap.add_argument("--fixed", default="16,32,64,128,256,512",
+                    help="Fixed windows to sweep, comma-separated")
     ap.add_argument("--no-warmup", action="store_true")
     ap.add_argument("--label", default="", help="recorded as `saturate`: the version under test")
     ap.add_argument("--out", required=True)
@@ -142,10 +156,12 @@ def main() -> None:
 
     if not args.no_warmup:
         one_run(args, "warmup", Fixed(32), 0)
-    for rep in range(args.auto_reps):
-        one_run(args, "auto", Auto(), rep)
-    for window in [int(x) for x in args.fixed.split(",") if x]:
-        one_run(args, f"fixed-{window}", Fixed(window), 0)
+    arms = [("auto", None)] + [(f"fixed-{w}", int(w)) for w in args.fixed.split(",") if w]
+    for rep in range(args.reps):
+        order = list(arms)
+        random.Random(rep).shuffle(order)  # no arm always runs first, or always after a big one
+        for label, window in order:
+            one_run(args, label, Auto() if window is None else Fixed(window), rep)
 
 
 if __name__ == "__main__":

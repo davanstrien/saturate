@@ -5,8 +5,8 @@
     python bench/matrix_cells.py summarise results/*.jsonl
 
 A cell is one engine, one model, one workload on one GPU flavor. bench/jobs_matrix.sh runs it:
-Auto() three times, then a sweep of Fixed windows. A cell's score is Auto's median rows/s over
-the best Fixed window's rows/s. The README's starting points come from the cells where Auto
+Auto and a sweep of Fixed windows, interleaved over rounds. A cell's score is Auto's median
+rows/s over the best Fixed window's median rows/s. The README's starting points come from the cells where Auto
 scores low: there, the best Fixed window is the documented start.
 
 Tiers: `small` runs on one small GPU (about $1-2 a cell); `large` needs A100/H200 nodes.
@@ -65,14 +65,14 @@ CELLS: tuple[Cell, ...] = (
     # the same engines in steady state: about 2 minutes per run at the best window, so the
     # ramp from Auto's start is a small share (the cells above measure short runs)
     Cell("steady-short-vllm", "small", "a10g-small", VLLM_IMAGE, SMALL, vllm(SMALL),
-         ["--kind", "chat", "--rows", "35000", "--auto-reps", "2", "--fixed", "128,256,512,1024"]),
+         ["--kind", "chat", "--rows", "35000", "--fixed", "128,256,512,1024"]),
     Cell("steady-long-vllm", "small", "a10g-small", VLLM_IMAGE, SMALL, vllm(SMALL),
-         ["--kind", "chat", "--max-tokens", "512", "--prompt", STORY, "--rows", "6000", "--auto-reps", "2",
+         ["--kind", "chat", "--max-tokens", "512", "--prompt", STORY, "--rows", "6000",
           "--fixed", "128,256,512,1024"]),
     Cell("steady-short-sglang", "small", "a10g-small", SGLANG_IMAGE, SMALL,
          f"python3 -m sglang.launch_server --model-path {SMALL} --port 8000 --host 127.0.0.1 "
          "--mem-fraction-static 0.7 --enable-metrics",
-         ["--kind", "chat", "--rows", "30000", "--auto-reps", "2", "--fixed", "128,256,512,1024"]),
+         ["--kind", "chat", "--rows", "30000", "--fixed", "128,256,512,1024"]),
     # embeddings
     Cell("embed-tei", "small", "a10g-small", TEI_IMAGE, "BAAI/bge-small-en-v1.5",
          "text-embeddings-router --model-id BAAI/bge-small-en-v1.5 --port 8000 --hostname 127.0.0.1",
@@ -103,7 +103,7 @@ def launch(cells: list[Cell], ref: str, branch: str, dry_run: bool) -> None:
                "--secrets", "HF_TOKEN", "-e", f"CELL={cell.name}", "-e", f"MODEL={cell.model}",
                "-e", f"ENGINE_CMD={cell.engine_cmd}", "-e", f"CELL_ARGS={shlex.join(cell.args)}",
                "-e", f"REF={ref}", "-e", f"HARNESS_REF=origin/{branch}", cell.image,
-               "bash", "-c", f"curl -sLo /tmp/m.sh {url} && bash /tmp/m.sh"]
+               "bash", "-c", f"curl -sLo /tmp/m.sh {shlex.quote(url)} && bash /tmp/m.sh"]
         if dry_run:
             print(shlex.join(cmd))
             continue
@@ -112,30 +112,43 @@ def launch(cells: list[Cell], ref: str, branch: str, dry_run: bool) -> None:
         print(f"{cell.name:22} {cell.flavor:11} {job[0]}", flush=True)
 
 
+def complete(record: dict) -> bool:
+    """A run that wrote every row with no failures: the only runs a score may use."""
+    return record["failed"] == 0 and record["ok"] == record["rows"] and record["rows_per_s"] > 0
+
+
 def summarise(paths: list[str]) -> None:
-    """Per cell: Auto's median rows/s, the best Fixed window, the ratio, where Auto settled."""
+    """Per cell and saturate revision: Auto's median rows/s over the best Fixed window's median
+    rows/s (medians over rounds for both), and where Auto settled. Failed or incomplete runs
+    are left out and counted."""
     runs = collections.defaultdict(list)
     for path in paths:
         with open(path) as f:
             for line in f:
                 if line.strip():
                     record = json.loads(line)
-                    runs[record["cell"]].append(record)
-    print(f"{'cell':22} {'auto rows/s':>11} {'best fixed':>16} {'ratio':>6}  auto settles  cuts")
-    for cell, records in sorted(runs.items()):
-        auto = [r for r in records if r["arm"] == "auto"]
-        fixed = [r for r in records if r["arm"].startswith("fixed-")]
+                    runs[(record["cell"], record.get("saturate", ""))].append(record)
+    print(f"{'cell':22} {'saturate':9} {'auto rows/s':>11} {'best fixed':>16} {'ratio':>6}  "
+          "settles  cuts  dropped")
+    for (cell, revision), records in sorted(runs.items()):
+        dropped = sum(not complete(r) for r in records if r["arm"] != "warmup")
+        by_arm = collections.defaultdict(list)
+        for r in records:
+            if r["arm"] != "warmup" and complete(r):
+                by_arm[r["arm"]].append(r)
+        auto = by_arm.pop("auto", [])
+        fixed = {arm: statistics.median(r["rows_per_s"] for r in rs) for arm, rs in by_arm.items()}
         if not auto or not fixed:
-            print(f"{cell:22} incomplete ({len(auto)} auto, {len(fixed)} fixed runs)")
+            print(f"{cell:22} {revision:9} incomplete ({len(auto)} auto runs, {len(fixed)} fixed windows)")
             continue
         auto_rate = statistics.median(r["rows_per_s"] for r in auto)
-        best = max(fixed, key=lambda r: r["rows_per_s"])
+        best_arm = max(fixed, key=fixed.get)
         settles = sorted(r["final_limit"] for r in auto)
         cuts = collections.Counter()
         for r in auto:
             cuts.update(r.get("cut_reasons") or {})
-        print(f"{cell:22} {auto_rate:11.1f} {best['arm']:>9} {best['rows_per_s']:6.1f} "
-              f"{auto_rate / best['rows_per_s']:6.0%}  {settles}  {dict(cuts)}")
+        print(f"{cell:22} {revision:9} {auto_rate:11.1f} {best_arm:>9} {fixed[best_arm]:6.1f} "
+              f"{auto_rate / fixed[best_arm]:6.0%}  {settles}  {dict(cuts)}  {dropped}")
 
 
 def main() -> None:

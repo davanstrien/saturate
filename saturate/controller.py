@@ -164,6 +164,8 @@ class State:
     acked_ever: bool = False  # queue gauges mean nothing before the first completion ever
     silent_s: float = 0.0  # seconds of a full window with nothing completing
     stall_armed: bool = False  # a completion has arrived since the last change drained
+    preempts: int | None = None  # the engine's preemption counter as last seen (None: not reported)
+    preempted: int = 0  # preemptions since the previous tick
 
 
 # every reason a decision can give: the tick's `reason` in telemetry (CONTRACT §6)
@@ -244,7 +246,8 @@ class Auto:
        before (this one, or one released earlier), step just under it instead of halving.
        A ceiling is released after BP_CEILING_RELEASE_S, because a provider's limit can rise;
        the first move past it then goes at most an eighth past it, never x2 or x4.
-    3. cut:kv — KV high with a low (or absent) prefix-hit rate: halve.
+    3. cut:kv — the KV cache ran out: a preemption this tick where the engine counts them
+       (vLLM); elsewhere KV high with a low (or absent) prefix-hit rate. Halve.
     4. cut:stall — window full and nothing completing for `stall_ticks` ticks, or 3x the
        latency when known, whichever is longer: halve. Once per episode: the next needs a
        completion after the last change has drained.
@@ -399,6 +402,11 @@ def _observe(auto: Auto, state: State, obs: Obs, limit: int) -> State:
         if state.clock <= state.phase.until or draining:
             return replace(state, silent_s=0.0, samples=())  # the old window is not evidence
         state = replace(state, phase=state.phase.then)  # drained
+    if obs.preempts is not None:  # a counter: count since the last tick (a restart resets it)
+        since = obs.preempts - state.preempts if state.preempts is not None else 0
+        state = replace(state, preempts=obs.preempts, preempted=max(0, since))
+    else:
+        state = replace(state, preempted=0)
     silent = obs.inflight >= limit and obs.successes == 0
     state = replace(state, stall_armed=state.stall_armed or obs.successes > 0,
                     silent_s=state.silent_s + tick if silent else 0.0)
@@ -458,9 +466,19 @@ def overloaded(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
     return bool(obs.backpressure) and obs.backpressure >= auto.bp_frac * (obs.backpressure + obs.successes)
 
 
+def preempting(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
+    """The engine counts preemptions (vLLM) and preempted a request this tick: its KV cache ran
+    out at this window."""
+    return state.preempted > 0
+
+
 def kv_full(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
-    """KV cache high and prefix hits low; with no hits signal at all (prefix caching off), high
-    KV is unverifiably benign, so it counts as full."""
+    """KV high and prefix hits low, from an engine that does not count preemptions (one that
+    does says so directly: a full cache with no preemption is a busy engine at its best, as a
+    large model runs). With no hits signal at all (prefix caching off), high KV is unverifiably
+    benign, so it counts as full."""
+    if obs.preempts is not None:
+        return False
     return obs.kv is not None and obs.kv >= auto.kv_hi and (obs.hits is None or obs.hits < auto.hits_lo)
 
 
@@ -496,15 +514,20 @@ def always(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
 
 # --- actions that need more than a primitive --------------------------------------------------
 
-def cut_for_backpressure(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
-    """Remember the window as a ceiling. At a ceiling met before, step just under it; on fresh
-    overload, halve."""
-    known = state.ceiling or state.seen_ceiling
-    at_known = known is not None and _below(known.limit) <= limit <= _above(known.limit)
-    lowest = min(limit, state.ceiling.limit) if state.ceiling is not None else limit
-    state = replace(state, ceiling=Ceiling(lowest, state.clock))
-    new = _below(limit) if at_known else limit // 2
-    return auto.cut(state, obs, limit, new, "cut:bp")
+def cut_at_ceiling(reason: Reason) -> Action:
+    """The engine said where its limit is (a 429, a preemption). Remember the window as a
+    ceiling: growth then stops an eighth under it. At a ceiling met before, step just under it;
+    at a fresh one, halve."""
+    def action(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
+        known = state.ceiling or state.seen_ceiling
+        at_known = known is not None and _below(known.limit) <= limit <= _above(known.limit)
+        lowest = min(limit, state.ceiling.limit) if state.ceiling is not None else limit
+        state = replace(state, ceiling=Ceiling(lowest, state.clock))
+        new = _below(limit) if at_known else limit // 2
+        return auto.cut(state, obs, limit, new, reason)
+
+    action.__name__ = f"cut_at_ceiling({reason!r})"
+    return action
 
 
 def step_down_by_queue(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
@@ -582,7 +605,8 @@ def _wait_for_trial(auto: Auto, state: State, limit: int) -> Decision | None:
 
 RULES: tuple[Rule, ...] = (
     when(settling, hold("hold:cooldown")),
-    when(overloaded, cut_for_backpressure),
+    when(overloaded, cut_at_ceiling("cut:bp")),
+    when(preempting, cut_at_ceiling("cut:kv")),
     when(kv_full, halve("cut:kv")),
     when(stalled, halve("cut:stall")),
     when(input_bound, hold("hold:input_bound")),

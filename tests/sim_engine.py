@@ -29,7 +29,11 @@ class Engine:
     past the last point (a falling last point models preemption past a batch size). `cap` is
     the most requests the engine runs at once. `rate_limit` is a hosted API's concurrency
     limit: past it, the excess requests are rejected with 429s. `gauges=False` hides the queue,
-    as an engine without /metrics does. `noise` is the relative spread of each reading."""
+    as an engine without /metrics does. `noise` is the relative spread of each reading.
+    `kv_cap` sets the KV gauge, running / kv_cap (None: a small model, the cache never near
+    full). Past `preempt_past` running requests (kv_cap when None) the engine preempts, one
+    request a tick per eighth over, counted when `counts_preempts` (vLLM does; others do not). `hits` is
+    the prefix-cache hit rate (unique prompts: low)."""
 
     curve: list[tuple[int, float]]
     cap: int = 256
@@ -39,6 +43,10 @@ class Engine:
     read_timeout_s: float = 1800.0
     tokens_per_row: float = 100.0
     refill_s: float = 0.0  # a slot's idle time between a completion and the client's next request
+    kv_cap: int | None = None
+    preempt_past: int | None = None  # running requests past which it preempts (None: kv_cap)
+    counts_preempts: bool = True
+    hits: float = 0.9
     seed: int = 0
     _memo: dict = dataclasses.field(default_factory=dict, repr=False, compare=False)
 
@@ -122,6 +130,7 @@ def run_shared(ctrls: list, engine: Engine, ticks: int, starts: list[int] | None
     limits = [0] * len(ctrls)
     carries = [0.0] * len(ctrls)
     timeout_carries = [0.0] * len(ctrls)
+    preempts = 0  # the engine's cumulative preemption counter
     out: list[list[Tick]] = [[] for _ in ctrls]
     for i in range(ticks):
         if then is not None and i == then[0]:
@@ -136,6 +145,11 @@ def run_shared(ctrls: list, engine: Engine, ticks: int, starts: list[int] | None
         total_seen = sum(seen)
         delivered_total = engine.rows_per_s(total_seen) if total_seen else 0.0
         latency = engine.latency_s(total_seen) if total_seen else 0.0
+        running = min(total_seen, engine.cap)
+        kv = 0.3 if engine.kv_cap is None else min(1.0, running / engine.kv_cap)
+        past = engine.preempt_past or engine.kv_cap
+        if past is not None and running > past:
+            preempts += math.ceil((running - past) / max(1, past // 8))
         rejected_total = 0.0
         if engine.rate_limit is not None and total_seen > engine.rate_limit:
             rejected_total = (total_seen - engine.rate_limit) / latency * TICK_S
@@ -161,7 +175,8 @@ def run_shared(ctrls: list, engine: Engine, ticks: int, starts: list[int] | None
                 running=min(total_now, engine.cap) if engine.gauges else None,
                 inflight=limits[c], backpressure=rejected + timed_out,
                 successes=successes, input_bound=False,
-                kv=0.3 if engine.gauges else None, hits=0.9 if engine.gauges else None,
+                kv=kv if engine.gauges else None, hits=engine.hits if engine.gauges else None,
+                preempts=preempts if engine.gauges and engine.counts_preempts else None,
                 tok_s=rate * engine.tokens_per_row,
                 latency_s=latency if rate else None,
             )

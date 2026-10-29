@@ -795,3 +795,24 @@ def test_evidence_counts_only_the_completions_of_the_samples_kept():
     for _ in range(MAX_SAMPLES + 2):  # then nothing completes
         ctrl.decide(healthy(limit, successes=0, tok_s=0.0, **slow), limit)
     assert ctrl.evidence(ctrl.state, limit) is None
+
+
+def test_preemptions_are_counted_from_the_first_reading_and_a_reset_is_not_a_preemption():
+    """The engine's counter is cumulative: its first reading is the baseline (preemptions
+    before this run are not this window's), and a counter that goes down (a restarted engine)
+    counts none."""
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    ctrl.decide(healthy(64, preempts=500), 64)
+    assert ctrl.state.preempted == 0 and ctrl.last_reason != "cut:kv"
+    ctrl.decide(healthy(64, preempts=3), 64)
+    assert ctrl.state.preempted == 0
+    new = ctrl.decide(healthy(64, preempts=5), 64)
+    assert ctrl.state.preempted == 2 and ctrl.last_reason == "cut:kv" and new == 32
+    assert ctrl.state.ceiling is not None and ctrl.state.ceiling.limit == 64
+
+
+def test_a_full_kv_cache_without_preemptions_is_not_a_cut_where_they_are_counted():
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    for _ in range(5):
+        ctrl.decide(healthy(64, kv=0.99, hits=0.0, preempts=7), 64)
+        assert ctrl.last_reason != "cut:kv"

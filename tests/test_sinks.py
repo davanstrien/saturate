@@ -75,6 +75,25 @@ def test_filesink_with_a_wrong_key_stops_the_run(tmp_path):
     assert FileSink(tmp_path / "out").existing_ids() == set()
 
 
+def test_filesink_first_rows_check_starts_again_each_run(tmp_path):
+    """One FileSink across two pump() runs: a success in the first run does not switch the
+    check off for the second, and the first run's rejections do not count in the second."""
+    sink = FileSink(tmp_path / "out")
+    sink.begin_run((0, 1))
+    sink.probe({"id": "a", "text": "x"})
+    for i in range(31):
+        with pytest.raises(ValueError):
+            sink.probe({"id": f"bad{i}"})
+    sink.begin_run((0, 1))
+    with pytest.raises(ValueError):  # one rejection in the new run: not yet 32
+        sink.probe({"id": "b"})
+    for i in range(30):
+        with pytest.raises(ValueError):
+            sink.probe({"id": f"c{i}"})
+    with pytest.raises(RuntimeError, match="first 32 rows"):
+        sink.probe({"id": "d"})
+
+
 def test_read_output_healing_rule(tmp_path):
     rows = [
         {"id": "x", "out": None, "error": "transport: boom"},   # healed later

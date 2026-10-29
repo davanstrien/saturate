@@ -582,6 +582,11 @@ class FileSink:
         self._accepted = False  # a record has passed probe: rejections are now the data's
         self._rejected = 0
 
+    def begin_run(self, shard: tuple[int, int]) -> None:
+        """A new pump() run: the first-rows check starts again (a sink can serve several runs)."""
+        self._accepted = False
+        self._rejected = 0
+
     def existing_ids(self, retry_errors: bool = False) -> set[str]:
         return {p.name.removesuffix(self.ext) for p in self.dir.glob(f"*{self.ext}")}
 

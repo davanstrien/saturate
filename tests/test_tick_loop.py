@@ -5,6 +5,7 @@ tick carries the controller's reason and the observed request latency.
 Ticks are driven directly (`limiter._tick()`), never by the clock."""
 
 import asyncio
+from typing import cast
 
 import pytest
 
@@ -15,7 +16,8 @@ from saturate.transport import Attempt
 
 
 class Recorder:
-    """A controller that keeps every observation it was handed and names each tick."""
+    """A controller that keeps every observation it was handed and names each tick. It has the
+    `initial`, `decide` and `last_reason` the limiter uses, so the tests cast it to Fixed."""
 
     initial = 1
 
@@ -38,7 +40,7 @@ def test_zero_tokens_with_requests_in_flight_is_a_reading():
     ctrl = Recorder()
 
     async def go():
-        lim = AdaptiveLimiter(window=ctrl)
+        lim = AdaptiveLimiter(window=cast(Fixed, ctrl))
         await lim._tick()  # idle: nothing in flight, nothing observable
         async with lim.slot():
             lim.observe(Attempt(ok=True, tokens=100))
@@ -50,7 +52,7 @@ def test_zero_tokens_with_requests_in_flight_is_a_reading():
     lim = run(go())
     idle, delivered, stalled = ctrl.seen[0], ctrl.seen[1], ctrl.seen[2]
     assert idle.tok_s is None and idle.inflight == 0
-    assert delivered.tok_s > 0 and delivered.successes == 1
+    assert delivered.tok_s is not None and delivered.tok_s > 0 and delivered.successes == 1
     assert stalled.tok_s == 0.0 and stalled.inflight == 1 and stalled.successes == 0
     assert [t["reason"] for t in lim.ticks] == ["tick:1", "tick:2", "tick:3", "tick:4"]
 
@@ -62,7 +64,7 @@ def test_endpoint_without_token_usage_has_no_throughput_signal():
     ctrl = Recorder()
 
     async def go():
-        lim = AdaptiveLimiter(window=ctrl)
+        lim = AdaptiveLimiter(window=cast(Fixed, ctrl))
         async with lim.slot():
             lim.observe(Attempt(ok=True, tokens=0))
             await lim._tick()
@@ -80,7 +82,7 @@ def test_tick_carries_request_latency_and_the_oldest_inflight_age():
 
     async def go():
         lim = AdaptiveLimiter(window=Auto(initial=4))
-        lim.controller = ctrl
+        lim.controller = cast(Fixed, ctrl)
         await lim._tick()
         assert ctrl.seen[-1].latency_s is None and ctrl.seen[-1].oldest_s is None
         async with lim.slot():
@@ -92,7 +94,8 @@ def test_tick_carries_request_latency_and_the_oldest_inflight_age():
 
     lim = run(go())
     obs = ctrl.seen[-1]
-    assert obs.latency_s == 0.5 and obs.oldest_s >= 0.0  # median of the two attempts
+    assert obs.latency_s == 0.5  # median of the two attempts
+    assert obs.oldest_s is not None and obs.oldest_s >= 0.0
     assert obs.tick_s is not None and obs.tick_s > 0
     assert lim.ticks[-1]["latency_s"] == 0.5 and lim._counts.latencies == []
     assert lim.oldest_s is None  # released
@@ -155,7 +158,7 @@ def test_reports_during_a_scrape_count_in_that_tick():
     async def go():
         signals = SuspendedScrape()
         lim = AdaptiveLimiter(window=Auto(initial=4), signals=signals)
-        lim.controller = ctrl
+        lim.controller = cast(Fixed, ctrl)
         tick = asyncio.ensure_future(lim._tick())
         await signals.started.wait()
         lim.observe(Attempt(pressure=True))
@@ -177,7 +180,7 @@ def test_a_cancelled_scrape_loses_no_reports():
     async def go():
         signals = SuspendedScrape()
         lim = AdaptiveLimiter(window=Auto(initial=4), signals=signals)
-        lim.controller = ctrl
+        lim.controller = cast(Fixed, ctrl)
         lim.observe(Attempt(pressure=True))
         tick = asyncio.ensure_future(lim._tick())
         await signals.started.wait()

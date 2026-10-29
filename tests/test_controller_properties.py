@@ -3,6 +3,7 @@ schedule (seed). Hypothesis builds the streams, including ones no engine sends (
 come and go, zero ticks, latencies that jump); each rule must still keep these promises."""
 
 import dataclasses
+import random
 
 import pytest
 from hypothesis import given
@@ -104,11 +105,13 @@ def test_decide_never_changes_a_state_it_was_given(data):
         assert dataclasses.astuple(before) == snapshot
 
 
-class _RecordingRandom:
+class _RecordingRandom(random.Random):
     """Wraps an Auto's own Random (keeping its seed) and records the jitter draws made from it."""
 
-    def __init__(self, inner):
-        self.inner, self.drawn = inner, []
+    def __init__(self, inner: random.Random):
+        super().__init__()
+        self.inner = inner
+        self.drawn: list[int] = []
 
     def randint(self, a: int, b: int) -> int:
         self.drawn.append(self.inner.randint(a, b))
@@ -120,7 +123,8 @@ def check_jitter(auto: Auto, steps) -> None:
     that every trial opened after a failure waited exactly the jitter drawn for it, in
     hold:jitter ticks since the previous trial or skipped move: a fresh draw each time, never
     more than JITTER_TICKS, and not spent by any other hold."""
-    auto.rng = _RecordingRandom(auto.rng)
+    rng = _RecordingRandom(auto.rng)
+    auto.rng = rng
     limit, draws_seen, jitter_holds = auto.initial, 0, 0
     while (obs := steps(limit)) is not None:
         before = auto.state.phase
@@ -129,10 +133,10 @@ def check_jitter(auto: Auto, steps) -> None:
         if reason == "hold:jitter":
             jitter_holds += 1
         if reason.startswith("trial") and isinstance(before, Steady) and before.backoff > 1:
-            assert len(auto.rng.drawn) == draws_seen + 1, (auto.rng.drawn, draws_seen)
-            assert jitter_holds == auto.rng.drawn[-1] <= auto.JITTER_TICKS, (jitter_holds, auto.rng.drawn)
+            assert len(rng.drawn) == draws_seen + 1, (rng.drawn, draws_seen)
+            assert jitter_holds == rng.drawn[-1] <= auto.JITTER_TICKS, (jitter_holds, rng.drawn)
         if reason.startswith(("trial", "cut", "revert")) or reason in ("hold:ceiling", "hold:floor"):
-            draws_seen, jitter_holds = len(auto.rng.drawn), 0
+            draws_seen, jitter_holds = len(rng.drawn), 0
 
 
 @given(st.data())
@@ -171,8 +175,15 @@ def test_trials_at_a_backpressure_wall_each_wait_their_own_jitter(cap, seed):
 def test_a_hold_every_client_sees_does_not_spend_the_jitter():
     """A queue in band holds every client sharing the engine; if those ticks spent the jitter,
     the clients would all open their next trial on the same tick after it."""
+
+    class Longest(random.Random):
+        """Always draws the longest jitter, JITTER_TICKS."""
+
+        def randint(self, a: int, b: int) -> int:
+            return b
+
     auto = Auto(initial=64)
-    auto.rng = type("Longest", (), {"randint": staticmethod(lambda a, b: b)})()  # always JITTER_TICKS
+    auto.rng = Longest()
     limit = auto.initial
     for _ in range(200):  # until a trial fails and the next one is due
         limit = auto.decide(dict(inflight=limit, successes=limit, tok_s=100.0 * 64, waiting=0, running=limit),
@@ -180,6 +191,7 @@ def test_a_hold_every_client_sees_does_not_spend_the_jitter():
         if auto.last_reason == "hold:jitter":
             break
     assert auto.last_reason == "hold:jitter", auto.last_reason
+    assert isinstance(auto.state.phase, Steady), auto.state.phase
     left = auto.state.phase.jitter
     assert left == auto.JITTER_TICKS - 1
     for _ in range(10):  # a queue in band: hold

@@ -171,6 +171,7 @@ def test_a_cancel_of_the_caller_during_limiter_exit_is_not_swallowed():
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+        assert limiter._task is not None
         assert limiter._task.done()  # the loop finished its cleanup before exit returned
 
     asyncio.run(go())
@@ -185,6 +186,7 @@ def test_a_limiter_entered_again_still_supervises_its_controller_loop():
         async with limiter:
             pass
         async with limiter:
+            assert limiter._task is not None
             limiter._task.cancel()
             await asyncio.sleep(0)
             async with limiter.slot():

@@ -4,11 +4,12 @@ never retry (their file objects are consumed — a re-send posts empty bodies)."
 
 import asyncio
 import time
+from typing import cast
 
 import pytest
 
 import saturate.transport as transport
-from saturate.http import Timeouts
+from saturate.http import HttpClient, Timeouts
 from saturate.transport import Breaker, call_endpoint, make_json_request, make_multipart_request
 
 
@@ -35,6 +36,9 @@ class _Observed(list):
 
 
 class _Client:
+    """Stands in for HttpClient: it has only the `post` and `timeouts` that call_endpoint uses,
+    and answers with a _Resp, so the tests cast it to HttpClient where they pass it."""
+
     def __init__(self, resp: _Resp, timeouts: Timeouts | None = None):
         self.resp = resp
         self.posts = 0
@@ -53,9 +57,9 @@ def test_retry_after_capped_by_budget(monkeypatch):
     client = _Client(_Resp(429, {"retry-after": "3600"}))
     t0 = time.monotonic()
     body, err = asyncio.run(call_endpoint(
-        client, "http://x", make_json_request("/chat/completions", {}),
+        cast(HttpClient, client), "http://x", make_json_request("/chat/completions", {}),
         Breaker(), _Observed()))
-    assert body is None and "429" in err
+    assert body is None and err is not None and "429" in err
     assert time.monotonic() - t0 < 2.0  # not the header's 3600s
     assert client.posts == 1  # the budget-capped sleep does not buy another request
 
@@ -72,9 +76,9 @@ def test_retry_attempts_get_budget_capped_timeouts(monkeypatch):
     monkeypatch.setattr(transport, "BACKOFF_BASE_S", 0.01)
     client = _Client(_Resp(500))
     body, err = asyncio.run(call_endpoint(
-        client, "http://x", make_json_request("/chat/completions", {}),
+        cast(HttpClient, client), "http://x", make_json_request("/chat/completions", {}),
         Breaker(), _Observed()))
-    assert body is None and "500" in err
+    assert body is None and err is not None and "500" in err
     assert client.sent[0] == "absent"  # first attempt: client default window
     assert all(max(t.connect, t.read, t.write, t.pool) <= 1.0 for t in client.sent[1:])
     assert len(client.sent) >= 2  # it did retry, with capped windows
@@ -87,8 +91,9 @@ def test_a_retry_keeps_the_configured_phase_timeouts_under_its_budget(monkeypatc
     monkeypatch.setattr(transport, "BACKOFF_BASE_S", 0.01)
     configured = Timeouts(read=1800.0, connect=1.5, pool=7.0, write=2.0)
     client = _Client(_Resp(500), timeouts=configured)
-    asyncio.run(call_endpoint(client, "http://x", make_json_request("/chat/completions", {}),
-                              Breaker(), _Observed(), budget_s=1000.0))
+    asyncio.run(call_endpoint(cast(HttpClient, client), "http://x",
+                              make_json_request("/chat/completions", {}), Breaker(), _Observed(),
+                              budget_s=1000.0))
     retry = client.sent[1]
     assert (retry.connect, retry.write, retry.pool) == (1.5, 2.0, 7.0)
     assert 990.0 < retry.read <= 1000.0  # the 1800 s read window, capped to what is left
@@ -102,7 +107,7 @@ def test_no_timeout_floor_below_budget(monkeypatch):
     monkeypatch.setattr(transport, "RETRY_BUDGET_S", 0.05)
     client = _Client(_Resp(429, {"retry-after": "0"}))  # zero backoff: attempts spin freely
     body, err = asyncio.run(call_endpoint(
-        client, "http://x", make_json_request("/chat/completions", {}),
+        cast(HttpClient, client), "http://x", make_json_request("/chat/completions", {}),
         Breaker(), _Observed()))
     assert body is None
     assert all(max(t.connect, t.read, t.write, t.pool) <= 0.05 for t in client.sent[1:])
@@ -115,22 +120,24 @@ def test_breaker_open_time_credited_back_to_budget(monkeypatch):
     monkeypatch.setattr(transport, "RETRY_BUDGET_S", 0.05)
 
     class SlowGate(Breaker):
-        async def gate(self, client, probe_url, probe_json=None):
+        async def gate(self, client, probe_url, model=None):
             await asyncio.sleep(0.1)  # longer than the entire budget
+
+    class _OkJson(_Resp):
+        def json(self):
+            return {"ok": True}
 
     class _SeqClient:
         timeouts = Timeouts()
 
         def __init__(self):
-            self.resps = [_Resp(429, {"retry-after": "0"}), _Resp(200)]
+            self.resps = [_OkJson(429, {"retry-after": "0"}), _OkJson(200)]
 
         async def post(self, url, form=None, json=None, timeouts="absent", headers=None):
-            r = self.resps.pop(0)
-            r.json = lambda: {"ok": True}
-            return r
+            return self.resps.pop(0)
 
     body, err = asyncio.run(call_endpoint(
-        _SeqClient(), "http://x", make_json_request("/chat/completions", {}),
+        cast(HttpClient, _SeqClient()), "http://x", make_json_request("/chat/completions", {}),
         SlowGate(), _Observed()))
     assert err is None and body == {"ok": True}  # the retry survived two 0.1s breaker waits
 
@@ -139,7 +146,7 @@ def test_breaker_open_time_credited_back_to_budget(monkeypatch):
 def test_multipart_never_retries():
     client = _Client(_Resp(500))
     body, err = asyncio.run(call_endpoint(
-        client, "http://x", make_multipart_request("/upload", {"a": "1"}, {"file": b"x"}),
+        cast(HttpClient, client), "http://x", make_multipart_request("/upload", {"a": "1"}, {"file": b"x"}),
         Breaker(), _Observed()))
     assert body is None and err == "http 500 after retries: nope"  # the server message is kept
     assert client.posts == 1  # single attempt: the file stream is already consumed
@@ -170,7 +177,8 @@ def test_latency_is_the_successful_attempt_alone():
     observed = _Observed()
     t = time.monotonic()
     body, err = asyncio.run(call_endpoint(
-        _SlowThenFast(), "http://x", make_json_request("/chat/completions", {}), Breaker(), observed))
+        cast(HttpClient, _SlowThenFast()), "http://x", make_json_request("/chat/completions", {}),
+        Breaker(), observed))
     assert body == {"ok": True} and err is None
     assert time.monotonic() - t >= 0.1  # the row took the slow attempt plus the backoff...
     assert len(observed.latencies) == 1 and observed.latencies[0] < 0.05  # ...the sample did not
@@ -198,8 +206,8 @@ def test_redirect_is_poison_not_pressure():
     observed = _Observed()
     breaker = Breaker()
     body, err = asyncio.run(call_endpoint(
-        client, "http://x", make_json_request("/chat/completions", {}), breaker, observed))
-    assert body is None and "302" in err and "redirect" in err
+        cast(HttpClient, client), "http://x", make_json_request("/chat/completions", {}), breaker, observed))
+    assert body is None and err is not None and "302" in err and "redirect" in err
     assert client.posts == 1
     assert observed.pressure == 0
     assert breaker.consecutive == 0
@@ -222,8 +230,8 @@ def test_a_row_that_always_fails_counts_as_backpressure_once(monkeypatch):
     observed = _Observed()
     client = _Client(_Resp(500))
     body, err = asyncio.run(call_endpoint(
-        client, "http://x", make_json_request("/chat/completions", {}), breaker, observed))
-    assert body is None and "500" in err
+        cast(HttpClient, client), "http://x", make_json_request("/chat/completions", {}), breaker, observed))
+    assert body is None and err is not None and "500" in err
     assert client.posts == 5  # it retried...
     assert observed.pressure == 1  # ...but pressured the controller once
     assert len(fails) == 5  # a dead server still trips the breaker attempt by attempt
@@ -242,23 +250,19 @@ def test_retry_after_is_jittered_so_rows_do_not_wake_together(monkeypatch):
 
     monkeypatch.setattr(transport.asyncio, "sleep", record)
     client = _Client(_Resp(429, {"retry-after": "10"}))
-    asyncio.run(call_endpoint(client, "http://x", make_json_request("/chat/completions", {}),
-                              Breaker(), _Observed()))
+    asyncio.run(call_endpoint(cast(HttpClient, client), "http://x",
+                              make_json_request("/chat/completions", {}), Breaker(), _Observed()))
     assert len(waits) == 4 and all(10.0 <= w <= 12.0 for w in waits), waits
     assert len(set(waits)) > 1  # jittered, not identical
 
 
 @pytest.mark.internals
-def test_a_5xx_error_row_keeps_the_server_message():
+def test_a_5xx_error_row_keeps_the_server_message(monkeypatch):
     client = _Client(_Resp(500))
     client.resp.text = "CUDA out of memory"
-    transport_active = transport.RETRY_ACTIVE
-    transport.RETRY_ACTIVE = False
-    try:
-        body, err = asyncio.run(call_endpoint(client, "http://x", make_json_request("/chat/completions", {}),
-                                              Breaker(), _Observed()))
-    finally:
-        transport.RETRY_ACTIVE = transport_active
+    monkeypatch.setattr(transport, "RETRY_ACTIVE", False)
+    body, err = asyncio.run(call_endpoint(cast(HttpClient, client), "http://x",
+                                          make_json_request("/chat/completions", {}), Breaker(), _Observed()))
     assert body is None and err == "http 500 after retries: CUDA out of memory"
 
 
@@ -385,8 +389,8 @@ def test_a_retry_cancelled_mid_flight_still_counts():
     async def go():
         client, observed = FailThenHang(), _Observed()
         request = make_json_request("/chat/completions", {})
-        task = asyncio.ensure_future(call_endpoint(client, "http://x", request, Breaker(), observed,
-                                                   budget_s=30.0))
+        task = asyncio.ensure_future(call_endpoint(cast(HttpClient, client), "http://x", request, Breaker(),
+                                                   observed, budget_s=30.0))
         await asyncio.wait_for(client.second_started.wait(), 5.0)
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -414,9 +418,9 @@ def test_a_success_with_malformed_usage_still_counts_and_resets_the_breaker():
     for _ in range(3):
         breaker.fail()
     observed = _Observed()
-    body, err = asyncio.run(call_endpoint(_Client(MalformedUsage(200)), "http://x",
+    body, err = asyncio.run(call_endpoint(cast(HttpClient, _Client(MalformedUsage(200))), "http://x",
                                           make_json_request("/chat/completions", {}), breaker, observed))
-    assert err is None and body["usage"]["prompt_tokens"] is None
+    assert err is None and body is not None and body["usage"]["prompt_tokens"] is None
     assert breaker.consecutive == 0
     assert [(a.ok, a.tokens) for a in observed] == [(True, 1)]
 

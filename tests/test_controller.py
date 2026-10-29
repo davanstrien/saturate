@@ -5,10 +5,11 @@ Each test names the engine behaviour it pins: a wedged engine, a burst of
 the hill climber's own trial, judge and ceiling rules."""
 
 import typing
+from typing import Any
 
 import pytest
 
-from saturate.controller import BP_CEILING_RELEASE_S, TICK_S, Auto, Reason
+from saturate.controller import BP_CEILING_RELEASE_S, TICK_S, Auto, Reason, Trial
 
 STEP = 8
 REASONS = set(typing.get_args(Reason))
@@ -290,6 +291,7 @@ def test_input_bound_ticks_are_not_evidence():
     resumed = healthy(16, tok_s=2000.0)
     traj, reasons = drive(ctrl, limit, [starved] * 6 + [resumed])
     assert reasons == ["hold:input_bound"] * 6 + ["trial:up"] and traj[-1] == 32, (traj, reasons)
+    assert isinstance(ctrl.state.phase, Trial), ctrl.state.phase
     assert ctrl.state.phase.ref.tok_s == 2000.0, ctrl.state.phase
 
 
@@ -302,6 +304,7 @@ def test_partially_used_window_is_not_evidence():
     resumed = healthy(16, tok_s=2000.0)
     traj, reasons = drive(ctrl, limit, [thin] * 6 + [resumed])
     assert reasons == ["hold"] * 6 + ["trial:up"] and traj[-1] == 32, (traj, reasons)
+    assert isinstance(ctrl.state.phase, Trial), ctrl.state.phase
     assert ctrl.state.phase.ref.tok_s == 2000.0, ctrl.state.phase
 
 
@@ -336,7 +339,8 @@ def test_completions_per_second_stand_in_when_tokens_are_unreported():
     grow with the window keep a wider trial; flat completions revert it."""
     ctrl = Auto(target_waiting=8, initial=16, step=STEP)
     traj, reasons = drive(ctrl, 16, [healthy(16, tok_s=None, successes=32)] * 2)
-    assert reasons[-1] == "trial:up" and ctrl.state.phase.ref.rows_s == 32 / TICK_S, ctrl.state.phase
+    assert reasons[-1] == "trial:up" and isinstance(ctrl.state.phase, Trial), (reasons, ctrl.state.phase)
+    assert ctrl.state.phase.ref.rows_s == 32 / TICK_S, ctrl.state.phase
     traj, reasons = drive(ctrl, 32, [healthy(32, tok_s=None, successes=64)] * 2)
     assert reasons[-1] == "hold:kept" and traj[-1] == 32, reasons
 
@@ -611,6 +615,7 @@ def test_a_released_ceiling_at_the_floor_is_probed_an_eighth_past():
     ctrl = Auto(target_waiting=8, initial=64, min_limit=64, step=STEP)
     limit = warm(ctrl, 64)
     limit = ctrl.decide(healthy(64, backpressure=64, latency_s=1.0), limit)
+    assert ctrl.state.ceiling is not None
     assert (ctrl.last_reason, limit, ctrl.state.ceiling.limit) == ("hold:floor", 64, 64)
     ticks = int(BP_CEILING_RELEASE_S / TICK_S)
     traj, reasons = climb(ctrl, limit, ticks + 60, knee(512), latency_s=1.0)
@@ -684,8 +689,10 @@ def test_initial_clamped_to_max():
 
 def test_auto_invalid_bounds_raise():
     """Auto(min_limit=0) deadlocks admission exactly like Fixed(0)."""
-    for kw in (dict(min_limit=0), dict(max_limit=1, min_limit=2), dict(step=0), dict(stall_ticks=0),
-               dict(bp_frac=-0.1), dict(bp_frac=1.5)):
+    cases: tuple[dict[str, Any], ...] = (
+        dict(min_limit=0), dict(max_limit=1, min_limit=2), dict(step=0), dict(stall_ticks=0),
+        dict(bp_frac=-0.1), dict(bp_frac=1.5))
+    for kw in cases:
         with pytest.raises(ValueError):
             Auto(**kw)
 

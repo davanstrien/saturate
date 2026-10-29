@@ -61,7 +61,7 @@ jobs:
       - run: uv run pytest -q -o timeout=1800 --runslow tests/test_controller_slow.py
       - run: uv run pytest -q -o timeout=1800 tests/test_controller_properties.py tests/test_controller_perf.py
   types:
-    # ty (pinned in the dev group) over the whole package
+    # ty (pinned in the dev group) over the whole package and the test suite
     runs-on: ubuntu-latest
     env:
       UV_PYTHON: "3.13"
@@ -70,7 +70,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv python install 3.13
       - run: uv sync --locked
-      - run: uv run ty check saturate
+      - run: uv run ty check saturate tests
   lowest:
     # the declared dependency floors: an unlocked sync only ever tests the newest releases
     runs-on: ubuntu-latest

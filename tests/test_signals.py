@@ -7,7 +7,9 @@ of `ghcr.io/huggingface/text-embeddings-inference:cpu-latest`
 not match.
 """
 
-from saturate.http import TransportError
+from typing import cast
+
+from saturate.http import HttpClient, TransportError
 from saturate.signals import CEILING_FLAG, parse_gauges
 
 TEI_METRICS = """\
@@ -43,6 +45,7 @@ vllm:gpu_prefix_cache_hit_rate{model_name="x"} 0.9
 
 def test_tei_queue_only():
     g = parse_gauges(TEI_METRICS)
+    assert g is not None
     assert g["dialect"] == "tei"
     assert g["waiting"] == 3
     assert g["running"] is None  # TEI exposes no in-flight gauge
@@ -50,7 +53,9 @@ def test_tei_queue_only():
 
 
 def test_tei_dual_spelling():
-    assert parse_gauges("te:queue_size 7\n")["waiting"] == 7
+    g = parse_gauges("te:queue_size 7\n")
+    assert g is not None
+    assert g["waiting"] == 7
 
 
 def test_tei_ceiling_flag_is_a_relaunch_flag():
@@ -59,12 +64,14 @@ def test_tei_ceiling_flag_is_a_relaunch_flag():
 
 def test_vllm_still_parses():
     g = parse_gauges(VLLM_METRICS)
+    assert g is not None
     assert g["dialect"] == "vllm"
     assert (g["waiting"], g["running"], g["kv"], g["hits"]) == (5, 12, 0.42, 0.9)
 
 
 class _FlakyClient:
-    """GET raises `fail_first` times, then serves vLLM gauges."""
+    """GET raises `fail_first` times, then serves vLLM gauges. It stands in for HttpClient with
+    only the `get` that HttpScrape uses, so the test casts it to HttpClient."""
 
     def __init__(self, fail_first: int):
         self.fail_first = fail_first
@@ -85,7 +92,7 @@ def test_scrape_retries_periodically_after_going_blind(caplog):
     from saturate.signals import HttpScrape
 
     client = _FlakyClient(fail_first=5)
-    scrape = HttpScrape(client, "http://x/v1", max_fails=5, retry_every=30)
+    scrape = HttpScrape(cast(HttpClient, client), "http://x/v1", max_fails=5, retry_every=30)
 
     async def run():
         results = []

@@ -15,6 +15,7 @@ def test_failed_boot_kills_process_group():
     eng = Engine(model="x", cmd=["sleep", "60"], boot_timeout=1, port=59999)
     with pytest.raises(TimeoutError):
         eng.__enter__()
+    assert eng.proc is not None
     assert eng.proc.poll() is not None  # reaped, not orphaned
     with pytest.raises(ProcessLookupError):
         os.killpg(eng.proc.pid, 0)  # whole group gone (own session => pgid == leader pid)
@@ -47,6 +48,7 @@ def test_group_members_killed_when_leader_exits():
                  boot_timeout=5, port=59998)
     with pytest.raises(RuntimeError, match="died during boot"):
         eng.__enter__()
+    assert eng.proc is not None
     with pytest.raises(ProcessLookupError):
         os.killpg(eng.proc.pid, 0)  # the child is gone too
 

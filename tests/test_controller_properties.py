@@ -105,12 +105,10 @@ def test_decide_never_changes_a_state_it_was_given(data):
 
 
 class _RecordingRandom:
-    """A seeded Random that records the jitter draws made from it."""
+    """Wraps an Auto's own Random (keeping its seed) and records the jitter draws made from it."""
 
-    def __init__(self, seed: int):
-        import random
-
-        self.inner, self.drawn = random.Random(seed), []
+    def __init__(self, inner):
+        self.inner, self.drawn = inner, []
 
     def randint(self, a: int, b: int) -> int:
         self.drawn.append(self.inner.randint(a, b))
@@ -122,7 +120,7 @@ def check_jitter(auto: Auto, steps) -> None:
     that every trial opened after a failure waited exactly the jitter drawn for it, in
     hold:jitter ticks since the previous trial or skipped move: a fresh draw each time, never
     more than JITTER_TICKS, and not spent by any other hold."""
-    auto.rng = _RecordingRandom(0)
+    auto.rng = _RecordingRandom(auto.rng)
     limit, draws_seen, jitter_holds = auto.initial, 0, 0
     while (obs := steps(limit)) is not None:
         before = auto.state.phase
@@ -191,7 +189,7 @@ def test_a_hold_every_client_sees_does_not_spend_the_jitter():
     assert auto.state.phase.jitter == left
 
 
-whole = st.one_of(st.integers(-5, 2000), st.booleans())
+whole = st.one_of(st.integers(-5, 2000), st.booleans(), st.floats(-5, 2000), st.just(float("nan")))
 real = st.floats(allow_nan=True, allow_infinity=True)
 SETTINGS = dict(target_waiting=whole, initial=st.one_of(st.none(), whole), min_limit=whole, max_limit=whole,
                 step=whole, stall_ticks=whole, kv_hi=real, hits_lo=real, improve=real, bp_frac=real)
@@ -217,7 +215,9 @@ def test_any_configuration_is_refused_up_front_or_runs(data):
     dict(hits_lo=-0.1), dict(hits_lo=1.1), dict(improve=1.0), dict(improve=0.9),
     dict(improve=float("nan")), dict(bp_frac=float("nan")), dict(min_limit=0), dict(max_limit=1, min_limit=2),
     dict(step=0), dict(stall_ticks=0), dict(improve=float("inf")), dict(target_waiting=True),
-    dict(kv_hi=True), dict(bp_frac=False), dict(seed=True),
+    dict(kv_hi=True), dict(bp_frac=False), dict(seed=True), dict(max_limit=float("nan")),
+    dict(stall_ticks=float("nan")), dict(step=2.5), dict(initial=float("inf")), dict(min_limit=4.0),
+    dict(target_waiting="8"), dict(seed=1.5),
 ])
 def test_a_setting_that_cannot_work_is_refused(kwargs):
     with pytest.raises(ValueError):

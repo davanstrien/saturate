@@ -18,7 +18,7 @@ from sim_engine import (
     share_past_useful,
 )
 
-from saturate.controller import Auto
+from saturate.controller import Auto, _above
 
 ENGINES = {
     "sglang-like": dict(curve=SGLANG_LIKE, cap=256),
@@ -96,14 +96,16 @@ def test_a_hosted_api_limit_that_rises_mid_run_is_found():
     assert sum(shares) / len(shares) >= 0.85 and min(shares) >= 0.72, shares
 
 
-@given(cap=st.integers(8, 400), initial=st.integers(2, 512), seed=st.integers(0, 2**16),
-       reject=st.sampled_from([4, 12, 50]))
-def test_a_hard_429_wall_is_never_crossed_far_once_met(cap, initial, seed, reject):
+@given(cap=st.integers(2, 400), initial=st.integers(2, 512), seed=st.integers(0, 2**16),
+       reject=st.sampled_from([4, 12, 50]), data=st.data())
+def test_a_hard_429_wall_is_never_crossed_far_once_met(cap, initial, seed, reject, data):
     """An API that rejects everything past `cap` (1 in `reject` of the served rows come back as
     429s while over it). Once Auto has met the wall, every later window stays within two
     eighths of the lowest window that met it: growth stops an eighth below a ceiling, and a
-    released ceiling is probed an eighth past, never by a move of x2 or x4."""
-    ctrl = Auto(initial=initial, max_limit=512, seed=seed)
+    released ceiling is probed an eighth past (at least one), never by a move of x2 or x4. A
+    floor at the wall (min_limit == cap) starts the probe at the ceiling itself."""
+    min_limit = data.draw(st.integers(1, min(cap, 64)))
+    ctrl = Auto(initial=initial, min_limit=min_limit, max_limit=512, seed=seed)
     limit, hist, met = ctrl.initial, [ctrl.initial], None
     for tick in range(1500):
         seen = hist[max(0, len(hist) - 2)]
@@ -117,7 +119,7 @@ def test_a_hard_429_wall_is_never_crossed_far_once_met(cap, initial, seed, rejec
             met = tick if met is None else met
         if met is not None and tick > met + 60:  # past the first cuts down to the wall
             wall = ctrl.state.ceiling or ctrl.state.seen_ceiling
-            assert wall is not None and limit <= max(wall.limit * 9 // 8, wall.limit + 1), \
+            assert wall is not None and limit <= _above(wall.limit), \
                 (tick, limit, wall, hist[-20:])
 
 

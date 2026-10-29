@@ -9,6 +9,7 @@ engine, nowhere) — that's the SignalSource seam's job.
 from __future__ import annotations
 
 import dataclasses
+import numbers
 import random
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -171,8 +172,9 @@ def _tick(obs: Obs) -> float:
 
 
 def _above(ceiling: int) -> int:
-    """The window an eighth over a backpressure ceiling: the most a probe of it may try."""
-    return ceiling * 9 // 8
+    """The window an eighth over a backpressure ceiling, and at least one over it: the most a
+    probe of it may try."""
+    return max(ceiling + 1, ceiling * 9 // 8)
 
 
 def _below(ceiling: int) -> int:
@@ -256,6 +258,15 @@ class Auto:
                  stall_ticks, bp_frac, seed)
         if any(isinstance(value, bool) for value in given):
             raise ValueError("Auto settings are numbers, not booleans")
+        counts = dict(target_waiting=target_waiting, min_limit=min_limit, max_limit=max_limit,
+                      step=step, stall_ticks=stall_ticks)
+        if initial is not None:
+            counts["initial"] = initial
+        if seed is not None:
+            counts["seed"] = seed
+        for name, value in counts.items():
+            if not isinstance(value, numbers.Integral):  # 2.5 or nan requests in flight cannot run
+                raise ValueError(f"Auto requires {name} to be a whole number, not {value!r}")
         if min_limit < 1 or max_limit < min_limit or step < 1:
             raise ValueError("Auto requires 1 <= min_limit <= max_limit and step >= 1")  # 0 deadlocks
         if stall_ticks < 1:
@@ -486,7 +497,7 @@ def _open_trial(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
     factor = auto.MOVES[phase.move % len(auto.MOVES)]
     new = auto.clamp(state, round(limit * factor))
     seen = state.seen_ceiling
-    if state.ceiling is None and seen is not None and limit < seen.limit < new:
+    if state.ceiling is None and seen is not None and limit <= seen.limit < new:
         new = min(new, _above(seen.limit))  # a released ceiling: probe past it by an eighth
     at_ceiling = state.ceiling is not None and limit >= _below(state.ceiling.limit)
     if new == limit or (factor < 1 and at_ceiling):  # nothing to try this way: the next move

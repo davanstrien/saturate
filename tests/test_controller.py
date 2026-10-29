@@ -605,6 +605,19 @@ def test_a_released_ceiling_does_not_cap_a_climb_under_a_higher_active_one():
     assert new > 72, new  # not stopped at an eighth past the released ceiling of 64
 
 
+def test_a_released_ceiling_at_the_floor_is_probed_an_eighth_past():
+    """min_limit at the ceiling: the cut cannot go under it, so the window is still at the
+    ceiling when it is released. The first probe still goes only an eighth past it."""
+    ctrl = Auto(target_waiting=8, initial=64, min_limit=64, step=STEP)
+    limit = warm(ctrl, 64)
+    limit = ctrl.decide(healthy(64, backpressure=64, latency_s=1.0), limit)
+    assert (ctrl.last_reason, limit, ctrl.state.ceiling.limit) == ("hold:floor", 64, 64)
+    ticks = int(BP_CEILING_RELEASE_S / TICK_S)
+    traj, reasons = climb(ctrl, limit, ticks + 60, knee(512), latency_s=1.0)
+    first_up = next(new for new, reason in zip(traj, reasons, strict=True) if reason == "trial:up")
+    assert first_up == 72, (first_up, traj)
+
+
 # --- whole runs -------------------------------------------------------------
 
 

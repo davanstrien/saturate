@@ -9,9 +9,11 @@
 #       https://raw.githubusercontent.com/davanstrien/saturate/main/bench/jobs_matrix.sh && bash /tmp/m.sh"
 #
 # env: CELL, MODEL, ENGINE_CMD, CELL_ARGS; REF (saturate under test, default origin/main);
+# HARNESS_REF (where bench/ comes from, default origin/main);
 # RESULTS_URI (default hf://buckets/davanstrien/saturate-bench/matrix).
 set -euo pipefail
 REF="${REF:-origin/main}"
+HARNESS_REF="${HARNESS_REF:-origin/main}"  # where bench/ comes from
 REPO_URL="${REPO_URL:-https://github.com/davanstrien/saturate}"
 RESULTS_URI="${RESULTS_URI:-hf://buckets/davanstrien/saturate-bench/matrix}"
 
@@ -29,6 +31,8 @@ git checkout -q "$REF"
 SHA=$(git rev-parse --short HEAD)
 echo "saturate at $SHA"
 uv venv -q --python 3.12 /work/v && uv pip install -q --python /work/v/bin/python ".[hf]" pillow
+git checkout -q "$HARNESS_REF"  # bench/ itself (saturate is installed, not run from the tree)
+echo "harness at $(git rev-parse --short HEAD)"
 
 n=0
 until curl -sf localhost:8000/health >/dev/null; do

@@ -90,7 +90,7 @@ def launch(cells: list[Cell], ref: str, branch: str, dry_run: bool) -> None:
         cmd = ["hf", "jobs", "run", "-d", "--flavor", cell.flavor, "--timeout", "90m",
                "--secrets", "HF_TOKEN", "-e", f"CELL={cell.name}", "-e", f"MODEL={cell.model}",
                "-e", f"ENGINE_CMD={cell.engine_cmd}", "-e", f"CELL_ARGS={' '.join(cell.args)}",
-               "-e", f"REF={ref}", cell.image,
+               "-e", f"REF={ref}", "-e", f"HARNESS_REF=origin/{branch}", cell.image,
                "bash", "-c", f"curl -sLo /tmp/m.sh {url} && bash /tmp/m.sh"]
         if dry_run:
             print(shlex.join(cmd))

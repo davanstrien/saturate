@@ -14,15 +14,20 @@ import dataclasses
 import importlib.metadata
 import json
 import logging
+import math
+import numbers
 import os
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
+from decimal import Decimal
+from fractions import Fraction
 
-from saturate import _logs
+from saturate import _logs, settings
 from saturate.controller import Auto, Fixed, Obs
 from saturate.core import AdaptiveClient, AdaptiveLimiter, Done
 from saturate.engine import Engine, wait_for_health
 from saturate.pipeline import through
+from saturate.settings import Setting
 from saturate.signals import CEILING_FLAG
 from saturate.sink import FileSink, ParquetSink, as_sink, read_output
 from saturate.source import (
@@ -72,6 +77,83 @@ def agent_mode() -> bool:
 def existing_ids(out_uri: str, retry_errors: bool = False) -> set[str]:
     """The resume anti-join set for an output directory (manifest-first, exact)."""
     return ParquetSink(out_uri, create=False).existing_ids(retry_errors=retry_errors)
+
+
+def _seconds(name: str, optional: bool = False, infinite: bool = False) -> Setting:
+    """A duration in seconds, 0 or more. Finite unless `infinite`: an infinite HTTP timeout
+    fails every request."""
+    return Setting(name, whole=False, low=0, high_open=not infinite, optional=optional)
+
+
+PUMP_SETTINGS = (
+    Setting("flush_every", whole=True, low=0, optional=True),  # 0: a part per row
+    _seconds("read_timeout", optional=True),  # 0 or None: no read limit; None needs retry_budget_s
+    _seconds("retry_budget_s", optional=True, infinite=True),  # 0: the first attempt only
+    Setting("prepare_workers", whole=True, low=0),  # threads; 0 runs to_request on the loop
+    Setting("fail_fast", whole=True),  # 0 or less disables the check
+)
+PHASES = ("connect", "write", "pool")
+TIMEOUT_PHASES = {phase: _seconds(f"timeouts[{phase!r}]", optional=True) for phase in PHASES}
+SIGNAL_SOURCES = ("auto", "none")
+
+
+def _infinite(value) -> bool:
+    """Whether the number given is infinite itself (a huge finite Decimal is not, though it
+    becomes inf as a float)."""
+    if isinstance(value, Decimal):
+        return value.is_infinite()
+    if isinstance(value, (numbers.Integral, Fraction)):
+        return False
+    return math.isinf(value)
+
+
+def _native(setting: Setting, value):
+    """An accepted number as Python's own int (a count) or float (a duration): a Decimal or a
+    NumPy scalar breaks the float arithmetic and the thread limiter downstream. A duration
+    that does not survive as a float (it overflows, or a positive value rounds to 0, which
+    would mean no timer) is refused. None stays None."""
+    if value is None:
+        return None
+    if setting.whole:
+        return int(value)
+    try:
+        seconds = float(value)
+    except OverflowError:
+        raise ValueError(f"pump() requires {setting.requirement()}, not {value!r} (too large)") from None
+    if value > 0 and seconds == 0:
+        raise ValueError(f"pump() requires {setting.requirement()}, not {value!r}: it rounds to 0.0 as a "
+                         "float, which would mean no limit")
+    if not setting.allows(seconds) or (math.isinf(seconds) and not _infinite(value)):
+        raise ValueError(f"pump() requires {setting.requirement()}, not {value!r}: it becomes {seconds!r} "
+                         "as a float")
+    return seconds
+
+
+def _check_pump_settings(flush_every, read_timeout, retry_budget_s, prepare_workers, fail_fast,
+                         timeouts, signal_source) -> dict:
+    """Refuse a pump() setting outside its range before the run starts, with the setting's name,
+    the range and the value given. Negative counts and durations, fractional counts and infinite
+    timeouts (an infinite HTTP timeout fails every request: 0 or None means no timer) are
+    refused even where a run would have gone on. Returns the numbers as Python ints and floats."""
+    numbers_given = dict(flush_every=flush_every, read_timeout=read_timeout, retry_budget_s=retry_budget_s,
+                         prepare_workers=prepare_workers, fail_fast=fail_fast)
+    settings.check("pump()", PUMP_SETTINGS, numbers_given)
+    if read_timeout is None and retry_budget_s is None:  # the default budget is 2 x read_timeout
+        raise ValueError("pump() requires retry_budget_s when read_timeout is None")
+    if timeouts is not None:
+        if not isinstance(timeouts, Mapping):
+            raise ValueError(f"pump() requires timeouts to be a dict or None, not {timeouts!r}")
+        unknown = sorted(set(timeouts) - set(PHASES))
+        if unknown:
+            raise ValueError(f"pump() timeouts: unknown phase(s) {unknown}; the read timeout is "
+                             "read_timeout")
+        settings.check("pump()", tuple(TIMEOUT_PHASES.values()),
+                       {TIMEOUT_PHASES[phase].name: timeouts.get(phase) for phase in PHASES})
+        timeouts = {phase: _native(TIMEOUT_PHASES[phase], value) for phase, value in timeouts.items()}
+    if signal_source not in SIGNAL_SOURCES:
+        raise ValueError(f"pump() requires signal_source in {SIGNAL_SOURCES}, not {signal_source!r}")
+    native = {setting.name: _native(setting, numbers_given[setting.name]) for setting in PUMP_SETTINGS}
+    return native | dict(timeouts=timeouts)
 
 
 class RowsLostError(RuntimeError):
@@ -124,7 +206,7 @@ def pump(
     window: Fixed | Auto | None = None,
     shard: tuple[int, int] = (0, 1),
     flush_every: int | None = None,
-    read_timeout: float = 1800.0,
+    read_timeout: float | None = 1800.0,
     route: str = "/chat/completions",
     headers: dict | None = None,
     retry_errors: bool = False,
@@ -161,7 +243,8 @@ def pump(
         s3://..., where each write is slow), whichever comes first: a row's output appears
         within that long, and a crash loses at most that long of rows, which a resume
         re-requests. Rows are counted, not bytes: lower it if parse returns large payloads.
-    read_timeout: seconds to wait for a single response (long generations are legitimate).
+    read_timeout: seconds to wait for the next part of a response (long generations are
+        legitimate). 0 or None: no read limit; None needs an explicit retry_budget_s.
     retry_budget_s: active-work budget for one row's attempts, retries and backoff included.
         Time paused on an open circuit breaker does not count, so it is not a deadline: a row
         can outlive it while the run waits for the server. None (default) = max(300, 2 *
@@ -190,7 +273,15 @@ def pump(
         bad token, a parse bug), before any of them is stored, so a fixed re-run retries
         them. 0 disables the check. Off when retry_errors=True: that input is mostly rows that
         already failed, and some rows fail for good.
+
+    A setting outside its range (read_timeout=-1, prepare_workers=2.5, signal_source="metrics",
+    ...) raises ValueError before the run starts, naming the setting and the range it needs.
     """
+    checked = _check_pump_settings(flush_every, read_timeout, retry_budget_s, prepare_workers,
+                                   fail_fast, timeouts, signal_source)
+    flush_every, read_timeout = checked["flush_every"], checked["read_timeout"]
+    retry_budget_s, timeouts = checked["retry_budget_s"], checked["timeouts"]
+    prepare_workers, fail_fast = checked["prepare_workers"], checked["fail_fast"]
     shard = check_shard(shard)
     select_shard = shard[1] > 1
     if select_shard:

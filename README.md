@@ -115,7 +115,8 @@ Notes on what you didn't have to do:
 
 - **No concurrency number.** The in-flight window tunes itself: it backs off when the
   server shows pressure (errors, timeouts, a growing queue). Otherwise it tries a wider or
-  narrower window and keeps the change only when delivered throughput improves
+  narrower window: it keeps a wider one when delivered throughput improves, and a narrower
+  one when throughput holds
   (docs/design.md, "The controller"). When the
   engine's metrics gauges are reachable (vLLM, SGLang, llama.cpp, TensorRT-LLM, and TEI's
   queue depth) they sharpen the decisions; against opaque endpoints (a hosted API, a
@@ -146,9 +147,6 @@ Notes on what you didn't have to do:
   is hot, dataset repos for single-writer runs and as the final publish target.
   (Sharding vocabulary: a fan-out run is `world` shards, each identified by its
   `rank` — see "Scaling" below.)
-
-<!-- TODO: a "starting points per workload" table (window, flush_every, prepare_workers),
-     from the benchmark matrix. -->
 
 ## Task wrappers live above this library
 

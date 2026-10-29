@@ -41,6 +41,7 @@ def call(output, endpoint="http://127.0.0.1:9/v1", rows=1, **settings):
     (dict(read_timeout=Decimal("1e400")), "becomes inf as a float"),
     (dict(read_timeout=Fraction(10**400)), "too large"),
     (dict(read_timeout=10**400), "too large"),
+    (dict(retry_budget_s=Decimal("1e400")), "becomes inf as a float"),
     (dict(timeouts={"read": 30}), "unknown phase"),
     (dict(timeouts={"connect": -1}), "0 <= timeouts['connect'] < inf"),
     (dict(timeouts={"pool": "5"}), "timeouts['pool']"),

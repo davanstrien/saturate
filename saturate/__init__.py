@@ -14,9 +14,13 @@ import dataclasses
 import importlib.metadata
 import json
 import logging
+import math
+import numbers
 import os
 import time
 from collections.abc import Callable, Iterable, Mapping
+from decimal import Decimal
+from fractions import Fraction
 
 from saturate import _logs, settings
 from saturate.controller import Auto, Fixed, Obs
@@ -93,6 +97,16 @@ TIMEOUT_PHASES = {phase: _seconds(f"timeouts[{phase!r}]", optional=True) for pha
 SIGNAL_SOURCES = ("auto", "none")
 
 
+def _infinite(value) -> bool:
+    """Whether the number given is infinite itself (a huge finite Decimal is not, though it
+    becomes inf as a float)."""
+    if isinstance(value, Decimal):
+        return value.is_infinite()
+    if isinstance(value, (numbers.Integral, Fraction)):
+        return False
+    return math.isinf(value)
+
+
 def _native(setting: Setting, value):
     """An accepted number as Python's own int (a count) or float (a duration): a Decimal or a
     NumPy scalar breaks the float arithmetic and the thread limiter downstream. A duration
@@ -109,7 +123,7 @@ def _native(setting: Setting, value):
     if value > 0 and seconds == 0:
         raise ValueError(f"pump() requires {setting.requirement()}, not {value!r}: it rounds to 0.0 as a "
                          "float, which would mean no limit")
-    if not setting.allows(seconds):
+    if not setting.allows(seconds) or (math.isinf(seconds) and not _infinite(value)):
         raise ValueError(f"pump() requires {setting.requirement()}, not {value!r}: it becomes {seconds!r} "
                          "as a float")
     return seconds

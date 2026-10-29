@@ -11,15 +11,42 @@ All notable changes to saturate are listed here. The format follows
 Read this section before you upgrade a running pipeline. Each item says what changed and
 what to do.
 
+- **`pump(shard=(k, n))` now selects input** (#61, fixes #19). In 0.2 it only labelled the
+  output, so each shard ran every row unless you split the input yourself. Now each shard
+  processes only rows with `shard_of(id, n) == k`, a hash of the id. This is the one change
+  that can lose rows without an error.
+  - **If you split the input yourself by another rule** (for example `split_dataset_by_node`)
+    and passed `shard=` as a label, remove `shard=`: with it, pump drops the rows that hash
+    to other shards and still writes a completion marker. Without `shard=`, give each Job
+    its own output.
+  - Give every Job the same `rows` and its own `shard`. You no longer need `shard_select`:
+
+    ```python
+    # 0.2
+    pump(shard_select(stream(rows), rank, world), ..., shard=(rank, world))
+    # 0.3
+    pump(rows, ..., shard=(rank, world))
+    ```
+
+    The 0.2 form still works in 0.3, because `shard_select` now uses the same hash rule.
+  - `shard_select` no longer does strided assignment, and its `skip` parameter is removed.
+  - For large objects, also pass `shard=` to the source. `bucket_rows` then reads only its
+    own objects. `dataset_rows` decodes only its own rows when it loads a repo id itself
+    and uses index or column ids. Otherwise it decodes every row and then drops the other
+    shards' rows.
+  - `shard` must be a pair of ints with `0 <= rank < world`. Other values raise.
+  - The `limit` of `dataset_rows` and `bucket_rows` counts input rows before sharding and
+    `skip`. Both sources now load or list when you call them, not at the first row.
+
 - **Finish or restart in-flight 0.2 runs that use `dataset_rows` or `bucket_rows` ids.**
   The id formats changed, so a 0.3 resume of a 0.2 output does not recognise those rows and
   runs them again (#61). Content ids, column ids and your own `id_key`/`id_fn` ids do not
   change.
   - `dataset_rows` index ids were `{split}-{i:09d}`. For a repo id they are now
     `{repo}[@{revision}]:{config}:{split}:{i:09d}`, for example
-    `org/books:en:train:000000012`. The revision is in the id only when you pin one. For an
-    already-loaded dataset object they are `{config}:{split}:{i:09d}`, or
-    `{split}:{i:09d}` without `config`.
+    `org/books:en:train:000000012`. For an already-loaded dataset object they are
+    `{config}:{split}:{i:09d}`. The revision is in the id only when you pin one, and the
+    config only when you pass one, in both forms.
   - `bucket_rows` ids were relative to the glob's static prefix. They are now the full path
     that fsspec lists, without the scheme (`buckets/org/b/scans/p1.png`). To keep the 0.2
     ids, pass `root=` as the directory before the first glob character:
@@ -44,33 +71,8 @@ what to do.
     `completions/` and the `telemetry-*.jsonl` files to the paths in the table. Resume
     still works after the move.
   - A coordinator that watches `completions/` must watch `__saturate/completions/`.
-  - A 0.2 output can also hold null-typed struct fields on disk (fixed for new parts in
-    #59), so a whole-folder read of it can still fail. Use `read_output` for those.
-
-- **`pump(shard=(k, n))` now selects input** (#61, fixes #19). In 0.2 it only labelled the
-  output, so each shard ran every row unless you split the input yourself. Now each shard
-  processes only rows with `shard_of(id, n) == k`, a hash of the id.
-  - Give every Job the same `rows` and its own `shard`. You no longer need `shard_select`:
-
-    ```python
-    # 0.2
-    pump(shard_select(stream(rows), rank, world), ..., shard=(rank, world))
-    # 0.3
-    pump(rows, ..., shard=(rank, world))
-    ```
-
-    The 0.2 form still works in 0.3, because `shard_select` now uses the same hash rule.
-  - `shard_select` no longer does strided assignment, and its `skip` parameter is removed.
-  - Input that you split by another rule (for example `split_dataset_by_node`) must not get
-    `shard=`. Without `shard=`, give each Job its own output. With it, pump drops the rows
-    that hash to other shards.
-  - For large objects, also pass `shard=` to the source. `bucket_rows` then reads only its
-    own objects. `dataset_rows` decodes only its own rows when it loads a repo id itself
-    and uses index or column ids. Otherwise it decodes every row and then drops the other
-    shards' rows.
-  - `shard` must be a pair of ints with `0 <= rank < world`. Other values raise.
-  - The `limit` of `dataset_rows` and `bucket_rows` counts input rows before sharding and
-    `skip`. Both sources now load or list when you call them, not at the first row.
+  - A whole-folder read of a 0.2 output can still fail on its null-typed fields (see Fixed,
+    #59). Use `read_output` for those.
 
 - **The HTTP client is aiohttp, not httpx2** (#57). httpx2 is no longer a dependency.
   - `proxy=` on `pump()` and `AdaptiveClient` sets the proxy. `None` (the default) uses the
@@ -83,7 +85,7 @@ what to do.
   - `Engine(ready_accept=...)` receives a reply object with `status_code`, not an
     `httpx.Response`.
 
-- **Human output goes through `logging`** (#71). All messages use loggers under
+- **Progress messages go through `logging`** (#71). All messages use loggers under
   `saturate`. If your program configures no handler, saturate prints the same `[pump] …`
   lines to stderr as before. When you add a handler (for example `logging.basicConfig()`),
   the lines go to your handlers instead. Set the level on `logging.getLogger("saturate")`.
@@ -100,7 +102,8 @@ what to do.
   that cannot work: a negative `flush_every`, `read_timeout`, `retry_budget_s` or
   `prepare_workers`; an infinite `read_timeout` or phase timeout; an unknown `timeouts`
   phase; and any `signal_source` other than `"auto"` or `"none"`. In 0.2,
-  `signal_source="metrics"` scraped anyway. `Auto` checks its settings the same way
+  `signal_source="metrics"` scraped anyway. `read_timeout=None` (no read limit) now needs
+  an explicit `retry_budget_s`, because the default budget is derived from `read_timeout`. `Auto` checks its settings the same way
   (#70, #74).
 
 - **A run stops when its first 32 completed rows all fail** (#38). It raises `FatalTransportError`
@@ -146,8 +149,11 @@ what to do.
     every re-send (#42).
   - `bound_by` has a new value, `sink`, and `input_bound` is also true when the sink is
     behind (#54). The new `sink_s` key gives the wait.
-  - `Stats` gains `rows_errored_prior` (#38), `retries` (#42) and the property
-    `rows_unaccounted` (#58). No key is removed.
+  - `Stats` gains fields (see Added); no key is removed.
+
+- **A custom sink runs on a writer thread** (#54). `append`, `flush` and the other sink
+  calls run on one thread off the event loop, in order. A 0.2 sink that touches the event
+  loop, or state shared with other threads, must be made thread-safe.
 
 - **Dependency floors** (#36, #51, #57, #59): `anyio>=4.15.1` and `aiohttp>=3.14.4` are new
   direct dependencies. `pyarrow>=21` (was 15) and `fsspec>=2024.3` (was 2024.2).

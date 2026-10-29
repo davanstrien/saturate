@@ -1,14 +1,14 @@
 # WHY.md — why this exists, and why not just use X
 
-Every claim below carries a receipt: a job id, a source file and line, or a URL. If a claim has
+Every claim below carries a receipt: a job id, a source file and symbol, or a URL. If a claim has
 no receipt it does not belong here. Where an alternative genuinely wins, that is stated as an
 honest counter rather than argued away.
 
 Receipt conventions: `RESULTS.md §x` refers to `spikes/RESULTS.md` in this repo;
 `history/…` paths are in `docs/history/`; receipts marked **(internal)** cite the author's
 private measurement notes — those claims are measured but not reproducible from this repo,
-which is a weaker standard and flagged as such. External source line numbers were read at the
-commits noted (mostly 2026-07-28/29).
+which is a weaker standard and flagged as such. External sources were read at the commits or
+dates noted (mostly 2026-07-28/29).
 
 ---
 
@@ -76,8 +76,8 @@ So the reasons to have a client at all are not throughput. They are:
 
 **Honest counter — where in-process wins outright.** A single engine you own, one shot, text-only,
 max throughput, no crash-resume requirement, no second consumer: in-process is simpler and
-marginally faster, and you should just do it. That is why `Transport` is a protocol from day 0
-and in-process is the reserved post-v1 transport, not a rejected idea.
+marginally faster, and you should just do it. That is why the transport is a seam (bring your own through
+`AdaptiveLimiter`) and in-process is the planned post-v1 transport, not a rejected idea.
 
 > Receipt: [history/decisions.md](history/decisions.md) #15 — "transport option, not redesign".
 
@@ -157,8 +157,8 @@ actual rate. At ≤216 req/s the two are identical.
 
 - **Fixed semaphore.** `asyncio.Semaphore(self.config.max_concurrent_generations)`, created once,
   default 500. It is a number you pick.
-  > Receipt: `run_inference.py:560` (semaphore), `:87` (`max_concurrent_generations: int = 500`),
-  > datatrove @ `9f044f1`.
+  > Receipt: `run_inference.py`, the `asyncio.Semaphore(self.config.max_concurrent_generations)`
+  > call and the `max_concurrent_generations: int = 500` config field, datatrove @ `9f044f1`.
 - **That number is load-bearing and hand-tuned.** From an operational ledger of real campaigns:
   "`max_concurrent_generations` silently sizes sglang CUDA-graph capture: 256 OOMs at startup on
   1×80GB with a big model (sigquit ~90s after memory-pool init, before any generation). 64 is
@@ -171,8 +171,8 @@ actual rate. At ≤216 req/s the two are identical.
 - **The response shape is fixed by the framework.** `InferenceResult` carries exactly `text`,
   `finish_reason`, `usage`. To capture reasoning content, a field the API returns and the
   dataclass drops, we had to fork and add `InferenceResult.reasoning`.
-  > Receipt: `datatrove/pipeline/inference/types.py:8-20` @ `9f044f1` (three fields, no
-  > `reasoning`); fork commit `f7df218` **(internal fork, not in this repo)**.
+  > Receipt: `datatrove/pipeline/inference/types.py`, the `InferenceResult` dataclass @ `9f044f1`
+  > (three fields, no `reasoning`); fork commit `f7df218` **(internal fork, not in this repo)**.
   saturate's `parse(row, resp)` sees the raw response body; nothing to fork.
 
 **Complementary, not competitive.** The innermost saturate layer is an adaptive *semaphore*, not
@@ -203,9 +203,10 @@ self-hosted engine.
 not exist, so detection fails and it falls back silently to hard-coded defaults: 200 requests per
 minute, 200 concurrent.
 
-> Receipt: probe at `src/bespokelabs/curator/request_processor/online/openai_online_request_processor.py:104`
-> (inside `__init__`); fallback path and its log line "headers based detection failed, using
-> default value of…" at `.../online/base_online_request_processor.py:193-200`; the values at
+> Receipt: probe in `__init__` of
+> `src/bespokelabs/curator/request_processor/online/openai_online_request_processor.py`; fallback
+> path and its log line "headers based detection failed, using default value of…" in
+> `.../online/base_online_request_processor.py`; the values at
 > `src/bespokelabs/curator/request_processor/_default_rate_limits.json` →
 > `max_requests_per_minute: 200`, `max_concurrent_requests: 200`.
 
@@ -222,8 +223,8 @@ zero `Semaphore` uses; admission is purely a requests-per-minute and tokens-per-
 bucket, and on a rate-limit error the whole loop pauses for a fixed 15 seconds.
 
 > Receipt: `openai/openai-cookbook` → `examples/api_request_parallel_processor.py`, zero
-> `Semaphore` occurrences; `seconds_to_pause_after_rate_limit_error = 15` at line 123;
-> capacity model at lines 150-151, 200-206.
+> `Semaphore` occurrences; `seconds_to_pause_after_rate_limit_error = 15`; the capacity model is
+> the `available_request_capacity` / `available_token_capacity` token buckets.
 
 With rate-limit pacing but no in-flight cap, in-flight count is rate × latency — an unbounded
 number when latency rises, which is precisely when you want it to fall.
@@ -301,15 +302,15 @@ The mechanism, read at source:
   failures, provider timeouts, local timeouts and unexpected exceptions are all in the outcome
   taxonomy and none of them move the limit.
   > Receipt: `NVIDIA-NeMo/DataDesigner` →
-  > `packages/data-designer-engine/src/data_designer/engine/models/request_admission/controller.py:577-603`
-  > (`_apply_outcome`); taxonomy at `.../request_admission/outcomes.py:12-20`.
+  > `packages/data-designer-engine/src/data_designer/engine/models/request_admission/controller.py`
+  > (`_apply_outcome`); taxonomy in `.../request_admission/outcomes.py`.
 - Decrease is multiplicative by 0.75; increase is +1 after 25 consecutive successes; the limit is
   clamped at `effective_max`.
   > Receipt: `.../request_admission/config.py` — `multiplicative_decrease_factor: float = 0.75`,
   > `additive_increase_step: int = 1`, `successes_until_increase: int = 25`.
 - `effective_max` derives from the user-set static cap `max_parallel_requests`, whose default
   is 4.
-  > Receipt: `packages/data-designer-config/src/data_designer/config/models.py:435` —
+  > Receipt: `packages/data-designer-config/src/data_designer/config/models.py` —
   > `max_parallel_requests: int = Field(default=4, ge=1)`.
 
 So the ceiling is always the user's guess. The controller's job is to back off below it, never to
@@ -347,8 +348,8 @@ deployment story — and because their existence is evidence *for* this design, 
 
 **They read the same gauges.** The k8s Gateway API Inference Extension model-server protocol
 requires model servers to expose `TotalQueuedRequests`, `TotalRunningRequests` and
-`KVCacheUtilization`, and maps them to the exact per-engine metric names our dialect registry
-uses — `vllm:num_requests_waiting` / `sglang:num_queue_reqs`, `vllm:num_requests_running` /
+`KVCacheUtilization`, and maps them to the exact per-engine metric names our metrics table
+(`signals.METRICS`) uses — `vllm:num_requests_waiting` / `sglang:num_queue_reqs`, `vllm:num_requests_running` /
 `sglang:num_running_reqs`, `vllm:kv_cache_usage_perc` / `sglang:token_usage`, plus Triton
 TensorRT-LLM and trtllm-serve.
 
@@ -358,9 +359,9 @@ TensorRT-LLM and trtllm-serve.
 **State this precisely.** The document is marked *Partially implemented*, it notes the protocol
 "can, by definition, not be as strict" since the pluggable-architecture proposal, and it says
 explicitly that metric **names** need not match — only the metric **types and semantics** MUST
-follow. So: the semantics are contractual, the spellings are not. That is exactly why the dialect
-registry matches both prefix spellings and falls back to blind mode on a 404, rather than
-assuming names are stable.
+follow. So: the semantics are contractual, the spellings are not. That is exactly why the metrics
+table matches both prefix spellings and the scrape falls back to blind mode when it finds no
+gauges, rather than assuming names are stable.
 
 > Receipt: [history/decisions.md](history/decisions.md) #6; the live demonstration that
 > spellings drift is https://github.com/sgl-project/sglang/issues/12618 — SGLang users saw
@@ -389,7 +390,7 @@ metrics" conflates the two components.
 8+, and S3-compatible object storage or a filesystem, deployed as separate API server, batch
 processor and dispatcher components.
 
-> Receipt: `llm-d/llm-d-batch-gateway` README §Prerequisites, lines 166-168.
+> Receipt: `llm-d/llm-d-batch-gateway` README §Prerequisites.
 
 **Honest counter.** At platform scale — many tenants, many pods, a K8s cluster you already run —
 llm-d and the inference gateways are the right answer and saturate is not competing. saturate is
@@ -449,9 +450,9 @@ and hundreds of in-flight 1540px images killed the container.
 
 The fix is the TCP rule — never widen a window nothing has ever been acknowledged through:
 
-> Receipt: `saturate/controller.py`, `Auto._widen` — growth is clocked by completions (`hold:ack`
-> until `limit` completions have arrived since the last evaluation), so nothing widens before the
-> first completion ever.
+> Receipt: `saturate/controller.py`, `open_trial` and `Auto.evidence` — growth is clocked by
+> completions (`hold:ack` until `limit` completions and two throughput samples have arrived since
+> the last change), so nothing widens before the first completion ever.
 
 This is also the honest admission that an adaptive controller has its own failure mode. It cost
 us a job to find. The mitigation is in the code and in the guidance to cap `max_limit` for vision
@@ -514,9 +515,10 @@ read parquet, without importing saturate, from a laptop, a Job, or DuckDB. A dat
 service to run, a schema to migrate, and a credential to pass into every Job.
 
 **Sharp edge, stated rather than hidden.** Error rows are sparse — `{id, error}` with no user
-columns — so a directory containing both success and error parts has two schemas in it, and a
-naive `pq.read_table(dir)` will fail to union them. Readers doing strict schema unions must
-expect nullable user columns. This is a real cost of "error rows, not lost rows" and it is in
+columns — so parts written before the first success carry only `id` and `error`. A
+whole-directory `pq.read_table(dir)` takes the first part's schema and silently drops columns
+that first appear in later parts. Readers doing strict schema unions must expect nullable user
+columns, and a declared `schema=` gives every part the same columns. This is a real cost of "error rows, not lost rows" and it is in
 the contract, not a surprise, but it does qualify the "any parquet reader" promise above.
 
 > Receipt: `CONTRACT.md` §1 required-columns note; observed live on the shape-matrix run

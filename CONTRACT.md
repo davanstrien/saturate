@@ -21,12 +21,13 @@ Plus one discipline: **record, never guess** — every written value is an obser
 (tokens from the API, latency we timed); dollar cost is a reader-side computation.
 
 Stability: additive changes are allowed within v1 (new columns, sidecar files, keys);
-renames, retypes and removals are not. One exception before 0.3.0: §2 replaced strided
-fan-out with the id-hash rule and changed the `dataset_rows` and `bucket_rows` id formats,
-so an output written by 0.2 with those ids is not resumed by 0.3 (its rows run again); and
-§1 moved every sidecar under `__saturate/` (0.3 still reads manifests from `_manifest/` on
-resume). The controller, transport and engine lifecycle are
-implementation — free to change.
+renames, retypes and removals are not. The controller, transport and engine lifecycle are
+implementation and can change.
+
+Compatibility with 0.2 outputs (the one exception, made before 0.3.0): fan-out uses the
+id-hash rule of §2, and the `dataset_rows` and `bucket_rows` id formats differ from 0.2's, so
+0.3 does not resume an output that 0.2 wrote with those ids (its rows run again). Sidecars
+live under `__saturate/` (§1); on resume, 0.3 also reads manifests from 0.2's `_manifest/`.
 
 ## 1. Output layout
 
@@ -149,8 +150,8 @@ never a hard error). A manifest entry without a surviving part still counts as d
 resume trusts manifests; recovering rows from an out-of-band-deleted part means a fresh
 output dir, or deleting its orphaned sidecar. Sidecars are read concurrently (on a remote
 store the cost is per-file round-trips, not parsing); the done-set is independent of read
-order. Past ~1000 sidecars the reader says so on stderr — a larger `flush_every` (fast runs),
-or a longer `flush_interval_s` on `ParquetSink` (slow runs), means fewer files.
+order. Past 1000 sidecars the reader logs the count at INFO. A larger `flush_every` (fast runs) or a
+longer `flush_interval_s` on `ParquetSink` (slow runs) writes fewer files.
 
 While the circuit is open the breaker probes the run's real route about once a second for
 up to `max_open_s` (600 s by default) with a one-token request; against a shared hosted API
@@ -190,10 +191,11 @@ rest. The check covers the pipeline, not the sink's own storage.
 
 ## 6. Telemetry (frozen keys)
 
-One `__saturate/telemetry/telemetry-…jsonl` per run; one object per controller tick (~2s). The file is rewritten
-periodically during the run (about every minute locally, every five minutes on remote
-stores, stretching as the run grows — each rewrite re-sends the whole trajectory, so the
-interval is a quarter of the run so far) and finalised at exit; readers may see a partial trajectory mid-run.
+One `__saturate/telemetry/telemetry-shard{rank}-….jsonl` per run and shard; one object per
+controller tick (~2 s). The file is rewritten during the run and once more at exit, so a reader
+can see a partial trajectory mid-run. Each rewrite sends the whole trajectory, so the interval
+grows with the run: it is the larger of 30 ticks (about a minute) locally, 150 ticks (about
+five minutes) on a remote store, and a quarter of the ticks so far.
 
 | key | meaning |
 |---|---|
@@ -209,7 +211,7 @@ interval is a quarter of the run so far) and finalised at exit; readers may see 
 | `kv` / `hits` / `preempts` | KV-cache utilization · prefix-cache hit rate · scheduler preemptions (when exposed) |
 | `reason` | the controller's decision at the end of this tick: `hold`, `trial:up`, `trial:down`, `revert`, `cut:bp`, `cut:kv`, `cut:stall`, `cut:queue`, or `hold:<why>` (`hold` for `Fixed` and custom controllers). The set of values is not frozen: a reader should treat an unknown value as a hold |
 | `latency_s` | p50 duration of recent successful attempts: the attempt alone, without earlier failed attempts, backoff or breaker waits (null before the first success) |
-| `bound_by` | what limited this tick, in this order: `source` when `source_s` is at least a quarter of the tick with the window under half used (`inflight < 0.5 * limit`); `prep` when `prep_s / max(1, prep_workers)` is at least a quarter of the tick with the window under half used, or when `prep_workers` is 0 and `prep_s` is at least half the tick; `sink` when `sink_s` is at least a quarter of the tick with the window under half used (the output is behind: new rows waited for room); `loop` when `loop_lag_s` is at least half the tick (the loop was blocked outside `to_request`: `parse` or sink writes); `engine` when the window was full or admission waits dominated; null when nothing was conclusive (idle) |
+| `bound_by` | what limited this tick; the first that applies wins: (1) `source`, `prep` or `sink`, whichever of `source_s`, `prep_s / max(1, prep_workers)` and `sink_s` is largest (ties in that order), when it is at least a quarter of the tick and the window is under half used (`inflight < 0.5 * limit`); `sink` means new rows waited for room because the output is behind; (2) `prep` when `prep_workers` is 0 and `prep_s` is at least half the tick; (3) `loop` when `loop_lag_s` is at least half the tick (something else blocked the event loop, such as `parse`); (4) `engine` when the window was full or admission waits exceeded `source_s + prep_s`; null when nothing was conclusive (idle) |
 | `source_s` / `prep_s` | seconds this tick spent in the source iterator / in `to_request` (`prep_s` is the raw sum over prepare workers) |
 | `sink_s` | seconds new rows waited this tick for room in the backlog: the output was behind |
 | `prep_n` / `prep_workers` | `to_request` calls measured this tick / threads running it (0 = on the event loop) |

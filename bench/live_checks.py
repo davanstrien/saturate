@@ -41,18 +41,20 @@ def run(args) -> None:
 
     rows = [{"id": str(i), "text": f"Write one sentence about the number {i}."} for i in range(args.rows)]
     window = Auto() if args.window == "auto" else Fixed(int(args.window))
-    if args.kind == "embeddings":
-        to_request = lambda r: {"model": args.model, "input": r["text"]}  # noqa: E731
-        parse = lambda r, body: {"reply": str(len(body["data"][0]["embedding"]))}  # noqa: E731
-        route = "/embeddings"
-    else:
-        to_request = lambda r: {
-            "model": args.model,
-            "max_tokens": args.max_tokens,  # noqa: E731
-            "messages": [{"role": "user", "content": r["text"]}],
-        }
-        parse = lambda r, body: {"reply": body["choices"][0]["message"]["content"]}  # noqa: E731
-        route = "/chat/completions"
+    embeddings = args.kind == "embeddings"
+    route = "/embeddings" if embeddings else "/chat/completions"
+
+    def to_request(row: dict) -> dict:
+        if embeddings:
+            return {"model": args.model, "input": row["text"]}
+        messages = [{"role": "user", "content": row["text"]}]
+        return {"model": args.model, "max_tokens": args.max_tokens, "messages": messages}
+
+    def parse(row: dict, body: dict) -> dict:
+        if embeddings:
+            return {"reply": str(len(body["data"][0]["embedding"]))}
+        return {"reply": body["choices"][0]["message"]["content"]}
+
     stats = pump(
         rows,
         to_request,

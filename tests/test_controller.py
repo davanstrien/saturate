@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from saturate.controller import BP_CEILING_RELEASE_S, TICK_S, Auto, Reason, Trial
+from saturate.controller import BP_CEILING_RELEASE_S, TICK_S, Auto, Reason, Settling, Trial
 
 STEP = 8
 REASONS = set(typing.get_args(Reason))
@@ -795,3 +795,69 @@ def test_evidence_counts_only_the_completions_of_the_samples_kept():
     for _ in range(MAX_SAMPLES + 2):  # then nothing completes
         ctrl.decide(healthy(limit, successes=0, tok_s=0.0, **slow), limit)
     assert ctrl.evidence(ctrl.state, limit) is None
+
+
+FULL = dict(kv=0.99, hits=0.0)  # a full KV cache, unique prompts
+
+
+def test_preemptions_are_counted_from_the_first_reading_and_a_reset_is_not_a_preemption():
+    """The engine's counter is cumulative: its first reading is the baseline (preemptions
+    before this run are not this window's). A full cache with a preemption this tick halves
+    the window. A counter that goes down (a restart, perhaps of one engine among several whose
+    counters are summed, hiding another's preemptions) counts as a preemption: the KV rule
+    acts as it does without a counter."""
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    ctrl.decide(healthy(64, preempts=500, **FULL), 64)
+    assert ctrl.state.preempted == 0 and ctrl.last_reason != "cut:kv"
+    ctrl.decide(healthy(64, preempts=501), 64)  # a preemption with room in the cache: no cut
+    assert ctrl.state.preempted == 1 and ctrl.last_reason != "cut:kv"
+    new = ctrl.decide(healthy(64, preempts=502, **FULL), 64)
+    assert (ctrl.state.preempted, ctrl.last_reason, new) == (1, "cut:kv", 32)
+
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    ctrl.decide(healthy(64, preempts=110, **FULL), 64)  # engines at 100 and 10
+    new = ctrl.decide(healthy(64, preempts=11, **FULL), 64)  # the first restarted, the second preempted
+    assert (ctrl.state.preempted, ctrl.last_reason, new) == (1, "cut:kv", 32)
+
+
+def test_a_full_kv_cache_without_preemptions_is_not_a_cut_where_they_are_counted():
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    for _ in range(5):
+        ctrl.decide(healthy(64, preempts=7, **FULL), 64)
+        assert ctrl.last_reason != "cut:kv"
+
+
+def test_a_preemption_with_room_in_the_cache_is_not_a_cut():
+    """A preemption while KV is low (another client's burst passed) is not this window's limit."""
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    ctrl.decide(healthy(64, preempts=0), 64)
+    ctrl.decide(healthy(64, preempts=5), 64)
+    assert ctrl.last_reason != "cut:kv"
+
+
+def test_preemptions_during_a_cooldown_are_not_charged_to_the_next_window():
+    """A cut's cooldown sees the old window drain: preemptions then belong to it. The counter's
+    baseline moves every tick, so the first tick after the cooldown counts only its own."""
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    ctrl.decide(healthy(64, preempts=0, **FULL), 64)
+    limit = ctrl.decide(healthy(64, preempts=10, **FULL), 64)
+    assert (ctrl.last_reason, limit) == ("cut:kv", 32)
+    count, cooled = 10, 0
+    while isinstance(ctrl.state.phase, Settling) and ctrl.state.clock + TICK_S <= ctrl.state.phase.until:
+        count += 10  # the draining old window keeps preempting
+        limit = ctrl.decide(healthy(limit, preempts=count, **FULL), limit)
+        assert ctrl.last_reason == "hold:cooldown"
+        cooled += 1
+    assert cooled >= 1
+    limit = ctrl.decide(healthy(limit, preempts=count, **FULL), limit)  # the new window: none
+    assert ctrl.last_reason != "cut:kv" and limit == 32
+
+
+def test_a_gap_in_the_counter_starts_a_new_baseline():
+    """A reading missing (the scrape failed) between two counts: what happened in the gap is
+    not charged to the window that follows it."""
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    ctrl.decide(healthy(64, preempts=100, **FULL), 64)
+    ctrl.decide(healthy(64, preempts=None, kv=None, hits=None), 64)
+    ctrl.decide(healthy(64, preempts=900, **FULL), 64)
+    assert ctrl.state.preempted == 0 and ctrl.last_reason != "cut:kv"

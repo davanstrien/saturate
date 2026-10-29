@@ -3,6 +3,7 @@ throughput it reaches, how fast it gets there, and how long it spends past the w
 can use. bench/controller_sim.py prints the same scenarios as a table."""
 
 import math
+import statistics
 from typing import Any
 
 import pytest
@@ -185,3 +186,41 @@ def test_gauges_climb_a_gentle_slope_after_a_flat_stretch():
     engine = Engine([(16, 5.0), (32, 6.5), (64, 6.5), (128, 8.45)], cap=128, gauges=True)
     ticks = run(Auto(), engine, 400)
     assert share_of_best(ticks[200:], engine) >= 0.85, [t.limit for t in ticks[-12:]]
+
+
+# Qwen3.8-27B on one A100 (2026-10-29 matrix, vLLM, short text): flat past 128 requests, the KV
+# gauge at 0.9 from about 120, no preemption up to 256
+LARGE_MODEL = [(16, 10.2), (32, 16.6), (64, 25.8), (128, 29.4), (256, 29.2)]
+
+
+def kv_engine(seed: int, **over) -> Engine:
+    kw: dict[str, Any] = dict(curve=LARGE_MODEL, cap=256, kv_cap=133, preempt_past=10**6, hits=0.05,
+                              noise=0.05, seed=seed)
+    return Engine(**{**kw, **over})
+
+
+def shares(make_engine) -> list[float]:
+    return [share_of_best(run(Auto(seed=seed), make_engine(seed), 600)[100:]) for seed in SEEDS]
+
+
+def test_a_large_model_with_a_full_kv_cache_and_no_preemption_is_not_cut():
+    """A full KV cache with no preemption is a busy engine at its best: the window grows to the
+    flat stretch (a KV-only rule halved it to about 60, 86% of the best on the real engine)."""
+    got = shares(kv_engine)
+    assert statistics.mean(got) >= 0.95 and min(got) >= 0.9, sorted(got)[:3]
+
+
+@pytest.mark.parametrize("past", [160, 192])
+def test_an_engine_that_preempts_is_cut_back_from_preemption(past):
+    """Past `past` requests the engine preempts and throughput falls: with the cache full and
+    preemptions counted, cut:kv halves the window, so it does not stay in preemption."""
+    curve = [(16, 10.2), (64, 25.8), (past, 29.4), (past + 96, 22.0)]
+    got = shares(lambda seed: kv_engine(seed, curve=curve, preempt_past=past))
+    assert statistics.mean(got) >= 0.85 and min(got) >= 0.8, sorted(got)[:3]
+
+
+def test_an_engine_that_does_not_count_preemptions_is_still_cut_on_a_full_kv_cache():
+    """Without a preemption counter the KV gauge is all there is: KV high with low prefix hits
+    halves the window (cut:kv), as before."""
+    ticks = run(Auto(seed=0), kv_engine(0, counts_preempts=False), 300)
+    assert any(t.reason == "cut:kv" for t in ticks)

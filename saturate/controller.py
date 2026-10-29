@@ -164,6 +164,8 @@ class State:
     acked_ever: bool = False  # queue gauges mean nothing before the first completion ever
     silent_s: float = 0.0  # seconds of a full window with nothing completing
     stall_armed: bool = False  # a completion has arrived since the last change drained
+    preempts: int | None = None  # the engine's preemption counter as last seen (None: not reported)
+    preempted: int = 0  # preemptions since the previous tick
 
 
 # every reason a decision can give: the tick's `reason` in telemetry (CONTRACT §6)
@@ -244,7 +246,8 @@ class Auto:
        before (this one, or one released earlier), step just under it instead of halving.
        A ceiling is released after BP_CEILING_RELEASE_S, because a provider's limit can rise;
        the first move past it then goes at most an eighth past it, never x2 or x4.
-    3. cut:kv — KV high with a low (or absent) prefix-hit rate: halve.
+    3. cut:kv — KV high with a low (or absent) prefix-hit rate and, where the engine counts
+       preemptions (vLLM; SGLang's retractions), a preemption this tick: halve.
     4. cut:stall — window full and nothing completing for `stall_ticks` ticks, or 3x the
        latency when known, whichever is longer: halve. Once per episode: the next needs a
        completion after the last change has drained.
@@ -386,6 +389,16 @@ def _observe(auto: Auto, state: State, obs: Obs, limit: int) -> State:
     tick = _tick(obs)
     state = replace(state, clock=state.clock + tick, acked_ever=state.acked_ever or obs.successes > 0,
                     latency_s=obs.latency_s if obs.latency_s is not None else state.latency_s)
+    # the engine's preemption counter, every tick (in a cooldown too, so the next window is not
+    # charged with the last one's): preemptions since the previous reading. A missing reading
+    # starts over, so a later one is not charged with what happened in the gap. A counter that
+    # goes down (an engine, or one of several summed, restarted) may hide preemptions, so that
+    # tick counts as one: the KV rule then acts as it would without a counter.
+    if obs.preempts is None:
+        state = replace(state, preempts=None, preempted=0)
+    else:
+        since = obs.preempts - state.preempts if state.preempts is not None else 0
+        state = replace(state, preempts=obs.preempts, preempted=since if since >= 0 else 1)
     if state.ceiling is not None and state.clock - state.ceiling.met >= BP_CEILING_RELEASE_S:
         state = replace(state, ceiling=None, seen_ceiling=state.ceiling)  # a provider's limit can rise
     if isinstance(state.phase, Trial):
@@ -459,8 +472,12 @@ def overloaded(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
 
 
 def kv_full(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
-    """KV cache high and prefix hits low; with no hits signal at all (prefix caching off), high
-    KV is unverifiably benign, so it counts as full."""
+    """KV high and prefix hits low; with no hits signal at all (prefix caching off), high KV
+    is unverifiably benign, so it counts as full. Where the engine counts preemptions (vLLM;
+    SGLang's retractions), only with a preemption this tick as well: a full cache without one
+    is a busy engine at its best, as a large model runs."""
+    if obs.preempts is not None and state.preempted == 0:
+        return False
     return obs.kv is not None and obs.kv >= auto.kv_hi and (obs.hits is None or obs.hits < auto.hits_lo)
 
 

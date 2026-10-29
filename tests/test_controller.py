@@ -4,14 +4,14 @@ Each test names the engine behaviour it pins: a wedged engine, a burst of
 429s, a fast idle engine, long generations, a plateau that lags the tick, and
 the hill climber's own trial, judge and ceiling rules."""
 
+import typing
+
 import pytest
 
-from saturate.controller import BP_CEILING_RELEASE_S, TICK_S, Auto
+from saturate.controller import BP_CEILING_RELEASE_S, TICK_S, Auto, Reason
 
 STEP = 8
-REASONS = {"hold:cooldown", "cut:bp", "cut:kv", "cut:stall", "hold:input_bound", "cut:queue",
-           "hold:kept", "revert", "hold:ack", "hold", "hold:plateau", "trial:up", "trial:down",
-           "hold:ceiling", "hold:floor", "hold:jitter"}
+REASONS = set(typing.get_args(Reason))
 
 
 def healthy(limit, **over):

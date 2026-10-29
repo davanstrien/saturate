@@ -189,8 +189,9 @@ def test_a_hold_every_client_sees_does_not_spend_the_jitter():
     assert auto.state.phase.jitter == left
 
 
-whole = st.one_of(st.integers(-5, 2000), st.booleans(), st.floats(-5, 2000), st.just(float("nan")))
-real = st.floats(allow_nan=True, allow_infinity=True)
+whole = st.one_of(st.integers(-5, 2000), st.booleans(), st.floats(-5, 2000), st.just(float("nan")),
+                  st.text(max_size=2), st.integers(10**300, 10**400))
+real = st.one_of(st.floats(allow_nan=True, allow_infinity=True), st.text(max_size=2), st.fractions())
 SETTINGS = dict(target_waiting=whole, initial=st.one_of(st.none(), whole), min_limit=whole, max_limit=whole,
                 step=whole, stall_ticks=whole, kv_hi=real, hits_lo=real, improve=real, bp_frac=real)
 

@@ -472,10 +472,11 @@ def overloaded(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
 
 
 def kv_full(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
-    """KV high and prefix hits low; with no hits signal at all (prefix caching off), high KV
-    is unverifiably benign, so it counts as full. Where the engine counts preemptions (vLLM;
-    SGLang's retractions), only with a preemption this tick as well: a full cache without one
-    is a busy engine at its best, as a large model runs."""
+    """KV high and prefix hits low; with no hit rate this tick (prefix caching off, or on vLLM
+    no new query since the last scrape), high KV is unverifiably benign, so it counts as full.
+    Where the engine counts preemptions (vLLM; SGLang's retractions), only with a preemption
+    this tick as well: a full cache without one is a busy engine at its best, as a large model
+    runs."""
     if obs.preempts is not None and state.preempted == 0:
         return False
     return obs.kv is not None and obs.kv >= auto.kv_hi and (obs.hits is None or obs.hits < auto.hits_lo)

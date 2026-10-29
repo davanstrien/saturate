@@ -14,12 +14,13 @@ import dataclasses
 import importlib.metadata
 import json
 import logging
+import numbers
 import os
 import time
 from collections.abc import Callable, Iterable
 
 from saturate import _logs, settings
-from saturate.controller import MAX_COUNT, Auto, Fixed, Obs
+from saturate.controller import Auto, Fixed, Obs
 from saturate.core import AdaptiveClient, AdaptiveLimiter, Done
 from saturate.engine import Engine, wait_for_health
 from saturate.pipeline import through
@@ -75,29 +76,42 @@ def existing_ids(out_uri: str, retry_errors: bool = False) -> set[str]:
     return ParquetSink(out_uri, create=False).existing_ids(retry_errors=retry_errors)
 
 
-def _seconds(name: str, optional: bool = False) -> Setting:
-    """A duration: more than 0 and finite."""
-    return Setting(name, whole=False, low=0, low_open=True, high_open=True, optional=optional)
+def _seconds(name: str, optional: bool = False, infinite: bool = False) -> Setting:
+    """A duration in seconds, 0 or more. Finite unless `infinite`: an infinite HTTP timeout
+    fails every request."""
+    return Setting(name, whole=False, low=0, high_open=not infinite, optional=optional)
 
 
 PUMP_SETTINGS = (
-    Setting("flush_every", whole=True, low=1, high=MAX_COUNT, optional=True),
-    _seconds("read_timeout"),
-    _seconds("retry_budget_s", optional=True),
-    Setting("prepare_workers", whole=True, low=0, high=1024),  # threads
-    Setting("fail_fast", whole=True, low=0, high=MAX_COUNT),  # 0 disables the check
+    Setting("flush_every", whole=True, low=0, optional=True),  # 0: a part per row
+    _seconds("read_timeout", optional=True),  # 0: no read timer; None needs retry_budget_s
+    _seconds("retry_budget_s", optional=True, infinite=True),  # 0: the first attempt only
+    Setting("prepare_workers", whole=True, low=0),  # threads; 0 runs to_request on the loop
+    Setting("fail_fast", whole=True, low=0),  # 0 disables the check
 )
 TIMEOUT_PHASES = tuple(_seconds(phase, optional=True) for phase in ("connect", "write", "pool"))
 SIGNAL_SOURCES = ("auto", "none")
 
 
-def check_pump_settings(flush_every, read_timeout, retry_budget_s, prepare_workers, fail_fast,
-                        timeouts, signal_source) -> None:
+def _native(value):
+    """An accepted number as Python's own int or float (a Decimal or a NumPy scalar breaks the
+    float arithmetic and the thread limiter downstream); None stays None."""
+    if value is None or isinstance(value, int):
+        return value
+    if isinstance(value, numbers.Integral):
+        return int(value)
+    return float(value)
+
+
+def _check_pump_settings(flush_every, read_timeout, retry_budget_s, prepare_workers, fail_fast,
+                         timeouts, signal_source) -> dict:
     """Refuse a pump() setting that cannot work before the run starts, with the setting's name,
-    its range and the value given."""
-    settings.check("pump()", PUMP_SETTINGS, dict(
-        flush_every=flush_every, read_timeout=read_timeout, retry_budget_s=retry_budget_s,
-        prepare_workers=prepare_workers, fail_fast=fail_fast))
+    its range and the value given. Returns the numbers as Python ints and floats."""
+    numbers_given = dict(flush_every=flush_every, read_timeout=read_timeout, retry_budget_s=retry_budget_s,
+                         prepare_workers=prepare_workers, fail_fast=fail_fast)
+    settings.check("pump()", PUMP_SETTINGS, numbers_given)
+    if read_timeout is None and retry_budget_s is None:  # the default budget is 2 x read_timeout
+        raise ValueError("pump() requires retry_budget_s when read_timeout is None")
     if timeouts is not None:
         if not isinstance(timeouts, dict):
             raise ValueError(f"pump() requires timeouts to be a dict or None, not {timeouts!r}")
@@ -107,8 +121,10 @@ def check_pump_settings(flush_every, read_timeout, retry_budget_s, prepare_worke
                              "read_timeout")
         settings.check("pump() timeouts", TIMEOUT_PHASES,
                        {phase.name: timeouts.get(phase.name) for phase in TIMEOUT_PHASES})
+        timeouts = {phase: _native(value) for phase, value in timeouts.items()}
     if signal_source not in SIGNAL_SOURCES:
         raise ValueError(f"pump() requires signal_source in {SIGNAL_SOURCES}, not {signal_source!r}")
+    return {name: _native(value) for name, value in numbers_given.items()} | dict(timeouts=timeouts)
 
 
 class RowsLostError(RuntimeError):
@@ -228,11 +244,14 @@ def pump(
         them. 0 disables the check. Off when retry_errors=True: that input is mostly rows that
         already failed, and some rows fail for good.
 
-    A setting that cannot work (flush_every=0, read_timeout=-1, signal_source="metrics", ...)
+    A setting that cannot work (read_timeout=-1, prepare_workers=2.5, signal_source="metrics", ...)
     raises ValueError before the run starts, naming the setting and the range it needs.
     """
-    check_pump_settings(flush_every, read_timeout, retry_budget_s, prepare_workers, fail_fast,
-                        timeouts, signal_source)
+    checked = _check_pump_settings(flush_every, read_timeout, retry_budget_s, prepare_workers,
+                                   fail_fast, timeouts, signal_source)
+    flush_every, read_timeout = checked["flush_every"], checked["read_timeout"]
+    retry_budget_s, timeouts = checked["retry_budget_s"], checked["timeouts"]
+    prepare_workers, fail_fast = checked["prepare_workers"], checked["fail_fast"]
     shard = check_shard(shard)
     select_shard = shard[1] > 1
     if select_shard:

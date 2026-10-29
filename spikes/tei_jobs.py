@@ -27,8 +27,7 @@ OUTPUT = "hf://datasets/davanstrien/pumpjack-tier1-tei/data"
 def batch_rows():
     from datasets import load_dataset
 
-    ds = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT",
-                      split="train", streaming=True)
+    ds = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train", streaming=True)
     buf, b = [], 0
     for ex in ds:
         text = (ex.get("text") or "")[:800]
@@ -44,8 +43,7 @@ def batch_rows():
 def main() -> None:
     from huggingface_hub import HfApi
 
-    HfApi().create_repo("davanstrien/pumpjack-tier1-tei", repo_type="dataset",
-                        private=True, exist_ok=True)
+    HfApi().create_repo("davanstrien/pumpjack-tier1-tei", repo_type="dataset", private=True, exist_ok=True)
     base = sys.argv[1].rstrip("/")
     endpoint = f"{base}/v1"
     headers = {"Authorization": f"Bearer {get_token()}"}
@@ -57,16 +55,25 @@ def main() -> None:
         data = body["data"]
         if len(data) != len(row["texts"]):
             raise ValueError(f"expected {len(row['texts'])} embeddings, got {len(data)}")
-        return {"texts": row["texts"],
-                "embeddings": [d["embedding"] for d in data],
-                "n_texts": len(data),
-                "prompt_tokens": (body.get("usage") or {}).get("prompt_tokens")}
+        return {
+            "texts": row["texts"],
+            "embeddings": [d["embedding"] for d in data],
+            "n_texts": len(data),
+            "prompt_tokens": (body.get("usage") or {}).get("prompt_tokens"),
+        }
 
     wait_for_health(endpoint, 900, headers=headers)
-    stats = pump(batch_rows(), to_request, parse, endpoint, OUTPUT,
-                 route="/embeddings", headers=headers,
-                 window=Auto(target_waiting=8, initial=4, max_limit=32),
-                 flush_every=25)
+    stats = pump(
+        batch_rows(),
+        to_request,
+        parse,
+        endpoint,
+        OUTPUT,
+        route="/embeddings",
+        headers=headers,
+        window=Auto(target_waiting=8, initial=4, max_limit=32),
+        flush_every=25,
+    )
     print("TEI_JOBS " + stats.to_json(), flush=True)
 
 

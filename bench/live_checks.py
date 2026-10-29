@@ -35,12 +35,29 @@ def run(args) -> None:
 
     rows = [{"id": str(i), "text": f"Write one sentence about the number {i}."} for i in range(args.rows)]
     window = Auto() if args.window == "auto" else Fixed(int(args.window))
-    stats = pump(rows, lambda r: {"model": args.model, "max_tokens": args.max_tokens,
-                                  "messages": [{"role": "user", "content": r["text"]}]},
-                 lambda r, body: {"reply": body["choices"][0]["message"]["content"]},
-                 endpoint=args.endpoint, output=args.output, window=window, id_key="id")
-    print(json.dumps({"rows_processed": stats.rows_processed, "rows_failed": stats.rows_failed,
-                      "breaker_opens": stats.breaker_opens}), flush=True)
+    stats = pump(
+        rows,
+        lambda r: {
+            "model": args.model,
+            "max_tokens": args.max_tokens,
+            "messages": [{"role": "user", "content": r["text"]}],
+        },
+        lambda r, body: {"reply": body["choices"][0]["message"]["content"]},
+        endpoint=args.endpoint,
+        output=args.output,
+        window=window,
+        id_key="id",
+    )
+    print(
+        json.dumps(
+            {
+                "rows_processed": stats.rows_processed,
+                "rows_failed": stats.rows_failed,
+                "breaker_opens": stats.breaker_opens,
+            }
+        ),
+        flush=True,
+    )
 
 
 def written(output: str) -> dict:
@@ -57,8 +74,23 @@ def written(output: str) -> dict:
 
 
 def start_run(args, output: str, rows: int, window: str, max_tokens: int) -> subprocess.Popen:
-    cmd = [sys.executable, __file__, "run", "--endpoint", args.endpoint, "--model", args.model,
-           "--output", output, "--rows", str(rows), "--window", window, "--max-tokens", str(max_tokens)]
+    cmd = [
+        sys.executable,
+        __file__,
+        "run",
+        "--endpoint",
+        args.endpoint,
+        "--model",
+        args.model,
+        "--output",
+        output,
+        "--rows",
+        str(rows),
+        "--window",
+        window,
+        "--max-tokens",
+        str(max_tokens),
+    ]
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
 
 
@@ -136,8 +168,9 @@ def stop_engine() -> None:
 
 def start_engine() -> None:
     log = open("/tmp/engine-restart.log", "w")
-    engine = subprocess.Popen(os.environ["ENGINE_START"], shell=True, stdout=log, stderr=log,
-                              start_new_session=True)
+    engine = subprocess.Popen(
+        os.environ["ENGINE_START"], shell=True, stdout=log, stderr=log, start_new_session=True
+    )
     with open(PGID_FILE, "w") as f:
         f.write(str(engine.pid))
 

@@ -23,8 +23,7 @@ N_BATCHES = 500
 def batch_rows():
     from datasets import load_dataset
 
-    ds = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT",
-                      split="train", streaming=True)
+    ds = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train", streaming=True)
     buf, b = [], 0
     for ex in ds:
         text = (ex.get("text") or "")[:1200]
@@ -40,8 +39,7 @@ def batch_rows():
 def main() -> None:
     from huggingface_hub import HfApi
 
-    HfApi().create_repo("davanstrien/pumpjack-tier1-embed", repo_type="dataset",
-                        private=True, exist_ok=True)
+    HfApi().create_repo("davanstrien/pumpjack-tier1-embed", repo_type="dataset", private=True, exist_ok=True)
 
     def to_request(row: dict) -> dict:
         return {"model": MODEL, "input": row["texts"]}
@@ -51,18 +49,28 @@ def main() -> None:
         if len(data) != len(row["texts"]):  # schema-invalid: never mark as success
             raise ValueError(f"expected {len(row['texts'])} embeddings, got {len(data)}")
         usage = body.get("usage") or {}
-        return {"texts": row["texts"],
-                "embeddings": [d["embedding"] for d in data],
-                "n_texts": len(data),
-                "prompt_tokens": usage.get("prompt_tokens")}
+        return {
+            "texts": row["texts"],
+            "embeddings": [d["embedding"] for d in data],
+            "n_texts": len(data),
+            "prompt_tokens": usage.get("prompt_tokens"),
+        }
 
-    with Engine(MODEL, engine="vllm",
-                extra_args=["--runner", "pooling", "--convert", "embed",
-                            "--gpu-memory-utilization", "0.90"]) as endpoint:
-        stats = pump(batch_rows(), to_request, parse, endpoint, OUTPUT,
-                     route="/embeddings",
-                     window=Auto(target_waiting=8, initial=4, max_limit=64),
-                     flush_every=25)
+    with Engine(
+        MODEL,
+        engine="vllm",
+        extra_args=["--runner", "pooling", "--convert", "embed", "--gpu-memory-utilization", "0.90"],
+    ) as endpoint:
+        stats = pump(
+            batch_rows(),
+            to_request,
+            parse,
+            endpoint,
+            OUTPUT,
+            route="/embeddings",
+            window=Auto(target_waiting=8, initial=4, max_limit=64),
+            flush_every=25,
+        )
     print("TIER1_EMBED " + stats.to_json(), flush=True)
 
 

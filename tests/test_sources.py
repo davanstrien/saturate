@@ -12,11 +12,13 @@ from saturate import content_id, dataset_rows
 
 
 def ds():
-    return Dataset.from_dict({
-        "text": ["alpha", "beta", "gamma", "alpha"],
-        "key": ["a1", "b2", "c3", "a4"],
-        "extra": [1, 2, 3, 4],
-    })
+    return Dataset.from_dict(
+        {
+            "text": ["alpha", "beta", "gamma", "alpha"],
+            "key": ["a1", "b2", "c3", "a4"],
+            "extra": [1, 2, 3, 4],
+        }
+    )
 
 
 def test_index_ids_stable_across_iterations():
@@ -35,8 +37,7 @@ def test_streaming_object_matches_materialized():
 
 def test_limit_and_columns():
     rows = list(dataset_rows(ds(), columns=["text"], limit=2))
-    assert rows == [("train:000000000", {"text": "alpha"}),
-                    ("train:000000001", {"text": "beta"})]
+    assert rows == [("train:000000000", {"text": "alpha"}), ("train:000000001", {"text": "beta"})]
 
 
 def test_content_ids_dedup_identical_rows():
@@ -197,8 +198,10 @@ def test_transformed_iterable_is_never_decoded_twice(monkeypatch):
 
     calls = decode_counter(monkeypatch)
     big = Dataset.from_dict({"key": [f"k{i}" for i in range(40)]})
-    for transformed in (big.to_iterable_dataset().filter(lambda ex: True),
-                        big.to_iterable_dataset().map(lambda ex: ex)):
+    for transformed in (
+        big.to_iterable_dataset().filter(lambda ex: True),
+        big.to_iterable_dataset().map(lambda ex: ex),
+    ):
         calls.clear()
         plain = [i for i, _ in dataset_rows(big)]
         calls.clear()
@@ -218,7 +221,8 @@ def test_sharded_image_dataset_through_a_filter():
     PILImage.new("RGB", (2, 2)).save(png, format="PNG")
     images = Dataset.from_dict(
         {"img": [{"bytes": png.getvalue(), "path": None}] * 8, "key": [f"k{i}" for i in range(8)]},
-        features=Features({"img": Image(), "key": Value("string")}))
+        features=Features({"img": Image(), "key": Value("string")}),
+    )
     rows = list(dataset_rows(images.to_iterable_dataset().filter(lambda ex: True), shard=(0, 1)))
     assert len(rows) == 8 and all(hasattr(row["img"], "size") for _, row in rows)
 
@@ -249,12 +253,12 @@ def test_a_sharded_load_decodes_only_the_selected_columns(monkeypatch):
     import datasets
 
     features = datasets.Features({"text": datasets.Value("string"), "img": datasets.Image()})
-    bad = Dataset.from_dict({"text": ["a", "b"], "img": [{"bytes": b"not an image", "path": None}] * 2},
-                            features=features)
+    bad = Dataset.from_dict(
+        {"text": ["a", "b"], "img": [{"bytes": b"not an image", "path": None}] * 2}, features=features
+    )
     for loaded in (bad, bad.to_iterable_dataset()):  # streaming=False, streaming=True
         _loaded(monkeypatch, loaded)
-        rows = list(dataset_rows("org/x", columns=["text"], shard=(0, 1),
-                                 streaming=loaded is not bad))
+        rows = list(dataset_rows("org/x", columns=["text"], shard=(0, 1), streaming=loaded is not bad))
         assert [row for _, row in rows] == [{"text": "a"}, {"text": "b"}]
 
 

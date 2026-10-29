@@ -54,12 +54,39 @@ log = logging.getLogger(__name__)
 _logs.install()  # [pump] lines on stderr until the caller configures logging
 
 __all__ = [
-    "pump", "Stats", "RowsLostError", "Fixed", "Auto", "Obs", "Attempt", "Engine", "wait_for_health",
-    "Request", "make_json_request", "make_multipart_request", "existing_ids",
-    "AdaptiveClient", "AdaptiveLimiter", "Done", "through", "stream", "skip_done",
-    "drain", "read_output", "Sink", "sink_hooks", "ParquetSink", "FileSink", "shard_select",
-    "shard_of", "content_id", "prepare_ahead",
-    "FatalTransportError", "dataset_rows", "bucket_rows"]
+    "pump",
+    "Stats",
+    "RowsLostError",
+    "Fixed",
+    "Auto",
+    "Obs",
+    "Attempt",
+    "Engine",
+    "wait_for_health",
+    "Request",
+    "make_json_request",
+    "make_multipart_request",
+    "existing_ids",
+    "AdaptiveClient",
+    "AdaptiveLimiter",
+    "Done",
+    "through",
+    "stream",
+    "skip_done",
+    "drain",
+    "read_output",
+    "Sink",
+    "sink_hooks",
+    "ParquetSink",
+    "FileSink",
+    "shard_select",
+    "shard_of",
+    "content_id",
+    "prepare_ahead",
+    "FatalTransportError",
+    "dataset_rows",
+    "bucket_rows",
+]
 try:
     __version__ = importlib.metadata.version("saturate")
 except importlib.metadata.PackageNotFoundError:  # source tree without an installed dist
@@ -71,7 +98,6 @@ AGENT_ENV_VARS = ("CLAUDECODE", "CODEX_SANDBOX", "AI_AGENT")
 
 def agent_mode() -> bool:
     return any(os.environ.get(v) for v in AGENT_ENV_VARS)
-
 
 
 def existing_ids(out_uri: str, retry_errors: bool = False) -> set[str]:
@@ -121,22 +147,31 @@ def _native(setting: Setting, value):
     except OverflowError:
         raise ValueError(f"pump() requires {setting.requirement()}, not {value!r} (too large)") from None
     if value > 0 and seconds == 0:
-        raise ValueError(f"pump() requires {setting.requirement()}, not {value!r}: it rounds to 0.0 as a "
-                         "float, which would mean no limit")
+        raise ValueError(
+            f"pump() requires {setting.requirement()}, not {value!r}: it rounds to 0.0 as a "
+            "float, which would mean no limit"
+        )
     if not setting.allows(seconds) or (math.isinf(seconds) and not _infinite(value)):
-        raise ValueError(f"pump() requires {setting.requirement()}, not {value!r}: it becomes {seconds!r} "
-                         "as a float")
+        raise ValueError(
+            f"pump() requires {setting.requirement()}, not {value!r}: it becomes {seconds!r} as a float"
+        )
     return seconds
 
 
-def _check_pump_settings(flush_every, read_timeout, retry_budget_s, prepare_workers, fail_fast,
-                         timeouts, signal_source) -> dict:
+def _check_pump_settings(
+    flush_every, read_timeout, retry_budget_s, prepare_workers, fail_fast, timeouts, signal_source
+) -> dict:
     """Refuse a pump() setting outside its range before the run starts, with the setting's name,
     the range and the value given. Negative counts and durations, fractional counts and infinite
     timeouts (an infinite HTTP timeout fails every request: 0 or None means no timer) are
     refused even where a run would have gone on. Returns the numbers as Python ints and floats."""
-    numbers_given = dict(flush_every=flush_every, read_timeout=read_timeout, retry_budget_s=retry_budget_s,
-                         prepare_workers=prepare_workers, fail_fast=fail_fast)
+    numbers_given = dict(
+        flush_every=flush_every,
+        read_timeout=read_timeout,
+        retry_budget_s=retry_budget_s,
+        prepare_workers=prepare_workers,
+        fail_fast=fail_fast,
+    )
     settings.check("pump()", PUMP_SETTINGS, numbers_given)
     if read_timeout is None and retry_budget_s is None:  # the default budget is 2 x read_timeout
         raise ValueError("pump() requires retry_budget_s when read_timeout is None")
@@ -145,10 +180,12 @@ def _check_pump_settings(flush_every, read_timeout, retry_budget_s, prepare_work
             raise ValueError(f"pump() requires timeouts to be a dict or None, not {timeouts!r}")
         unknown = sorted(set(timeouts) - set(PHASES))
         if unknown:
-            raise ValueError(f"pump() timeouts: unknown phase(s) {unknown}; the read timeout is "
-                             "read_timeout")
-        settings.check("pump()", tuple(TIMEOUT_PHASES.values()),
-                       {TIMEOUT_PHASES[phase].name: timeouts.get(phase) for phase in PHASES})
+            raise ValueError(f"pump() timeouts: unknown phase(s) {unknown}; the read timeout is read_timeout")
+        settings.check(
+            "pump()",
+            tuple(TIMEOUT_PHASES.values()),
+            {TIMEOUT_PHASES[phase].name: timeouts.get(phase) for phase in PHASES},
+        )
         timeouts = {phase: _native(TIMEOUT_PHASES[phase], value) for phase, value in timeouts.items()}
     if signal_source not in SIGNAL_SOURCES:
         raise ValueError(f"pump() requires signal_source in {SIGNAL_SOURCES}, not {signal_source!r}")
@@ -278,30 +315,71 @@ def pump(
     A setting outside its range (read_timeout=-1, prepare_workers=2.5, signal_source="metrics",
     ...) raises ValueError before the run starts, naming the setting and the range it needs.
     """
-    checked = _check_pump_settings(flush_every, read_timeout, retry_budget_s, prepare_workers,
-                                   fail_fast, timeouts, signal_source)
+    checked = _check_pump_settings(
+        flush_every, read_timeout, retry_budget_s, prepare_workers, fail_fast, timeouts, signal_source
+    )
     flush_every, read_timeout = checked["flush_every"], checked["read_timeout"]
     retry_budget_s, timeouts = checked["retry_budget_s"], checked["timeouts"]
     prepare_workers, fail_fast = checked["prepare_workers"], checked["fail_fast"]
     shard = check_shard(shard)
     select_shard = shard[1] > 1
     if select_shard:
-        log.info(f"shard={shard}: processing only the rows whose id hashes to shard {shard[0]} "
-                 f"of {shard[1]}")
-    return asyncio.run(_pump(rows, to_request, parse, endpoint, output, window, shard,
-                             flush_every, read_timeout, route, headers, retry_errors,
-                             id_key, id_fn, signal_source, schema, prepare_workers,
-                             fail_fast, retry_budget_s, timeouts, proxy, select_shard))
+        log.info(f"shard={shard}: processing only the rows whose id hashes to shard {shard[0]} of {shard[1]}")
+    return asyncio.run(
+        _pump(
+            rows,
+            to_request,
+            parse,
+            endpoint,
+            output,
+            window,
+            shard,
+            flush_every,
+            read_timeout,
+            route,
+            headers,
+            retry_errors,
+            id_key,
+            id_fn,
+            signal_source,
+            schema,
+            prepare_workers,
+            fail_fast,
+            retry_budget_s,
+            timeouts,
+            proxy,
+            select_shard,
+        )
+    )
 
 
-async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_every,
-                read_timeout, route, extra_headers, retry_errors, id_key, id_fn,
-                signal_source, schema=None, prepare_workers=0, fail_fast=32,
-                retry_budget_s=None, timeouts=None, proxy=None, select_shard=False) -> Stats:
+async def _pump(
+    rows,
+    to_request,
+    parse,
+    endpoint,
+    output,
+    window,
+    shard,
+    flush_every,
+    read_timeout,
+    route,
+    extra_headers,
+    retry_errors,
+    id_key,
+    id_fn,
+    signal_source,
+    schema=None,
+    prepare_workers=0,
+    fail_fast=32,
+    retry_budget_s=None,
+    timeouts=None,
+    proxy=None,
+    select_shard=False,
+) -> Stats:
     stats = Stats()
     sink = as_sink(output, flush_every, schema=schema)
-    hdrs = {"User-Agent": USER_AGENT + (" (agent)" if agent_mode() else ""),
-            **(extra_headers or {})}
+    hdrs = {"User-Agent": USER_AGENT + (" (agent)" if agent_mode() else ""), **(extra_headers or {})}
     t0 = time.monotonic()
 
     pending = stream(rows, id_key=id_key, id_fn=id_fn)
@@ -333,14 +411,26 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
             # (a quarter of its length so far) so total bytes stay under ~5x the final file
             next_at = len(lines) + max(every, len(lines) // 4)
 
-    async with AdaptiveClient(endpoint, window=window, headers=hdrs,
-                              read_timeout=read_timeout,
-                              signal_source=signal_source, on_tick=on_tick,
-                              retry_budget_s=retry_budget_s, timeouts=timeouts,
-                              proxy=proxy) as client:
-        async with through(client, pending, to_request, parse, route=route,
-                           prepare_workers=prepare_workers,
-                           fail_fast=0 if retry_errors else fail_fast) as results:
+    async with AdaptiveClient(
+        endpoint,
+        window=window,
+        headers=hdrs,
+        read_timeout=read_timeout,
+        signal_source=signal_source,
+        on_tick=on_tick,
+        retry_budget_s=retry_budget_s,
+        timeouts=timeouts,
+        proxy=proxy,
+    ) as client:
+        async with through(
+            client,
+            pending,
+            to_request,
+            parse,
+            route=route,
+            prepare_workers=prepare_workers,
+            fail_fast=0 if retry_errors else fail_fast,
+        ) as results:
             await drain(results, sink, shard=shard, stats=stats)
         limiter = client.limiter
         dialect = client.dialect
@@ -349,9 +439,11 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
     if writer is not None:
         await writer  # never two writers on one file
     if stats.rows_unaccounted:  # a lost row is a bug: the run must not certify itself complete
-        raise RowsLostError(f"{stats.rows_unaccounted} of {stats.rows_total} rows were read but "
-                            "neither skipped nor handed to the sink; no completion marker was "
-                            "written, and a re-run resumes them")
+        raise RowsLostError(
+            f"{stats.rows_unaccounted} of {stats.rows_total} rows were read but "
+            "neither skipped nor handed to the sink; no completion marker was "
+            "written, and a re-run resumes them"
+        )
     stats.elapsed_s = round(time.monotonic() - t0, 2)
     stats.final_limit = limiter.limit
     stats.retries = getattr(limiter, "retries_total", 0)  # an embedder's own limiter may count none
@@ -363,9 +455,11 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
     stats.hints = advise(limiter.ticks, dialect, stats.final_limit, CEILING_FLAG)
     stats.hints += advise_input(limiter.ticks, prepare_workers)
     if stats.rows_errored_prior:
-        stats.hints.append(f"RETRY-ERRORS: {stats.rows_errored_prior} rows were skipped because their "
-                           "only record is an error; once the cause is fixed, re-run with "
-                           "retry_errors=True to retry them")
+        stats.hints.append(
+            f"RETRY-ERRORS: {stats.rows_errored_prior} rows were skipped because their "
+            "only record is an error; once the cause is fixed, re-run with "
+            "retry_errors=True to retry them"
+        )
     for h in stats.hints:
         log.info(f"advisor: {h}")
     if hooks.write_stats is not None:  # console-facing exact summary (CONTRACT §5)
@@ -376,14 +470,20 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
     if hooks.write_marker is not None:  # last: the marker certifies stats/telemetry landed
         await asyncio.to_thread(hooks.write_marker, shard)
     if stats.rows_done_prior:
-        log.info(f"resume: skipped {stats.rows_done_prior} rows already in the output "
-                 f"({stats.rows_errored_prior} of them only as errors)")
+        log.info(
+            f"resume: skipped {stats.rows_done_prior} rows already in the output "
+            f"({stats.rows_errored_prior} of them only as errors)"
+        )
     if stats.rows_deduped:
-        log.info(f"dedup: {stats.rows_deduped} rows had the id of an earlier row in this input and were "
-                 "skipped (the default id is a content hash: identical rows share it; to keep repeats, "
-                 "give each its own id, e.g. id_fn=lambda row: f\"{row['prompt_id']}-{row['sample']}\")")
-    log.info(f"done: {stats.rows_processed} ok, {stats.rows_failed} failed, "
-             f"{stats.tokens_per_sec} tok/s, window settled at {stats.final_limit}")
+        log.info(
+            f"dedup: {stats.rows_deduped} rows had the id of an earlier row in this input and were "
+            "skipped (the default id is a content hash: identical rows share it; to keep repeats, "
+            "give each its own id, e.g. id_fn=lambda row: f\"{row['prompt_id']}-{row['sample']}\")"
+        )
+    log.info(
+        f"done: {stats.rows_processed} ok, {stats.rows_failed} failed, "
+        f"{stats.tokens_per_sec} tok/s, window settled at {stats.final_limit}"
+    )
     if agent_mode():
         print(stats.to_json(), flush=True)  # data on stdout, one line
         log.info("Hint: re-run the same command to resume — it is always safe.")

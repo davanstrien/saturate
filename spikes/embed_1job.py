@@ -23,8 +23,7 @@ N_BATCHES = 3125  # 3,125 x 64 = 200,000 texts
 def batch_rows():
     from datasets import load_dataset
 
-    ds = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT",
-                      split="train", streaming=True)
+    ds = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train", streaming=True)
     buf, b = [], 0
     for ex in ds:
         text = (ex.get("text") or "")[:1200]
@@ -50,20 +49,38 @@ def main() -> None:
         if len(data) != len(row["texts"]):  # schema-invalid: never mark as success
             raise ValueError(f"expected {len(row['texts'])} embeddings, got {len(data)}")
         usage = body.get("usage") or {}
-        return {"texts": row["texts"],
-                "embeddings": [d["embedding"] for d in data],
-                "n_texts": len(data),
-                "prompt_tokens": usage.get("prompt_tokens")}
+        return {
+            "texts": row["texts"],
+            "embeddings": [d["embedding"] for d in data],
+            "n_texts": len(data),
+            "prompt_tokens": usage.get("prompt_tokens"),
+        }
 
     rows = batch_rows()
-    with Engine(MODEL, engine="vllm",
-                extra_args=["--runner", "pooling", "--convert", "embed",
-                            "--max-num-seqs", "256",
-                            "--gpu-memory-utilization", "0.90"]) as endpoint:
-        stats = pump(rows, to_request, parse, endpoint, OUTPUT,
-                     route="/embeddings",
-                     window=Auto(target_waiting=8, initial=4, max_limit=64),
-                     flush_every=50)
+    with Engine(
+        MODEL,
+        engine="vllm",
+        extra_args=[
+            "--runner",
+            "pooling",
+            "--convert",
+            "embed",
+            "--max-num-seqs",
+            "256",
+            "--gpu-memory-utilization",
+            "0.90",
+        ],
+    ) as endpoint:
+        stats = pump(
+            rows,
+            to_request,
+            parse,
+            endpoint,
+            OUTPUT,
+            route="/embeddings",
+            window=Auto(target_waiting=8, initial=4, max_limit=64),
+            flush_every=50,
+        )
     texts_s = round(stats.rows_processed * BATCH / stats.elapsed_s, 1) if stats.elapsed_s else 0
     print(f"EMBED_SCALE texts_per_sec={texts_s} " + stats.to_json(), flush=True)
 

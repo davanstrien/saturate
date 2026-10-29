@@ -158,15 +158,27 @@ def main() -> None:
     ap.add_argument("--parse-ms", type=float, default=0.0)
     ap.add_argument("--prepare-workers", type=int, default=0)
     ap.add_argument("--output", choices=["local", "slowmem"], default="local")
-    ap.add_argument("--output-uri", default=None,
-                    help="any fsspec URI (e.g. hf://buckets/...); a fresh subdirectory per run")
-    ap.add_argument("--write-delay-ms", type=float, default=0.0,
-                    help="slowmem: milliseconds each write takes")
+    ap.add_argument(
+        "--output-uri",
+        default=None,
+        help="any fsspec URI (e.g. hf://buckets/...); a fresh subdirectory per run",
+    )
+    ap.add_argument(
+        "--write-delay-ms", type=float, default=0.0, help="slowmem: milliseconds each write takes"
+    )
     ap.add_argument("--flush-every", type=int, default=None)
-    ap.add_argument("--kind", choices=["chat", "embeddings"], default="chat",
-                    help="chat completions, or /embeddings with the row text as input")
-    ap.add_argument("--signal-source", choices=["auto", "none"], default="auto",
-                    help="'none' never reads the engine's metrics (blind mode)")
+    ap.add_argument(
+        "--kind",
+        choices=["chat", "embeddings"],
+        default="chat",
+        help="chat completions, or /embeddings with the row text as input",
+    )
+    ap.add_argument(
+        "--signal-source",
+        choices=["auto", "none"],
+        default="auto",
+        help="'none' never reads the engine's metrics (blind mode)",
+    )
     args = ap.parse_args()
 
     if args.window == "auto":
@@ -188,11 +200,19 @@ def main() -> None:
     cpu0 = time.process_time()
     local = args.output_uri is None
     watcher = FirstPartWatcher(fs, root, t0, interval_s=0.01 if local else 0.5).start()
-    stats = pump(rows, make_to_request(args.prep_ms, args.prep_kind, args.model, args.max_tokens, args.kind),
-                 make_parse(args.parse_ms, args.kind),
-                 route="/embeddings" if args.kind == "embeddings" else "/chat/completions",
-                 endpoint=args.endpoint, output=out_uri, window=window, flush_every=args.flush_every,
-                 prepare_workers=args.prepare_workers, fail_fast=0, signal_source=args.signal_source)
+    stats = pump(
+        rows,
+        make_to_request(args.prep_ms, args.prep_kind, args.model, args.max_tokens, args.kind),
+        make_parse(args.parse_ms, args.kind),
+        route="/embeddings" if args.kind == "embeddings" else "/chat/completions",
+        endpoint=args.endpoint,
+        output=out_uri,
+        window=window,
+        flush_every=args.flush_every,
+        prepare_workers=args.prepare_workers,
+        fail_fast=0,
+        signal_source=args.signal_source,
+    )
     wall = time.perf_counter() - t0
     cpu = time.process_time() - cpu0
     watcher.stop()
@@ -200,23 +220,27 @@ def main() -> None:
     lags = [t["loop_lag_s"] for t in read_ticks(fs, root) if t.get("loop_lag_s") is not None]
     import saturate
 
-    print(json.dumps({
-        "saturate_version": saturate.__version__,
-        "rows": args.rows,
-        "rows_ok": stats.rows_processed,
-        "rows_failed": stats.rows_failed,
-        "wall_s": round(wall, 3),
-        "rows_per_s": round(stats.rows_processed / wall, 1),
-        "cpu_ms_per_row": round(cpu * 1000 / args.rows, 4),
-        "loop_lag_max_s": max(lags) if lags else None,
-        "loop_lag_mean_s": round(statistics.fmean(lags), 4) if lags else None,
-        "loop_lag_p99_s": percentile(lags, 99) if len(lags) >= 20 else None,
-        "ticks": len(lags),
-        "first_durable_s": round(watcher.first_s, 3) if watcher.first_s is not None else None,
-        "final_limit": stats.final_limit,
-        "tokens_per_s": stats.tokens_per_sec,
-        "peak_rss_mib": round(peak_rss_mib(), 1),
-    }))
+    print(
+        json.dumps(
+            {
+                "saturate_version": saturate.__version__,
+                "rows": args.rows,
+                "rows_ok": stats.rows_processed,
+                "rows_failed": stats.rows_failed,
+                "wall_s": round(wall, 3),
+                "rows_per_s": round(stats.rows_processed / wall, 1),
+                "cpu_ms_per_row": round(cpu * 1000 / args.rows, 4),
+                "loop_lag_max_s": max(lags) if lags else None,
+                "loop_lag_mean_s": round(statistics.fmean(lags), 4) if lags else None,
+                "loop_lag_p99_s": percentile(lags, 99) if len(lags) >= 20 else None,
+                "ticks": len(lags),
+                "first_durable_s": round(watcher.first_s, 3) if watcher.first_s is not None else None,
+                "final_limit": stats.final_limit,
+                "tokens_per_s": stats.tokens_per_sec,
+                "peak_rss_mib": round(peak_rss_mib(), 1),
+            }
+        )
+    )
 
 
 if __name__ == "__main__":

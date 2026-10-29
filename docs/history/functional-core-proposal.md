@@ -13,11 +13,11 @@ interface compositional — itertools/toolz-shaped piping, not a framework.
 ```python
 from pumpjack import AdaptiveClient, Auto, stream, skip_done, through, drain
 
-rows    = stream(source, id_key=None)        # normalize: dicts/tuples -> (id, row); lazy
-rows    = skip_done(rows, output)            # anti-join, manifest-first, within-run dedup
+rows = stream(source, id_key=None)  # normalize: dicts/tuples -> (id, row); lazy
+rows = skip_done(rows, output)  # anti-join, manifest-first, within-run dedup
 async with AdaptiveClient(endpoint, window=Auto()) as client:
-    results = through(client, rows, to_request, parse)   # adaptive unordered async map
-    stats   = await drain(results, output, shard=(0, 1)) # parts+manifest+markers+telemetry
+    results = through(client, rows, to_request, parse)  # adaptive unordered async map
+    stats = await drain(results, output, shard=(0, 1))  # parts+manifest+markers+telemetry
 ```
 
 - **`AdaptiveClient`** — window + controller + retry ladder + breaker + SignalSource behind
@@ -63,8 +63,8 @@ semaphore**, not a client:
 # pumpjack's innermost layer:
 limiter = AdaptiveLimiter(window=Auto(), signals=HttpScrape(endpoint))  # signals optional
 async with limiter.slot():
-    result = await server.send_request(payload)     # THEIR transport, unchanged
-limiter.observe(ok=True, tokens=n)                   # feedback drives the controller
+    result = await server.send_request(payload)  # THEIR transport, unchanged
+limiter.observe(ok=True, tokens=n)  # feedback drives the controller
 ```
 
 The datatrove integration is then a ~5-line diff in `_send_request` + one constructor swap,

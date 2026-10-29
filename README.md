@@ -213,9 +213,7 @@ Two sinks ship with that contract:
 ```python
 from saturate import FileSink
 
-stats = pump(
-    pages, to_request, parse, endpoint, output=FileSink("ocr-out/", ext=".md", key="markdown")
-)
+stats = pump(pages, to_request, parse, endpoint, output=FileSink("ocr-out/", ext=".md", key="markdown"))
 ```
 
 Or skip sinks entirely and consume the stream yourself — no resume, full freedom:

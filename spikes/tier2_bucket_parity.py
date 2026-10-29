@@ -44,15 +44,21 @@ def dolly_rows(skip: int, n: int):
 
 
 def to_request(row: dict) -> dict:
-    return {"model": MODEL, "messages": [{"role": "user", "content": row["text"]}],
-            "max_tokens": MAX_TOKENS, "temperature": 0.0}
+    return {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": row["text"]}],
+        "max_tokens": MAX_TOKENS,
+        "temperature": 0.0,
+    }
 
 
 def parse(row: dict, body: dict) -> dict:
     usage = body.get("usage") or {}
-    return {"out": body["choices"][0]["message"]["content"],
-            "prompt_tokens": usage.get("prompt_tokens"),
-            "completion_tokens": usage.get("completion_tokens")}
+    return {
+        "out": body["choices"][0]["message"]["content"],
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "completion_tokens": usage.get("completion_tokens"),
+    }
 
 
 async def bare_arm(endpoint: str, rows: list) -> dict:
@@ -78,28 +84,53 @@ async def bare_arm(endpoint: str, rows: list) -> dict:
 
         await asyncio.gather(*[one(row) for _, row in rows])
     dt = time.monotonic() - t0
-    return {"arm": "bare-httpx-64", "wall_s": round(dt, 1), "tokens": tokens,
-            "tok_s": round(tokens / dt, 1), "n": len(rows)}
+    return {
+        "arm": "bare-httpx-64",
+        "wall_s": round(dt, 1),
+        "tokens": tokens,
+        "tok_s": round(tokens / dt, 1),
+        "n": len(rows),
+    }
 
 
 def main() -> None:
-    with Engine(MODEL, engine="vllm",
-                extra_args=["--gpu-memory-utilization", "0.90",
-                            "--no-enable-prefix-caching"]) as endpoint:
+    with Engine(
+        MODEL, engine="vllm", extra_args=["--gpu-memory-utilization", "0.90", "--no-enable-prefix-caching"]
+    ) as endpoint:
         # --- Arm 1: bucket sink + bucket resume ---
-        s1 = pump(dolly_rows(0, 1000), to_request, parse, endpoint, BUCKET_OUT,
-                  window=Auto(target_waiting=8, initial=8), flush_every=100)
+        s1 = pump(
+            dolly_rows(0, 1000),
+            to_request,
+            parse,
+            endpoint,
+            BUCKET_OUT,
+            window=Auto(target_waiting=8, initial=8),
+            flush_every=100,
+        )
         print("BUCKET_RUN " + s1.to_json(), flush=True)
-        s2 = pump(dolly_rows(0, 1000), to_request, parse, endpoint, BUCKET_OUT,
-                  window=Auto(target_waiting=8, initial=8), flush_every=100)
+        s2 = pump(
+            dolly_rows(0, 1000),
+            to_request,
+            parse,
+            endpoint,
+            BUCKET_OUT,
+            window=Auto(target_waiting=8, initial=8),
+            flush_every=100,
+        )
         print("BUCKET_RESUME " + s2.to_json(), flush=True)  # want rows_done_prior=1000
 
         # --- Arm 2: parity, fresh rows per sub-arm ---
         bare = asyncio.run(bare_arm(endpoint, list(dolly_rows(2000, 2000))))
         print("PARITY_BARE " + json.dumps(bare), flush=True)
-        s3 = pump(dolly_rows(5000, 2000), to_request, parse, endpoint,
-                  "/tmp/parity-pump", window=Auto(target_waiting=8, initial=8),
-                  flush_every=200)
+        s3 = pump(
+            dolly_rows(5000, 2000),
+            to_request,
+            parse,
+            endpoint,
+            "/tmp/parity-pump",
+            window=Auto(target_waiting=8, initial=8),
+            flush_every=200,
+        )
         print("PARITY_PUMP " + s3.to_json(), flush=True)
         ratio = s3.tokens_per_sec / bare["tok_s"] if bare["tok_s"] else 0
         print(f"PARITY_RATIO {ratio:.3f} (bar: >=0.95)", flush=True)

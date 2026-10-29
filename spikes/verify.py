@@ -1,6 +1,6 @@
 """Verify a pumpjack output dir on hf://datasets from the laptop — CONTRACT.md rules.
 
-    python3 verify.py davanstrien/pumpjack-embed-4job [expected_ids]
+python3 verify.py davanstrien/pumpjack-embed-4job [expected_ids]
 """
 
 import sys
@@ -15,8 +15,11 @@ expected = int(sys.argv[2]) if len(sys.argv) > 2 else None
 api = HfApi()
 files = api.list_repo_files(repo, repo_type="dataset")
 parts = [f for f in files if f.startswith("data/part-") and f.endswith(".parquet")]
-manifests = [f for f in files if f.startswith(("data/__saturate/manifest/ids-", "data/_manifest/ids-"))
-             and f.endswith(".parquet")]
+manifests = [
+    f
+    for f in files
+    if f.startswith(("data/__saturate/manifest/ids-", "data/_manifest/ids-")) and f.endswith(".parquet")
+]
 markers = sorted(f for f in files if "/completions/" in f and f.endswith(".done"))
 telemetry = [f for f in files if "telemetry-shard" in f]
 
@@ -37,8 +40,10 @@ print(f"records={len(ids)} unique={len(c)} dupes={len(dupes)} error_rows={errors
 if dupes:
     print(f"  DUPE SAMPLE: {list(dupes.items())[:5]}")
 if expected:
-    print(f"EXPECTED {expected}: unique {'OK' if len(c) == expected else 'MISMATCH'}, "
-          f"dupes {'OK' if not dupes else 'FAIL'}")
+    print(
+        f"EXPECTED {expected}: unique {'OK' if len(c) == expected else 'MISMATCH'}, "
+        f"dupes {'OK' if not dupes else 'FAIL'}"
+    )
 
 # spot-check one data part for embedding shape
 if parts:

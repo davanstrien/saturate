@@ -17,8 +17,17 @@ REASONS = set(typing.get_args(Reason))
 
 def healthy(limit, **over):
     """A saturated, well-served window: no queue, everything completing."""
-    obs = dict(waiting=0, running=limit, inflight=limit, backpressure=0, successes=limit * 4,
-               input_bound=False, kv=0.2, hits=0.9, tok_s=limit * 100.0)
+    obs = dict(
+        waiting=0,
+        running=limit,
+        inflight=limit,
+        backpressure=0,
+        successes=limit * 4,
+        input_bound=False,
+        kv=0.2,
+        hits=0.9,
+        tok_s=limit * 100.0,
+    )
     obs.update(over)
     return obs
 
@@ -61,9 +70,17 @@ def drive_lagged(ctrl, limit, ticks, tok_of_limit, lag=1):
     traj = []
     for _ in range(ticks):
         seen = history[max(0, len(history) - 1 - lag)]
-        obs = dict(waiting=0, running=min(limit, 200), inflight=limit,
-                   backpressure=0, successes=seen, input_bound=False,
-                   kv=0.2, hits=0.9, tok_s=tok_of_limit(seen))
+        obs = dict(
+            waiting=0,
+            running=min(limit, 200),
+            inflight=limit,
+            backpressure=0,
+            successes=seen,
+            input_bound=False,
+            kv=0.2,
+            hits=0.9,
+            tok_s=tok_of_limit(seen),
+        )
         limit = ctrl.decide(obs, limit)
         history.append(limit)
         traj.append(limit)
@@ -185,8 +202,10 @@ def test_cooldown_holds_while_the_old_window_drains():
     ctrl = Auto(target_waiting=8, initial=64, step=STEP)
     limit = warm(ctrl, 64)
     burst = healthy(limit, backpressure=1, successes=5, tok_s=5000.0, latency_s=1.0)
-    after = [healthy(32, successes=5, tok_s=1000.0, latency_s=1.0, oldest_s=age)
-             for age in (3.0, 5.0, 7.0, 1.0, 1.0)]  # ages at 2 s ticks: predates the cut until the 4th
+    after = [
+        healthy(32, successes=5, tok_s=1000.0, latency_s=1.0, oldest_s=age)
+        for age in (3.0, 5.0, 7.0, 1.0, 1.0)
+    ]  # ages at 2 s ticks: predates the cut until the 4th
     traj, reasons = drive(ctrl, limit, [burst] + after)
     assert reasons == ["cut:bp"] + ["hold:cooldown"] * 3 + ["hold:ack"] * 2, (traj, reasons)
     stuck = [healthy(32, successes=5, tok_s=1000.0, latency_s=1.0, oldest_s=1000.0)] * 6
@@ -253,6 +272,7 @@ def test_a_fixed_set_of_failing_rows_cuts_once_but_sustained_failures_keep_cutti
     """Across ticks. Rows that fail and then only retry count once (poison-shaped): 13 of 269
     outcomes is under bp_frac, so no cut; with a lower bp_frac they cut once, not again on
     every retry. Failures on 6% of NEW rows every tick (overload-shaped) keep cutting."""
+
     def run(bp_frac, first, rest):
         ctrl = Auto(target_waiting=8, initial=128, max_limit=128, step=STEP, bp_frac=bp_frac)
         limit = warm(ctrl, 128)
@@ -420,7 +440,7 @@ def test_a_trial_without_gain_is_reverted_only_once_settled():
     traj, reasons = climb(ctrl, trial, 20, flat, latency_s=5.0)
     judged = reasons.index("revert") + 1  # ticks since the trial opened
     assert judged * TICK_S >= settle_s and judged == settle_s / TICK_S, (judged, reasons)
-    assert set(reasons[:judged - 1]) == {"hold:ack"} and traj[:judged - 1] == [32] * (judged - 1)
+    assert set(reasons[: judged - 1]) == {"hold:ack"} and traj[: judged - 1] == [32] * (judged - 1)
     assert traj[judged - 1] == 16
 
     ctrl = Auto(target_waiting=8, initial=16, step=STEP)  # no latency: three ticks
@@ -495,6 +515,7 @@ def test_a_run_of_down_trials_is_judged_against_where_it_began():
     """Each kept x7/8 is judged against the reading where the run of moves down began, so small
     losses cannot add up: on a curve where every 7/8 step loses ~3%, the window stops within
     `improve` (5%) of the anchor instead of creeping toward the floor."""
+
     def gentle(limit):  # ~3% less throughput per 7/8 step below 128
         return 10000.0 * (min(limit, 128) / 128) ** 0.23
 
@@ -650,8 +671,17 @@ def test_blind_growth_reaches_the_engine_capacity(cap):
     ctrl, limit, hist = Auto(initial=16, max_limit=512), 16, [16]
     for _ in range(400):
         served = min(hist[max(0, len(hist) - 2)], cap)  # throughput lags the window by a tick
-        obs = dict(waiting=None, running=None, inflight=limit, backpressure=0, successes=served,
-                   input_bound=False, kv=None, hits=None, tok_s=served * 100.0)
+        obs = dict(
+            waiting=None,
+            running=None,
+            inflight=limit,
+            backpressure=0,
+            successes=served,
+            input_bound=False,
+            kv=None,
+            hits=None,
+            tok_s=served * 100.0,
+        )
         limit = ctrl.decide(obs, limit)
         hist.append(limit)
     tail = hist[-200:]
@@ -670,8 +700,17 @@ def test_blind_growth_against_a_hard_429_wall_stays_bounded(cap):
         seen = hist[max(0, len(hist) - 2)]
         served = min(seen, cap)
         bp = max(1, served // 12) if seen > cap else 0  # ~8% of outcomes rejected above the wall
-        obs = dict(waiting=None, running=None, inflight=limit, backpressure=bp, successes=served,
-                   input_bound=False, kv=None, hits=None, tok_s=served * 100.0)
+        obs = dict(
+            waiting=None,
+            running=None,
+            inflight=limit,
+            backpressure=bp,
+            successes=served,
+            input_bound=False,
+            kv=None,
+            hits=None,
+            tok_s=served * 100.0,
+        )
         limit = ctrl.decide(obs, limit)
         hist.append(limit)
     tail = hist[500:]
@@ -690,8 +729,13 @@ def test_initial_clamped_to_max():
 def test_auto_invalid_bounds_raise():
     """Auto(min_limit=0) deadlocks admission exactly like Fixed(0)."""
     cases: tuple[dict[str, Any], ...] = (
-        dict(min_limit=0), dict(max_limit=1, min_limit=2), dict(step=0), dict(stall_ticks=0),
-        dict(bp_frac=-0.1), dict(bp_frac=1.5))
+        dict(min_limit=0),
+        dict(max_limit=1, min_limit=2),
+        dict(step=0),
+        dict(stall_ticks=0),
+        dict(bp_frac=-0.1),
+        dict(bp_frac=1.5),
+    )
     for kw in cases:
         with pytest.raises(ValueError):
             Auto(**kw)
@@ -703,9 +747,14 @@ def test_decide_reports_a_reason_for_every_tick():
     assert ctrl.last_reason == "hold"
     seen = set()
     limit = 16
-    obs_seq = ([healthy(16)] * 6 + [healthy(32, backpressure=1, successes=0)]
-               + [healthy(16, input_bound=True)] + [healthy(16, kv=0.95, hits=0.1)]
-               + [healthy(16, waiting=100)] * 3 + [healthy(8)] * 40)
+    obs_seq = (
+        [healthy(16)] * 6
+        + [healthy(32, backpressure=1, successes=0)]
+        + [healthy(16, input_bound=True)]
+        + [healthy(16, kv=0.95, hits=0.1)]
+        + [healthy(16, waiting=100)] * 3
+        + [healthy(8)] * 40
+    )
     for obs in obs_seq:
         limit = ctrl.decide(dict(obs, inflight=limit), limit)
         assert ctrl.last_reason in REASONS, ctrl.last_reason
@@ -737,7 +786,7 @@ def test_a_trial_is_judged_on_its_own_window_readings():
     for _ in range(32):  # the trial window's own readings: up 6%
         limit = ctrl.decide(healthy(limit, tok_s=106.0, latency_s=30.0, waiting=None), limit)
         reasons.append(ctrl.last_reason)
-    assert "hold:kept" in reasons and "revert" not in reasons[:reasons.index("hold:kept")], reasons
+    assert "hold:kept" in reasons and "revert" not in reasons[: reasons.index("hold:kept")], reasons
 
 
 def test_a_latency_first_seen_mid_trial_extends_the_wait():
@@ -770,6 +819,7 @@ def test_a_backpressure_ceiling_is_released_after_a_clean_stretch():
     for _ in range(int(BP_CEILING_RELEASE_S / TICK_S) + 2):
         limit = ctrl.decide(healthy(limit, waiting=None), limit)
     assert ctrl.state.ceiling is None and ctrl.state.seen_ceiling is not None
+
 
 def test_a_queue_cut_steps_down_by_the_excess_within_bounds():
     """The gauge says how far past the engine's capacity the window is: the cut steps down by

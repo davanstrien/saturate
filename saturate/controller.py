@@ -9,11 +9,13 @@ engine, nowhere) — that's the SignalSource seam's job.
 from __future__ import annotations
 
 import dataclasses
-import numbers
 import random
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
+
+from saturate import settings
+from saturate.settings import Setting
 
 if TYPE_CHECKING:  # the controller stays free of I/O imports at run time
     from saturate.signals import Capacity
@@ -50,7 +52,7 @@ def as_obs(obs: Obs | dict) -> Obs:
 
 
 class Fixed:
-    last_reason = "hold"
+    last_reason: Reason = "hold"
 
     def __init__(self, n: int):
         if n < 1:
@@ -164,7 +166,13 @@ class State:
     stall_armed: bool = False  # a completion has arrived since the last change drained
 
 
-Decision = tuple[int, str, State]
+# every reason a decision can give: the tick's `reason` in telemetry (CONTRACT §6)
+Reason = Literal[
+    "hold", "hold:ack", "hold:cooldown", "hold:input_bound", "hold:kept", "hold:plateau",
+    "hold:jitter", "hold:ceiling", "hold:floor", "cut:bp", "cut:kv", "cut:stall", "cut:queue",
+    "revert", "trial:up", "trial:down",
+]
+Decision = tuple[int, Reason, State]
 
 
 def _tick(obs: Obs) -> float:
@@ -180,6 +188,22 @@ def _above(ceiling: int) -> int:
 def _below(ceiling: int) -> int:
     """The window an eighth under a backpressure ceiling: where growth stops."""
     return ceiling - max(1, ceiling // 8)
+
+
+MOST = 10**9  # any count past this is a typo; past ~10**300 it overflows a float mid-run
+AUTO_SETTINGS = (
+    Setting("target_waiting", whole=True, low=1, high=MOST),  # 0 cuts on any queue at all
+    Setting("initial", whole=True, low=1, high=MOST, optional=True),
+    Setting("min_limit", whole=True, low=1, high=MOST),  # 0 deadlocks admission
+    Setting("max_limit", whole=True, low=1, high=MOST),
+    Setting("step", whole=True, low=1, high=MOST),
+    Setting("stall_ticks", whole=True, low=1, high=MOST),
+    Setting("kv_hi", whole=False, low=0, high=1, low_open=True),
+    Setting("hits_lo", whole=False, low=0, high=1),
+    Setting("improve", whole=False, low=1, low_open=True, high_open=True),  # at 1, noise alone keeps moves up
+    Setting("bp_frac", whole=False, low=0, high=1),
+    Setting("seed", whole=True, optional=True),
+)
 
 
 class Auto:
@@ -255,33 +279,12 @@ class Auto:
                  max_limit: int = 512, step: int = 8, kv_hi: float = 0.9,
                  hits_lo: float = 0.5, improve: float = 1.05, stall_ticks: int = 3,
                  bp_frac: float = 0.05, seed: int | None = None):
-        given = (target_waiting, initial, min_limit, max_limit, step, kv_hi, hits_lo, improve,
-                 stall_ticks, bp_frac, seed)
-        if any(isinstance(value, bool) for value in given):
-            raise ValueError("Auto settings are numbers, not booleans")
-        counts = dict(target_waiting=target_waiting, min_limit=min_limit, max_limit=max_limit,
-                      step=step, stall_ticks=stall_ticks)
-        if initial is not None:
-            counts["initial"] = initial
-        if seed is not None:
-            counts["seed"] = seed
-        for name, value in counts.items():
-            if not isinstance(value, numbers.Integral):  # 2.5 or nan requests in flight cannot run
-                raise ValueError(f"Auto requires {name} to be a whole number, not {value!r}")
-        if min_limit < 1 or max_limit < min_limit or step < 1:
-            raise ValueError("Auto requires 1 <= min_limit <= max_limit and step >= 1")  # 0 deadlocks
-        if stall_ticks < 1:
-            raise ValueError("Auto requires stall_ticks >= 1")
-        if not 0.0 <= bp_frac <= 1.0:
-            raise ValueError("Auto requires 0 <= bp_frac <= 1")
-        if target_waiting < 1:
-            raise ValueError("Auto requires target_waiting >= 1")  # 0 cuts on any queue at all
-        if initial is not None and initial < 1:
-            raise ValueError("Auto requires initial >= 1 (or None)")
-        if not 0.0 < kv_hi <= 1.0 or not 0.0 <= hits_lo <= 1.0:
-            raise ValueError("Auto requires 0 < kv_hi <= 1 and 0 <= hits_lo <= 1")
-        if not 1.0 < improve < float("inf"):  # at 1 or below, noise alone keeps moves up
-            raise ValueError("Auto requires 1 < improve < inf")
+        settings.check("Auto", AUTO_SETTINGS, dict(
+            target_waiting=target_waiting, initial=initial, min_limit=min_limit, max_limit=max_limit,
+            step=step, kv_hi=kv_hi, hits_lo=hits_lo, improve=improve, stall_ticks=stall_ticks,
+            bp_frac=bp_frac, seed=seed))
+        if max_limit < min_limit:
+            raise ValueError(f"Auto requires min_limit <= max_limit, not {min_limit} > {max_limit}")
         self.lo, self.hi = max(1, target_waiting // 4), target_waiting * 2
         self.step = step
         self.kv_hi, self.hits_lo, self.improve = kv_hi, hits_lo, improve
@@ -326,7 +329,7 @@ class Auto:
         start = self.DEFAULT_INITIAL if start is None else start
         self.initial = min(self.max, max(self.min, start))
         self.state = State()
-        self.last_reason = "hold"
+        self.last_reason: Reason = "hold"
 
     # --- helpers ----------------------------------------------------------------------------------
 
@@ -348,7 +351,7 @@ class Auto:
         return replace(state, phase=Settling(state.clock, state.clock + hold, then), samples=(),
                        silent_s=0.0, stall_armed=False)
 
-    def cut(self, state: State, obs: Obs, limit: int, new: int, reason: str,
+    def cut(self, state: State, obs: Obs, limit: int, new: int, reason: Reason,
             keep_target: bool = False) -> Decision:
         """The one way down that is not a trial. A trial that meets a cut failed: the next trial
         tries the next move, and the window goes no higher than where the trial began, unless
@@ -426,7 +429,7 @@ def when(condition: Condition, action: Action) -> Rule:
     return rule
 
 
-def hold(reason: str) -> Action:
+def hold(reason: Reason) -> Action:
     """Keep the window and the state."""
     def action(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
         return limit, reason, state
@@ -435,7 +438,7 @@ def hold(reason: str) -> Action:
     return action
 
 
-def halve(reason: str) -> Action:
+def halve(reason: Reason) -> Action:
     """Cut to half the window, through Auto.cut (bounds, and a failed trial's handling)."""
     def action(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
         return auto.cut(state, obs, limit, limit // 2, reason)

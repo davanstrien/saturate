@@ -404,59 +404,115 @@ def _observe(auto: Auto, state: State, obs: Obs, limit: int) -> State:
     return state
 
 
-# --- rules, in priority order ----------------------------------------------------------------------
 
-def _cooling(auto: Auto, state: State, obs: Obs, limit: int) -> Decision | None:
-    if isinstance(state.phase, Settling):
-        return limit, "hold:cooldown", state
-    return None
+Rule = Callable[[Auto, State, Obs, int], "Decision | None"]
+Condition = Callable[[Auto, State, Obs, int], bool]
+Action = Callable[[Auto, State, Obs, int], Decision]
 
 
-def _backpressure(auto: Auto, state: State, obs: Obs, limit: int) -> Decision | None:
-    if not (obs.backpressure and obs.backpressure >= auto.bp_frac * (obs.backpressure + obs.successes)):
+# --- primitives: a rule is a condition and the action taken when it holds ---------------------
+
+def when(condition: Condition, action: Action) -> Rule:
+    """The rule that takes `action` when `condition` holds, and otherwise makes no decision."""
+    def rule(auto: Auto, state: State, obs: Obs, limit: int) -> Decision | None:
+        if condition(auto, state, obs, limit):
+            return action(auto, state, obs, limit)
         return None
+
+    names = (getattr(part, "__name__", repr(part)) for part in (condition, action))
+    rule.__name__ = "when({}, {})".format(*names)  # readable in a traceback
+    return rule
+
+
+def hold(reason: str) -> Action:
+    """Keep the window and the state."""
+    def action(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
+        return limit, reason, state
+
+    action.__name__ = f"hold({reason!r})"
+    return action
+
+
+def halve(reason: str) -> Action:
+    """Cut the window to half."""
+    def action(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
+        return auto.cut(state, obs, limit, limit // 2, reason)
+
+    action.__name__ = f"halve({reason!r})"
+    return action
+
+
+# --- conditions -------------------------------------------------------------------------------
+
+def settling(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
+    return isinstance(state.phase, Settling)
+
+
+def overloaded(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
+    """Backpressure on at least `bp_frac` of this tick's outcomes."""
+    return bool(obs.backpressure) and obs.backpressure >= auto.bp_frac * (obs.backpressure + obs.successes)
+
+
+def kv_full(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
+    """KV cache high and prefix hits low; with no hits signal at all (prefix caching off), high
+    KV is unverifiably benign, so it counts as full."""
+    return obs.kv is not None and obs.kv >= auto.kv_hi and (obs.hits is None or obs.hits < auto.hits_lo)
+
+
+def stalled(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
+    return state.stall_armed and state.silent_s >= auto.patience_s(obs)
+
+
+def input_bound(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
+    return obs.input_bound
+
+
+def queue_over_target(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
+    """More waiting than the band allows, once anything has completed (a cold engine queues the
+    whole initial window)."""
+    return state.acked_ever and obs.waiting is not None and obs.waiting > auto.hi
+
+
+def trial_open(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
+    return isinstance(state.phase, Trial)
+
+
+def underused(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
+    """Under 80% of the window in flight (the source sets the pace), or a queue in band."""
+    headroom = obs.waiting is None or obs.waiting < auto.lo
+    return not (headroom and obs.inflight >= int(limit * 0.8))
+
+
+def always(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
+    return True
+
+
+# --- actions that need more than a primitive --------------------------------------------------
+
+def cut_for_backpressure(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
+    """Remember the window as a ceiling. At a ceiling met before, step just under it; on fresh
+    overload, halve."""
     known = state.ceiling or state.seen_ceiling
     at_known = known is not None and _below(known.limit) <= limit <= _above(known.limit)
     lowest = min(limit, state.ceiling.limit) if state.ceiling is not None else limit
     state = replace(state, ceiling=Ceiling(lowest, state.clock))
-    new = _below(limit) if at_known else limit // 2  # a known limit: step under; fresh overload: halve
+    new = _below(limit) if at_known else limit // 2
     return auto.cut(state, obs, limit, new, "cut:bp")
 
 
-def _kv_pressure(auto: Auto, state: State, obs: Obs, limit: int) -> Decision | None:
-    # with no hits signal at all (prefix caching off), high KV is unverifiably benign -> cut
-    if obs.kv is not None and obs.kv >= auto.kv_hi and (obs.hits is None or obs.hits < auto.hits_lo):
-        return auto.cut(state, obs, limit, limit // 2, "cut:kv")
-    return None
+def step_down_by_queue(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
+    """Step down by the excess the gauge shows, at least `step` and at most half the window (the
+    queue may hold other clients' requests). During a trial too: the queue says where the
+    engine's limit is, which is finer than going back to where the trial began."""
+    assert obs.waiting is not None
+    down = min(max(auto.step, obs.waiting - auto.hi), limit // 2)
+    return auto.cut(state, obs, limit, limit - down, "cut:queue", keep_target=True)
 
 
-def _stall(auto: Auto, state: State, obs: Obs, limit: int) -> Decision | None:
-    if state.stall_armed and state.silent_s >= auto.patience_s(obs):
-        return auto.cut(state, obs, limit, limit // 2, "cut:stall")
-    return None
-
-
-def _input_bound(auto: Auto, state: State, obs: Obs, limit: int) -> Decision | None:
-    if obs.input_bound:
-        return limit, "hold:input_bound", state
-    return None
-
-
-def _queue(auto: Auto, state: State, obs: Obs, limit: int) -> Decision | None:
-    if state.acked_ever and obs.waiting is not None and obs.waiting > auto.hi:
-        # step down by the excess the gauge shows, at least `step` and at most half the window
-        # (the queue may hold other clients' requests); during a trial too: the queue says where
-        # the engine's limit is, which is finer than going back to where the trial began
-        down = min(max(auto.step, obs.waiting - auto.hi), limit // 2)
-        return auto.cut(state, obs, limit, limit - down, "cut:queue", keep_target=True)
-    return None
-
-
-def _judge(auto: Auto, state: State, obs: Obs, limit: int) -> Decision | None:
+def judge_trial(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
     """A trial holds its window until its evidence is in, then is kept or reverted."""
-    if not isinstance(state.phase, Trial):
-        return None
     trial = state.phase
+    assert isinstance(trial, Trial)
     up = limit > trial.origin
     reading = auto.evidence(state, limit)
     ratio = reading.ratio(trial.ref) if reading is not None else None
@@ -472,28 +528,16 @@ def _judge(auto: Auto, state: State, obs: Obs, limit: int) -> Decision | None:
     return auto.clamp(state, trial.origin), "revert", auto.settle(state, obs, then)
 
 
-def _idle(auto: Auto, state: State, obs: Obs, limit: int) -> Decision | None:
-    headroom = obs.waiting is None or obs.waiting < auto.lo
-    if not (headroom and obs.inflight >= int(limit * 0.8)):
-        return limit, "hold", state
-    return None
-
-
-def _open_trial(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
-    """With an evidence window in and the backoff waited out, open the next trial."""
+def open_trial(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
+    """With an evidence window in, the backoff and the jitter waited out, open the next trial."""
     reading = auto.evidence(state, limit)
     if reading is None or reading.nothing or state.silent_s > 0:  # nothing delivered: no basis for a trial
         return limit, "hold:ack", state
+    waiting = _wait_for_trial(auto, state, limit)
+    if waiting is not None:
+        return waiting
     phase = state.phase
     assert isinstance(phase, Steady)
-    if phase.waits + 1 < phase.backoff:
-        waiting = replace(phase, waits=phase.waits + 1)
-        return limit, "hold:plateau", replace(state, phase=waiting, samples=())
-    jitter = phase.jitter
-    if jitter is None:  # due: draw this trial's jitter (none in slow-start: backoff 1)
-        jitter = auto.rng.randint(0, auto.JITTER_TICKS) if phase.backoff > 1 else 0
-    if jitter > 0:
-        return limit, "hold:jitter", replace(state, phase=replace(phase, jitter=jitter - 1))
     factor = auto.MOVES[phase.move % len(auto.MOVES)]
     new = auto.clamp(state, round(limit * factor))
     seen = state.seen_ceiling
@@ -511,6 +555,32 @@ def _open_trial(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
     return new, "trial:up" if new > limit else "trial:down", replace(state, phase=trial, samples=())
 
 
-Rule = Callable[[Auto, State, Obs, int], "Decision | None"]
-RULES: tuple[Rule, ...] = (_cooling, _backpressure, _kv_pressure, _stall, _input_bound, _queue,
-                           _judge, _idle, _open_trial)
+def _wait_for_trial(auto: Auto, state: State, limit: int) -> Decision | None:
+    """Hold while the backoff runs (hold:plateau), then, after a failed trial, for the jitter
+    drawn when the trial fell due (hold:jitter; none in slow-start: backoff 1)."""
+    phase = state.phase
+    assert isinstance(phase, Steady)
+    if phase.waits + 1 < phase.backoff:
+        waiting = replace(phase, waits=phase.waits + 1)
+        return limit, "hold:plateau", replace(state, phase=waiting, samples=())
+    jitter = phase.jitter
+    if jitter is None:  # due: draw this trial's jitter
+        jitter = auto.rng.randint(0, auto.JITTER_TICKS) if phase.backoff > 1 else 0
+    if jitter > 0:
+        return limit, "hold:jitter", replace(state, phase=replace(phase, jitter=jitter - 1))
+    return None
+
+
+# --- the rules, in priority order: the first that decides wins ---------------------------------
+
+RULES: tuple[Rule, ...] = (
+    when(settling, hold("hold:cooldown")),
+    when(overloaded, cut_for_backpressure),
+    when(kv_full, halve("cut:kv")),
+    when(stalled, halve("cut:stall")),
+    when(input_bound, hold("hold:input_bound")),
+    when(queue_over_target, step_down_by_queue),
+    when(trial_open, judge_trial),
+    when(underused, hold("hold")),
+    when(always, open_trial),
+)

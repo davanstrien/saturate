@@ -110,7 +110,7 @@ def test_pump_writes_telemetry_periodically_and_at_exit(tmp_path, monkeypatch):
 
 
 @pytest.mark.internals
-def test_pump_periodic_telemetry_failure_is_not_fatal(tmp_path, monkeypatch, capsys):
+def test_pump_periodic_telemetry_failure_is_not_fatal(tmp_path, monkeypatch, caplog):
     """A failing periodic write is logged and the run continues (same rule as the final write)."""
     captured = {}
 
@@ -144,4 +144,4 @@ def test_pump_periodic_telemetry_failure_is_not_fatal(tmp_path, monkeypatch, cap
                                        None, (0, 1), 10, 1.0, "/chat/completions", None, False, None,
                                        None, "none"))
     assert stats.rows_processed == 0 and (tmp_path / "__saturate" / "completions" / "shard-0.done").exists()
-    assert capsys.readouterr().err.count("telemetry write failed (non-fatal)") == 2  # periodic + final
+    assert caplog.text.count("telemetry write failed (non-fatal)") == 2  # periodic + final

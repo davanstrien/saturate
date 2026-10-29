@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
-import sys
+import logging
 import time
 from collections.abc import AsyncIterable, Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -23,6 +23,8 @@ import anyio
 from saturate.core import Done
 from saturate.sink import UNSTORABLE, error_row
 from saturate.transport import usage_tokens
+
+log = logging.getLogger(__name__)
 
 WRITER_QUEUE = 256  # finished rows waiting for the writer; a full queue makes drain wait
 _END = object()  # put in the writer's queue after the last row
@@ -102,7 +104,7 @@ async def drain(results: AsyncIterable[Done], sink, shard: tuple[int, int] = (0,
     # without an error of its own: an error the caller hit (a cancel included) came first.
     if caller_error is not None:
         if writer.failure is not None:
-            _log(f"writing also failed: {writer.failure!r}")
+            log.warning(f"writing also failed: {writer.failure!r}")
         raise caller_error
     if writer.failure is not None:
         raise writer.failure
@@ -124,7 +126,7 @@ async def _close(results: AsyncIterable[Done], writer: _Writer, holding: Done | 
             for done in take_waiting() if take_waiting is not None else []:
                 await writer.put(done)
         except Exception as e:
-            _log(f"stopped before every finished row was handed over: {e!r}")
+            log.warning(f"stopped before every finished row was handed over: {e!r}")
     await writer.finish(failed=failed)
 
 
@@ -177,7 +179,7 @@ class _Writer:
         """Give the writer a finished row; waits while its queue is full. A row either is in
         the queue when this returns or is not if it raised: never half."""
         if self._task is not None and self._task.done():
-            _log(f"the writer has finished; row {done.id} was not written")
+            log.warning(f"the writer has finished; row {done.id} was not written")
             return
         await self._queue.put(done)
 
@@ -272,7 +274,7 @@ class _Writer:
         except Exception as e:
             if not self._run_failed and self.failure is None:
                 raise
-            _log(f"flush after a failed run also failed (the first error is raised): {e!r}")
+            log.warning(f"flush after a failed run also failed (the first error is raised): {e!r}")
         finally:
             _count_demoted(self.sink, self._demoted_before, self.stats)
 
@@ -308,7 +310,3 @@ def _count_demoted(sink, demoted_before: int, stats) -> None:
     demoted = min(getattr(sink, "rows_demoted", 0) - demoted_before, stats.rows_processed)
     stats.rows_processed -= demoted
     stats.rows_failed += demoted
-
-
-def _log(msg: str) -> None:
-    print(f"[pump] {msg}", file=sys.stderr, flush=True)

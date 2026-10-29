@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import statistics
-import sys
 import time
 from collections import deque
 from collections.abc import Callable
@@ -28,6 +28,8 @@ from saturate.http import HttpClient, Timeouts
 from saturate.signals import HttpScrape, Null, read_capacity
 from saturate.telemetry import tick_record
 from saturate.transport import Attempt, Breaker, FatalTransportError, Request, call_endpoint, coerce_request
+
+log = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(slots=True)
@@ -274,14 +276,13 @@ class AdaptiveLimiter:
         failure = None if task.cancelled() else task.exception()
         if caller_cancel is not None:
             if failure is not None:
-                print(f"[pump] controller loop also failed: {failure!r}", file=sys.stderr, flush=True)
+                log.warning(f"controller loop also failed: {failure!r}")
             raise caller_cancel
         if failure is None:
             return
         if not exc or exc[0] is None:
             raise failure  # a crashed tick loop surfaces here, never dies silently
-        print("[pump] controller loop also failed (primary exception wins)",
-              file=sys.stderr, flush=True)  # never mask the body's exception
+        log.warning("controller loop also failed (primary exception wins)")  # never mask the body's exception
 
     async def _loop(self):
         while True:
@@ -384,9 +385,9 @@ class AdaptiveClient:
         controller.begin(capacity)
         self.limiter.set_limit(controller.initial)
         if capacity is not None:
-            print(f"[pump] {capacity.engine} reports {capacity.requests} requests at once"
-                  f"{'' if capacity.queues else ' (and rejects the rest)'}: starting at {controller.initial}",
-                  file=sys.stderr, flush=True)
+            log.info(f"{capacity.engine} reports {capacity.requests} requests at once"
+                     f"{'' if capacity.queues else ' (and rejects the rest)'}: "
+                     f"starting at {controller.initial}")
 
     async def __aexit__(self, *exc):
         try:

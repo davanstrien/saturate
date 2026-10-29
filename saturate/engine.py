@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import os
 import signal
 import socket
@@ -24,9 +25,8 @@ from multidict import CIMultiDict  # aiohttp's case-insensitive headers (install
 from saturate.http import Reply, environment_proxy
 from saturate.transport import PROBE_HEADERS, probe_body
 
+log = logging.getLogger(__name__)
 
-def _log(msg: str) -> None:
-    print(f"[pump] {msg}", file=sys.stderr, flush=True)
 
 
 # boot templates per engine; ceiling flags live in signals.CEILING_FLAG
@@ -65,7 +65,7 @@ class Engine:
             raise RuntimeError(f"engine: port {self.port} is already in use — another server would answer "
                                "the readiness checks for this one; stop it or pass port=")
         cmd = self.cmd or _boot(self.engine, self.model, self.port, self.extra_args)
-        _log(f"engine: {' '.join(cmd)}")
+        log.info(f"engine: {' '.join(cmd)}")
         # own process group; stdout=2 -> engine chatter to stderr, protecting the CONTRACT §7 stdout line
         self.proc = subprocess.Popen(cmd, start_new_session=True, stdout=2)
         try:
@@ -102,7 +102,7 @@ class Engine:
             except ProcessLookupError:
                 return  # group empty: teardown verified
             time.sleep(0.1)
-        _log(f"engine: process group {pgid} still has members after SIGKILL sweep")
+        log.warning(f"engine: process group {pgid} still has members after SIGKILL sweep")
 
 
 def _port_in_use(port: int) -> bool:
@@ -140,7 +140,7 @@ def wait_for_health(endpoint: str, timeout_s: int = 1800, proc: subprocess.Popen
                           payload if payload is not None else probe_body(None),
                           timeout=30, headers={**(headers or {}), **PROBE_HEADERS})
                 if accept(r) if accept is not None else r.status_code < 500:
-                    _log(f"engine ready (health x{consecutive} + trial {r.status_code})")
+                    log.info(f"engine ready (health x{consecutive} + trial {r.status_code})")
                     return
             except _UNANSWERED:
                 pass

@@ -15,8 +15,8 @@ manifest, overwrites are idempotent; failed rows leave no record (they retry).
 
 from __future__ import annotations
 
+import logging
 import os
-import sys
 import time
 import uuid
 from collections.abc import Iterator
@@ -36,9 +36,8 @@ from .schema import (
     without_untyped_schema,
 )
 
+log = logging.getLogger(__name__)
 
-def _log(msg: str) -> None:
-    print(f"[pump] {msg}", file=sys.stderr, flush=True)
 
 
 # Everything saturate writes beside the data parts lives under one directory whose name starts
@@ -146,7 +145,7 @@ class ParquetSink:
                     # found no repo left "missing" in its cache, and every write would fail on it
                     self.fs.invalidate_cache()
                 except Exception as e:
-                    _log(f"could not ensure output repo {repo}: {e}")
+                    log.warning(f"could not ensure output repo {repo}: {e}")
         if create:
             try:
                 self.fs.makedirs(self.root, exist_ok=True)
@@ -163,13 +162,13 @@ class ParquetSink:
                 with self.fs.open(path, "rb") as f:
                     return reader(f)
             except pa.ArrowException as e:
-                _log(f"skipping unreadable {path}: {e}")
+                log.warning(f"skipping unreadable {path}: {e}")
                 return None
             except Exception as e:
                 if i + 1 < attempts:
                     time.sleep(0.5 * 2**i)
                 else:
-                    _log(f"skipping unreadable {path}: {e}")
+                    log.warning(f"skipping unreadable {path}: {e}")
         return None
 
     def _read_id_error(self, path: str) -> tuple[set[str], set[str]] | None:
@@ -207,8 +206,8 @@ class ParquetSink:
             self.error_only_ids = set()
             return set()
         if len(manifests) > 1000:
-            _log(f"resume: reading {len(manifests)} manifest files "
-                 "(fewer, larger parts: a larger flush_every, or flush_interval_s on ParquetSink)")
+            log.info(f"resume: reading {len(manifests)} manifest files "
+                     "(fewer, larger parts: a larger flush_every, or flush_interval_s on ParquetSink)")
         read = self._read_many(manifests)
         covered = {path.rsplit("/", 1)[-1][4:] for path in read}
         self._parts = _list_parts(self.fs, self.root)  # one listing serves the seed too
@@ -243,16 +242,16 @@ class ParquetSink:
         try:
             parts = self._parts if self._parts is not None else _list_parts(self.fs, self.root)
         except Exception as e:
-            _log(f"could not list existing parts, starting unpinned: {e}")
+            log.warning(f"could not list existing parts, starting unpinned: {e}")
             return
         for path in reversed(parts):  # newest first; a crash-truncated newest part is skipped
             schema = self._read_parquet(path, lambda f: pq.read_schema(f).remove_metadata())
             if schema is not None:
                 self._pin(schema)
                 return
-            _log(f"could not read the schema of {path}, trying an older part")
+            log.warning(f"could not read the schema of {path}, trying an older part")
         if parts:
-            _log("no existing part has a readable schema, starting unpinned")
+            log.warning("no existing part has a readable schema, starting unpinned")
 
     def _conform_type(self, name: str, value_type: pa.DataType) -> pa.DataType | None:
         """The type that values of type `value_type` in column `name` are cast to before they are
@@ -404,7 +403,7 @@ class ParquetSink:
             self.fs.makedirs(f"{self.root}/{MANIFEST_DIR}", exist_ok=True)
             self._write(f"{self.root}/{MANIFEST_DIR}/ids-{name}", table.select(["id", "error"]))
         except Exception as e:
-            _log(f"manifest write failed (non-fatal, part covered by scan fallback): {e}")
+            log.warning(f"manifest write failed (non-fatal, part covered by scan fallback): {e}")
         self.rows_written += len(self._buf)
         self._buf.clear()
         self._buf_schema = None
@@ -436,7 +435,7 @@ class ParquetSink:
                     pass
                 if not isinstance(e, Exception) or i + 1 == attempts:
                     raise
-                _log(f"write failed, retrying ({i + 1}/{attempts - 1}): {path}: {e}")
+                log.warning(f"write failed, retrying ({i + 1}/{attempts - 1}): {path}: {e}")
                 time.sleep(2**i)
 
     def _drop_untyped(self, table: pa.Table) -> pa.Table:
@@ -493,7 +492,7 @@ class ParquetSink:
         bad += sum(1 for c, t in zip(conformed, tables, strict=True) if c is not None and t is None)
         tables = [pa.Table.from_pylist([self._buf[i]]) if t is None else t for i, t in enumerate(tables)]
         self.rows_demoted += bad
-        _log(f"{bad} of {len(self._buf)} rows do not fit the pinned schema: written as error rows")
+        log.warning(f"{bad} of {len(self._buf)} rows do not fit the pinned schema: written as error rows")
         return pa.concat_tables(tables, promote_options="permissive")
 
     def _cast_to_shared_types(self, conformed: list[pa.Table | None]) -> list[pa.Table | None]:
@@ -629,7 +628,7 @@ def read_output(out_uri: str) -> Iterator[tuple[str, dict]]:
             with fs.open(path, "rb") as f:
                 rows = pq.read_table(f).to_pylist()
         except Exception as e:
-            _log(f"read_output: skipping unreadable {path}: {e}")
+            log.warning(f"read_output: skipping unreadable {path}: {e}")
             continue
         for rec in rows:
             if rec.get("error") is None:

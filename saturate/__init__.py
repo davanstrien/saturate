@@ -13,11 +13,12 @@ import asyncio
 import dataclasses
 import importlib.metadata
 import json
+import logging
 import os
-import sys
 import time
 from collections.abc import Callable, Iterable
 
+from saturate import _logs
 from saturate.controller import Auto, Fixed, Obs
 from saturate.core import AdaptiveClient, AdaptiveLimiter, Done
 from saturate.engine import Engine, wait_for_health
@@ -44,6 +45,9 @@ from saturate.transport import (
 )
 from saturate.writer import Sink, drain, sink_hooks
 
+log = logging.getLogger(__name__)
+_logs.install()  # [pump] lines on stderr until the caller configures logging
+
 __all__ = [
     "pump", "Stats", "RowsLostError", "Fixed", "Auto", "Obs", "Attempt", "Engine", "wait_for_health",
     "Request", "make_json_request", "make_multipart_request", "existing_ids",
@@ -63,9 +67,6 @@ AGENT_ENV_VARS = ("CLAUDECODE", "CODEX_SANDBOX", "AI_AGENT")
 def agent_mode() -> bool:
     return any(os.environ.get(v) for v in AGENT_ENV_VARS)
 
-
-def _log(msg: str) -> None:
-    print(f"[pump] {msg}", file=sys.stderr, flush=True)
 
 
 def existing_ids(out_uri: str, retry_errors: bool = False) -> set[str]:
@@ -193,8 +194,8 @@ def pump(
     shard = check_shard(shard)
     select_shard = shard[1] > 1
     if select_shard:
-        _log(f"shard={shard}: processing only the rows whose id hashes to shard {shard[0]} "
-             f"of {shard[1]}")
+        log.info(f"shard={shard}: processing only the rows whose id hashes to shard {shard[0]} "
+                 f"of {shard[1]}")
     return asyncio.run(_pump(rows, to_request, parse, endpoint, output, window, shard,
                              flush_every, read_timeout, route, headers, retry_errors,
                              id_key, id_fn, signal_source, schema, prepare_workers,
@@ -229,7 +230,7 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
         try:  # a remote rewrite is a commit (seconds): never on the loop, never overlapping
             await asyncio.to_thread(write, shard, snapshot)
         except Exception as e:
-            _log(f"telemetry write failed (non-fatal): {e}")
+            log.warning(f"telemetry write failed (non-fatal): {e}")
 
     def on_tick(rec: dict) -> None:  # periodically the trajectory so far lands on storage, so a
         nonlocal writer, next_at  # reader sees a partial run, not only a finished one (CONTRACT §6)
@@ -274,24 +275,24 @@ async def _pump(rows, to_request, parse, endpoint, output, window, shard, flush_
                            "only record is an error; once the cause is fixed, re-run with "
                            "retry_errors=True to retry them")
     for h in stats.hints:
-        _log(f"advisor: {h}")
+        log.info(f"advisor: {h}")
     if hooks.write_stats is not None:  # console-facing exact summary (CONTRACT §5)
         try:
             await asyncio.to_thread(hooks.write_stats, shard, stats.to_json())
         except Exception as e:
-            _log(f"stats write failed (non-fatal): {e}")
+            log.warning(f"stats write failed (non-fatal): {e}")
     if hooks.write_marker is not None:  # last: the marker certifies stats/telemetry landed
         await asyncio.to_thread(hooks.write_marker, shard)
     if stats.rows_done_prior:
-        _log(f"resume: skipped {stats.rows_done_prior} rows already in the output "
-             f"({stats.rows_errored_prior} of them only as errors)")
+        log.info(f"resume: skipped {stats.rows_done_prior} rows already in the output "
+                 f"({stats.rows_errored_prior} of them only as errors)")
     if stats.rows_deduped:
-        _log(f"dedup: {stats.rows_deduped} rows had the id of an earlier row in this input and were "
-             "skipped (the default id is a content hash: identical rows share it; to keep repeats, "
-             "give each its own id, e.g. id_fn=lambda row: f\"{row['prompt_id']}-{row['sample']}\")")
-    _log(f"done: {stats.rows_processed} ok, {stats.rows_failed} failed, "
-         f"{stats.tokens_per_sec} tok/s, window settled at {stats.final_limit}")
+        log.info(f"dedup: {stats.rows_deduped} rows had the id of an earlier row in this input and were "
+                 "skipped (the default id is a content hash: identical rows share it; to keep repeats, "
+                 "give each its own id, e.g. id_fn=lambda row: f\"{row['prompt_id']}-{row['sample']}\")")
+    log.info(f"done: {stats.rows_processed} ok, {stats.rows_failed} failed, "
+             f"{stats.tokens_per_sec} tok/s, window settled at {stats.final_limit}")
     if agent_mode():
         print(stats.to_json(), flush=True)  # data on stdout, one line
-        print("Hint: re-run the same command to resume — it is always safe.", file=sys.stderr)
+        log.info("Hint: re-run the same command to resume — it is always safe.")
     return stats

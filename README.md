@@ -353,9 +353,26 @@ stats = pump(
 ## Running under an agent
 
 In agent mode (detected via env) stdout carries exactly one line — the run's stats as JSON —
-and everything human goes to stderr, including the run-end advisor ("server ceiling: running
+and everything human goes to stderr (unless you point a logging handler at stdout), including the run-end advisor ("server ceiling: running
 pinned at N — relaunch with --max-num-seqs 2N") and the standing hint that re-running the
 same command is always safe.
+
+## Logging
+
+saturate logs through the standard `logging` module, under the `saturate` logger: progress
+(resume, dedup, `done:`) at INFO, degraded states (circuit open, a failed write that was
+retried) at WARNING. The `saturate` logger is at INFO unless you set its level. While your
+program has no logging handler (on the root logger or on `saturate`), saturate prints these
+lines to stderr as `[pump] …`. Once you add a handler, your handlers get them instead:
+
+```python
+import logging
+
+logging.basicConfig()  # saturate's INFO and WARNING lines go through your handler
+logging.getLogger("saturate").setLevel(logging.WARNING)  # only problems
+```
+
+In agent mode, a handler you point at stdout puts its lines next to the stats JSON line.
 
 ## The output contract
 

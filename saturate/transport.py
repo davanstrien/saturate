@@ -15,13 +15,15 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import math
 import random
-import sys
 import time
 from collections.abc import Callable
 
 from saturate.http import HttpClient, Reply, TransportError, multipart
+
+log = logging.getLogger(__name__)
 
 RETRY_ACTIVE = True  # kill-switch: flip off in tests for determinism
 RETRY_BUDGET_S = 300.0  # the floor of a row's retry wall-clock; AdaptiveClient scales it with read_timeout
@@ -112,8 +114,8 @@ class Breaker:
         self._open = True
         self._closed.clear()
         self.opens += 1
-        print(f"[pump] circuit OPEN after {self.consecutive} consecutive 5xx/transport "
-              "failures — pausing admission, probing", file=sys.stderr, flush=True)
+        log.warning(f"circuit OPEN after {self.consecutive} consecutive 5xx/transport "
+                    "failures — pausing admission, probing")
         deadline = time.monotonic() + self.max_open_s  # probes and sleeps never run past it
         try:
             while True:
@@ -129,8 +131,7 @@ class Breaker:
         finally:
             self._open = False
             self._closed.set()  # NEVER strand waiters — even when the opener raises
-        print("[pump] circuit CLOSED — server responding again, resuming admission",
-              file=sys.stderr, flush=True)
+        log.info("circuit CLOSED — server responding again, resuming admission")
 
     @staticmethod
     async def _probe(client: HttpClient, url: str, model: str | None, limit: float) -> bool:

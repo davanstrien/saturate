@@ -14,7 +14,7 @@ import asyncio
 import contextlib
 import dataclasses
 import inspect
-import sys
+import logging
 import threading
 import time
 from collections.abc import AsyncGenerator, Callable, Iterable
@@ -24,6 +24,8 @@ from anyio.abc import TaskGroup
 
 from saturate.core import AdaptiveClient, AdaptiveLimiter, Done
 from saturate.transport import FatalTransportError
+
+log = logging.getLogger(__name__)
 
 READ_AHEAD = 64  # rows the reader may read before the feeder has taken them
 
@@ -102,7 +104,7 @@ class _Run:
         if self.failure is None:
             self.failure = error
         elif repr(error) != repr(self.failure):  # rows in flight often hit the same error: say it once
-            print(f"[pump] after the first failure, also: {error!r}", file=sys.stderr, flush=True)
+            log.warning(f"after the first failure, also: {error!r}")
         self.stop()
 
     def stop(self) -> None:
@@ -198,11 +200,11 @@ def raise_first_failure(caller_error: BaseException | None, run_failure: BaseExc
     if caller_error is not None:
         if isinstance(caller_error, anyio.get_cancelled_exc_class()):
             if run_failure is not None:
-                print(f"[pump] the run had also failed: {run_failure!r}", file=sys.stderr, flush=True)
+                log.warning(f"the run had also failed: {run_failure!r}")
             raise caller_error
         if run_failure is None:
             raise caller_error
-        print(f"[pump] after the first failure, also: {caller_error!r}", file=sys.stderr, flush=True)
+        log.warning(f"after the first failure, also: {caller_error!r}")
     if run_failure is not None:
         raise run_failure
 

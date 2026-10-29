@@ -579,12 +579,20 @@ class FileSink:
     def existing_ids(self, retry_errors: bool = False) -> set[str]:
         return {p.name.removesuffix(self.ext) for p in self.dir.glob(f"*{self.ext}")}
 
-    def append(self, record: dict) -> None:
-        if record.get("error") is not None:
-            return
+    def probe(self, record: dict) -> None:
+        """Raise ValueError if this record cannot become a file: its id is not a safe filename,
+        or it has no `key` field. drain turns that into an error row, and the run goes on."""
         id_ = str(record["id"])
         if not id_ or id_ != Path(id_).name or "\\" in id_ or id_.startswith("."):  # unsafe filename
             raise ValueError(f"FileSink: id {id_!r} is not a safe filename")
+        if self.key not in record:
+            raise ValueError(f"FileSink: parse returned no {self.key!r} field (FileSink(key=...))")
+
+    def append(self, record: dict) -> None:
+        if record.get("error") is not None:
+            return
+        self.probe(record)  # a sink called directly, without drain, checks here
+        id_ = str(record["id"])
         # dot-prefix + .tmp never match existing_ids; uuid keeps concurrent duplicate-id writers
         # from colliding on the temp name (last replace wins, both files complete)
         tmp = self.dir / f".{id_}.{uuid.uuid4().hex[:6]}{self.ext}.tmp"

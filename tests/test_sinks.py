@@ -34,6 +34,28 @@ def test_filesink_rejects_unsafe_ids_and_writes_atomically(tmp_path):
     assert not list((tmp_path / "out").glob("*.tmp"))  # atomic replace leaves no temp files
 
 
+def test_filesink_unwritable_rows_become_error_rows_through_pump(tmp_path):
+    """Through pump(), a row FileSink cannot write (an unsafe id, or no `key` field in its
+    record) is an error row, and the other rows land: the run does not abort."""
+    from stub_server import StubServer
+
+    from saturate import Fixed, pump
+
+    rows = [{"id": "ok-1"}, {"id": "a/b"}, {"id": "no-key"}, {"id": "ok-2"}]
+
+    def to_request(row):
+        return {"model": "stub", "messages": [{"role": "user", "content": row["id"]}]}
+
+    def parse(row, body):
+        return {} if row["id"] == "no-key" else {"text": body["choices"][0]["message"]["content"]}
+
+    with StubServer() as stub:
+        stats = pump(rows, to_request, parse, endpoint=stub.endpoint, output=FileSink(tmp_path / "out"),
+                     window=Fixed(2), id_key="id", fail_fast=0)
+    assert (stats.rows_processed, stats.rows_failed) == (2, 2)
+    assert FileSink(tmp_path / "out").existing_ids() == {"ok-1", "ok-2"}
+
+
 def test_read_output_healing_rule(tmp_path):
     rows = [
         {"id": "x", "out": None, "error": "transport: boom"},   # healed later

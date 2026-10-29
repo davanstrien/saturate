@@ -37,7 +37,8 @@ _PAT = re.compile(
     r"|num_preemptions_total(?P<vp>))"
     r"|sglang[:_](?:num_(?P<s>queue|running)_reqs"
     r"|token_usage(?P<skv>)"
-    r"|cache_hit_rate(?P<sh>))"
+    r"|cache_hit_rate(?P<sh>)"
+    r"|num_retracted_requests_total(?P<sp>))"
     r"|llamacpp[:_]requests_(?P<l>deferred|processing)"
     r"|trtllm_num_requests_(?P<t>waiting|running)"
     r"|te[:_]queue_size(?P<eq>)"
@@ -46,7 +47,7 @@ _PAT = re.compile(
 )
 
 _DIALECT = {"v": "vllm", "vkv": "vllm", "vh": "vllm", "vp": "vllm",
-            "s": "sglang", "skv": "sglang", "sh": "sglang", "l": "llamacpp", "t": "trtllm",
+            "s": "sglang", "skv": "sglang", "sh": "sglang", "sp": "sglang", "l": "llamacpp", "t": "trtllm",
             "eq": "tei"}
 
 # boot-frozen server-side ceilings: the client can only diagnose them and hand
@@ -61,13 +62,14 @@ CEILING_FLAG = {
 
 
 def parse_gauges(text: str) -> dict | None:
-    """Extract waiting/running/kv/hits/preempts + dialect from a /metrics body."""
+    """Extract waiting/running/kv/hits/preempts + dialect from a /metrics body. `preempts` is
+    the engine's cumulative preemption count (SGLang: retractions), summed over its series."""
     out: dict = {"waiting": None, "running": None, "kv": None, "hits": None,
                  "preempts": None, "dialect": None}
     seen = False
     for m in _PAT.finditer(text):
         val = float(m.group("val"))
-        for g in ("v", "s", "l", "t", "vkv", "vh", "vp", "skv", "sh", "eq"):
+        for g in ("v", "s", "l", "t", "vkv", "vh", "vp", "skv", "sh", "sp", "eq"):
             if m.group(g) is not None:
                 seen = True
                 out["dialect"] = _DIALECT[g]
@@ -81,8 +83,8 @@ def parse_gauges(text: str) -> dict | None:
                     out["kv"] = val
                 elif g in ("vh", "sh"):
                     out["hits"] = val
-                elif g == "vp":
-                    out["preempts"] = int(val)
+                elif g in ("vp", "sp"):  # a counter per engine or label set: their sum
+                    out["preempts"] = (out["preempts"] or 0) + int(val)
                 break
     return out if seen else None
 

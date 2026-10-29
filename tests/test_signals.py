@@ -110,3 +110,16 @@ def test_scrape_retries_periodically_after_going_blind(caplog):
     err = caplog.text
     assert "running blind" in err and "http://x/metrics" in err
     assert "metrics scrape recovered (vllm)" in err
+
+
+
+def test_preemption_counters_are_summed_over_their_series_and_sglang_retractions_count():
+    vllm = ('vllm:num_preemptions_total{engine="0"} 5\n'
+            'vllm:num_preemptions_total{engine="1"} 0\n'
+            'vllm:num_requests_running 3\n')
+    g = parse_gauges(vllm)
+    assert g is not None and g["preempts"] == 5
+    g = parse_gauges("\n".join(reversed(vllm.strip().splitlines())))
+    assert g is not None and g["preempts"] == 5  # the order of the series does not matter
+    g = parse_gauges("sglang:num_retracted_requests_total 7\nsglang:num_running_reqs 2\n")
+    assert g is not None and (g["preempts"], g["dialect"]) == (7, "sglang")

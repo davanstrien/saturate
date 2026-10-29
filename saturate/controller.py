@@ -246,8 +246,9 @@ class Auto:
        before (this one, or one released earlier), step just under it instead of halving.
        A ceiling is released after BP_CEILING_RELEASE_S, because a provider's limit can rise;
        the first move past it then goes at most an eighth past it, never x2 or x4.
-    3. cut:kv — the KV cache ran out: a preemption this tick where the engine counts them
-       (vLLM); elsewhere KV high with a low (or absent) prefix-hit rate. Halve.
+    3. cut:kv — the KV cache ran out. Where the engine counts preemptions (vLLM; SGLang's
+       retractions): preemptions on at least `bp_frac` of this tick's outcomes, handled as
+       cut:bp is (a ceiling). Elsewhere: KV high with a low (or absent) prefix-hit rate; halve.
     4. cut:stall — window full and nothing completing for `stall_ticks` ticks, or 3x the
        latency when known, whichever is longer: halve. Once per episode: the next needs a
        completion after the last change has drained.
@@ -389,6 +390,15 @@ def _observe(auto: Auto, state: State, obs: Obs, limit: int) -> State:
     tick = _tick(obs)
     state = replace(state, clock=state.clock + tick, acked_ever=state.acked_ever or obs.successes > 0,
                     latency_s=obs.latency_s if obs.latency_s is not None else state.latency_s)
+    # the engine's preemption counter, every tick (in a cooldown too, so the next window is not
+    # charged with the last one's): preemptions since the previous reading. A missing reading
+    # starts over, so a later one is not charged with what happened in the gap; a counter
+    # that goes down (a restarted engine) counts none.
+    if obs.preempts is None:
+        state = replace(state, preempts=None, preempted=0)
+    else:
+        since = obs.preempts - state.preempts if state.preempts is not None else 0
+        state = replace(state, preempts=obs.preempts, preempted=max(0, since))
     if state.ceiling is not None and state.clock - state.ceiling.met >= BP_CEILING_RELEASE_S:
         state = replace(state, ceiling=None, seen_ceiling=state.ceiling)  # a provider's limit can rise
     if isinstance(state.phase, Trial):
@@ -402,11 +412,6 @@ def _observe(auto: Auto, state: State, obs: Obs, limit: int) -> State:
         if state.clock <= state.phase.until or draining:
             return replace(state, silent_s=0.0, samples=())  # the old window is not evidence
         state = replace(state, phase=state.phase.then)  # drained
-    if obs.preempts is not None:  # a counter: count since the last tick (a restart resets it)
-        since = obs.preempts - state.preempts if state.preempts is not None else 0
-        state = replace(state, preempts=obs.preempts, preempted=max(0, since))
-    else:
-        state = replace(state, preempted=0)
     silent = obs.inflight >= limit and obs.successes == 0
     state = replace(state, stall_armed=state.stall_armed or obs.successes > 0,
                     silent_s=state.silent_s + tick if silent else 0.0)
@@ -467,9 +472,10 @@ def overloaded(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
 
 
 def preempting(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
-    """The engine counts preemptions (vLLM) and preempted a request this tick: its KV cache ran
-    out at this window."""
-    return state.preempted > 0
+    """The engine counts preemptions (vLLM; SGLang's retractions) and preempted at least
+    `bp_frac` of this tick's outcomes: its KV cache ran out at this window. A share, as for
+    backpressure: an occasional preemption under load is not a limit."""
+    return state.preempted > 0 and state.preempted >= auto.bp_frac * (state.preempted + obs.successes)
 
 
 def kv_full(auto: Auto, state: State, obs: Obs, limit: int) -> bool:

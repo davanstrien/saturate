@@ -40,12 +40,12 @@ watch a run by reading storage; it never needs to talk to the running process.
 source (any iterable / dataset_rows / bucket_rows)
   → id derivation (yours, or content-hash)          source.py
   → skip_done: anti-join against existing_ids()      source.py   ← resume happens HERE
-  → admission: wait for a window slot                window.py
-  → to_request(row) → HTTP POST (+retry ladder,      transport.py
-      circuit breaker)
-  → parse(row, response) → success or error record   core.py
-  → buffered append → parquet part + manifest        sink.py
-      sidecar (flush_every rows or the flush age)
+  → to_request(row)                                  pipeline.py
+  → admission: wait for a window slot                core.py (AdaptiveLimiter)
+  → HTTP POST (+retry ladder, circuit breaker)       transport.py, http.py
+  → parse(row, response) → success or error record   pipeline.py
+  → writer thread: buffered append → parquet part    writer.py, sink.py
+      + manifest sidecar (flush_every rows or the flush age)
 ```
 
 Failures become durable *error rows* (never gaps); a re-run skips done ids exactly and
@@ -59,15 +59,20 @@ errored id is called healing; readers let the success win.
 | module | role |
 |---|---|
 | `controller.py` | pure `decide(obs, limit) -> new_limit`: `Fixed(n)` or `Auto` (below) |
-| `window.py` | asyncio admission gate whose limit the controller adjusts at runtime |
-| `signals.py` | `SignalSource`: engine metrics scrape (vLLM/SGLang/llama.cpp/TRT-LLM dialects, TEI queue-depth only) or none; the startup `probe` (engine, capacity, metrics on?) |
+| `signals.py` | engine metrics scrape (`HttpScrape`: the `METRICS` table covers vLLM, SGLang, llama.cpp, TensorRT-LLM, and TEI queue depth only) or none (`Null`); the startup `probe` (engine, capacity, metrics on?) |
+| `http.py` | `HttpClient`: one pooled aiohttp session per client |
 | `transport.py` | typed `Request` (json ⊕ multipart), retry ladder, circuit breaker |
-| `core.py` | `AdaptiveLimiter` (slot/observe) → `AdaptiveClient` (+HTTP) → `through()` (stream of `Done` results — id, row, output, error, token usage) |
-| `source.py` | `stream` (lazy normalize, content-hash ids), `skip_done` (anti-join + dedup), `shard_of` / `shard_select` (fan-out by a hash of the id) |
+| `core.py` | `AdaptiveLimiter` (slot/observe; the admission window is an anyio `CapacityLimiter` the controller resizes each tick) → `AdaptiveClient` (+HTTP) |
+| `pipeline.py` | `through()`: rows in, a stream of `Done` results out (id, row, output, error, token usage); [pipeline.md](pipeline.md) |
+| `writer.py` | `drain()`: finished rows to the sink on one writer thread; the `Sink` protocol and `sink_hooks()` |
+| `source.py` | `stream` (lazy normalize, content-hash ids), `skip_done` (anti-join + dedup), `shard_of` / `shard_select` (fan-out by a hash of the id), `prepare_ahead` |
 | `sources.py` | HF-native inputs (`[hf]` extra, lazy): `dataset_rows` (streaming Hub datasets), `bucket_rows` (raw objects by fsspec glob, bounded prefetch) |
-| `sink.py` | Sink protocol: `ParquetSink` (full contract), `FileSink`; `drain`, `read_output` |
+| `sink.py` | `ParquetSink` (full contract), `FileSink`, `read_output` |
+| `schema.py` | type rules for `ParquetSink`'s pinned schema |
 | `engine.py` | optional server lifecycle: boot templates, readiness gate, process-group kill |
 | `telemetry.py` | per-tick records (CONTRACT §6) + run-end advisor |
+| `settings.py` | range checks for the numbers `pump()` and `Auto` take |
+| `_logs.py` | the `[pump]` stderr fallback while the caller has no logging handler |
 | `__init__.py` | `pump()` = the composition of the above; `Stats`; agent-mode stdout contract |
 
 ### The controller (`Auto`)
@@ -191,13 +196,14 @@ images live in host RAM.
 
 ### Seams
 
-- **Transport** — a protocol; HTTP is the shipped implementation. An in-process
-  vLLM/SGLang transport is the planned second one (high-rate, short-output regime).
-  Proven bring-your-own: a binary-audio TTS transport was written against the
-  documented surface without modifying the package (RESULTS.md, TTS probe).
-- **SignalSource** — a scrape of the engine's metrics path (`/metrics`, or its own:
-  `signals.METRICS_PATH`) or none; the controller only ever sees a plain
-  `Obs` dict. The metrics table (`signals.METRICS`, one row per engine metric)
+- **Transport** — HTTP (`transport.py` over `http.py`) is the only built-in transport, and
+  there is no transport protocol class. An in-process vLLM/SGLang transport is planned
+  (high-rate, short-output regime). To bring your own transport, drive `AdaptiveLimiter`:
+  a binary-audio TTS transport was written that way without modifying the package
+  (RESULTS.md, TTS probe).
+- **SignalSource** — a scrape of the engine's metrics path (`HttpScrape`: `/metrics`, or the
+  engine's own, `signals.METRICS_PATH`) or none (`Null`); the controller only ever sees an
+  `Obs`. The metrics table (`signals.METRICS`, one row per engine metric)
   matches both metric-name spellings per engine because the k8s Gateway API Inference Extension (GAIE) protocol fixes gauge *semantics* but
   not their names (see [why.md §7](why.md)). Dialects may be partial: TEI publishes
   queue depth (`te_queue_size`) and nothing else — no running gauge, no KV — so the

@@ -35,8 +35,9 @@ def test_fatal_aborts_run_without_error_rows(tmp_path):
 
     async def go():
         client = cast(AdaptiveClient, _FatalClient())  # a stand-in with the `limiter` and `post` through uses
-        async with through(client, iter([(str(i), {"n": i}) for i in range(20)]),
-                           lambda r: {"p": r["n"]}, lambda r, b: b) as results:
+        async with through(
+            client, iter([(str(i), {"n": i}) for i in range(20)]), lambda r: {"p": r["n"]}, lambda r, b: b
+        ) as results:
             await drain(results, sink)
 
     with pytest.raises(FatalTransportError):

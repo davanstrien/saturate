@@ -35,15 +35,21 @@ def dolly_rows(n: int):
 
 
 def to_request(row: dict) -> dict:
-    return {"model": MODEL, "messages": [{"role": "user", "content": row["text"]}],
-            "max_tokens": MAX_TOKENS, "temperature": 0.0}
+    return {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": row["text"]}],
+        "max_tokens": MAX_TOKENS,
+        "temperature": 0.0,
+    }
 
 
 def parse(row: dict, body: dict) -> dict:
     usage = body.get("usage") or {}
-    return {"out": body["choices"][0]["message"]["content"],
-            "prompt_tokens": usage.get("prompt_tokens"),
-            "completion_tokens": usage.get("completion_tokens")}
+    return {
+        "out": body["choices"][0]["message"]["content"],
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "completion_tokens": usage.get("completion_tokens"),
+    }
 
 
 async def bare_arm(endpoint: str) -> dict:
@@ -69,18 +75,30 @@ async def bare_arm(endpoint: str) -> dict:
 
         await asyncio.gather(*[one(row) for _, row in rows])
     dt = time.monotonic() - t0
-    return {"arm": "bare-httpx-64", "wall_s": round(dt, 1), "tokens": tokens,
-            "tok_s": round(tokens / dt, 1), "n": len(rows)}
+    return {
+        "arm": "bare-httpx-64",
+        "wall_s": round(dt, 1),
+        "tokens": tokens,
+        "tok_s": round(tokens / dt, 1),
+        "n": len(rows),
+    }
 
 
 def main() -> None:
-    with Engine(MODEL, engine="vllm",
-                extra_args=["--gpu-memory-utilization", "0.90",
-                            "--no-enable-prefix-caching"]) as endpoint:
+    with Engine(
+        MODEL, engine="vllm", extra_args=["--gpu-memory-utilization", "0.90", "--no-enable-prefix-caching"]
+    ) as endpoint:
         bare = asyncio.run(bare_arm(endpoint))
         print("PARITY10K_BARE " + json.dumps(bare), flush=True)
-        s = pump(dolly_rows(N), to_request, parse, endpoint, "/tmp/parity10k",
-                 window=Auto(target_waiting=8, initial=8), flush_every=500)
+        s = pump(
+            dolly_rows(N),
+            to_request,
+            parse,
+            endpoint,
+            "/tmp/parity10k",
+            window=Auto(target_waiting=8, initial=8),
+            flush_every=500,
+        )
         print("PARITY10K_PUMP " + s.to_json(), flush=True)
         ratio = s.tokens_per_sec / bare["tok_s"] if bare["tok_s"] else 0
         print(f"PARITY10K_RATIO {ratio:.3f} (bar: >=0.95)", flush=True)

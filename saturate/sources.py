@@ -117,13 +117,15 @@ def dataset_rows(
         try:
             from datasets import load_dataset
         except ImportError as e:  # pragma: no cover
-            raise ImportError(
-                "dataset_rows() needs the `datasets` package — install saturate[hf]"
-            ) from e
+            raise ImportError("dataset_rows() needs the `datasets` package — install saturate[hf]") from e
         repo = dataset
         dataset = load_dataset(
-            repo, name=config, split=split, streaming=streaming,
-            revision=revision, token=token,
+            repo,
+            name=config,
+            split=split,
+            streaming=streaming,
+            revision=revision,
+            token=token,
         )
         prefix = _index_id_prefix(repo, revision, config or dataset.info.config_name or "default", split)
     elif revision is not None or token is not None:
@@ -150,8 +152,13 @@ def dataset_rows(
     # Decoding only this shard's examples needs the id before the decode (an index or a
     # column), a dataset loaded here (so nothing upstream decoded it already), and known
     # features to decode with (a JSON or CSV repo without dataset_info has none).
-    if (shard is not None and repo is not None and not callable(ids) and ids != "content"
-            and dataset.features is not None):
+    if (
+        shard is not None
+        and repo is not None
+        and not callable(ids)
+        and ids != "content"
+        and dataset.features is not None
+    ):
         from datasets import Dataset
 
         if isinstance(dataset, Dataset):  # streaming=False
@@ -162,9 +169,14 @@ def dataset_rows(
     return _iter_dataset(dataset, ids, columns, limit, prefix, shard)
 
 
-def _iter_dataset(dataset: Iterable[dict], ids: str | Callable, columns: list[str] | None,
-                  limit: int | None, prefix: str,
-                  shard: tuple[int, int] | None) -> Iterator[tuple[str, dict]]:
+def _iter_dataset(
+    dataset: Iterable[dict],
+    ids: str | Callable,
+    columns: list[str] | None,
+    limit: int | None,
+    prefix: str,
+    shard: tuple[int, int] | None,
+) -> Iterator[tuple[str, dict]]:
     """(id, row) for each example as `dataset` yields it, keeping only shard `shard`'s rows."""
     for i, ex in enumerate(dataset):
         if limit is not None and i >= limit:
@@ -176,9 +188,16 @@ def _iter_dataset(dataset: Iterable[dict], ids: str | Callable, columns: list[st
         yield rid, row
 
 
-def _iter_decoding_late(dataset, repo: str, token: str | None, ids: str, columns: list[str] | None,
-                        limit: int | None, prefix: str,
-                        shard: tuple[int, int]) -> Iterator[tuple[str, dict]]:
+def _iter_decoding_late(
+    dataset,
+    repo: str,
+    token: str | None,
+    ids: str,
+    columns: list[str] | None,
+    limit: int | None,
+    prefix: str,
+    shard: tuple[int, int],
+) -> Iterator[tuple[str, dict]]:
     """Like `_iter_dataset` for an IterableDataset loaded here from `repo`, with an index or
     column id: the id is known before the example is decoded, so the examples are read
     undecoded and only shard `shard`'s are decoded (an image or audio decode is the cost)."""
@@ -259,8 +278,10 @@ def bucket_rows(
     if root is not None:
         root_fs, root_path = fsspec.core.url_to_fs(root)
         if type(root_fs) is not type(fs):
-            raise ValueError(f"root {root!r} is not on the same filesystem as {pattern!r}: "
-                             "give it with the same scheme (e.g. hf://buckets/org/name/scans)")
+            raise ValueError(
+                f"root {root!r} is not on the same filesystem as {pattern!r}: "
+                "give it with the same scheme (e.g. hf://buckets/org/name/scans)"
+            )
         base_path = root_path.rstrip("/") + "/"
     infos = fs.glob(glob_path, detail=True)
     paths = sorted(p for p, i in infos.items() if i.get("type") != "directory")
@@ -272,7 +293,7 @@ def bucket_rows(
             return str(ids(path))
         if not path.startswith(base_path):
             raise ValueError(f"{path!r} is not under root {base_path!r}")
-        return path[len(base_path):]
+        return path[len(base_path) :]
 
     if limit is not None:
         paths = paths[: max(0, limit)]  # the first `limit` objects, before shard and skip

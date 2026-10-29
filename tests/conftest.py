@@ -60,10 +60,12 @@ def _diagnostics(funcargs: dict) -> list[str]:
     lines = []
     stub = funcargs.get("stub")
     if stub is not None and hasattr(stub, "longest_idle_s"):
-        lines.append(f"stub: {stub.requests} row requests, {stub.probes} probes, peak in flight "
-                     f"{stub.peak_inflight}, being handled now {stub.busy}; longest stretch with "
-                     f"nothing in flight {stub.longest_idle_s:.2f} s; longest single request "
-                     f"{stub.longest_service_s:.2f} s")
+        lines.append(
+            f"stub: {stub.requests} row requests, {stub.probes} probes, peak in flight "
+            f"{stub.peak_inflight}, being handled now {stub.busy}; longest stretch with "
+            f"nothing in flight {stub.longest_idle_s:.2f} s; longest single request "
+            f"{stub.longest_service_s:.2f} s"
+        )
     tmp_path = funcargs.get("tmp_path")
     if tmp_path is not None:
         for path in sorted(tmp_path.rglob("telemetry-*.jsonl")):

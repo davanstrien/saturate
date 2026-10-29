@@ -65,8 +65,9 @@ SEEDS = range(10)  # each a different noise draw and trial schedule: one run can
 
 
 def hosted(rate_limit: int, seed: int, **over) -> Engine:
-    return Engine(curve=[(1024, 400.0)], cap=1024, rate_limit=rate_limit, gauges=False, noise=0.05,
-                  seed=seed, **over)
+    return Engine(
+        curve=[(1024, 400.0)], cap=1024, rate_limit=rate_limit, gauges=False, noise=0.05, seed=seed, **over
+    )
 
 
 @pytest.mark.parametrize("rate_limit", [64, 100, 127, 200])
@@ -98,8 +99,13 @@ def test_a_hosted_api_limit_that_rises_mid_run_is_found():
     assert sum(shares) / len(shares) >= 0.85 and min(shares) >= 0.72, shares
 
 
-@given(cap=st.integers(2, 400), initial=st.integers(2, 512), seed=st.integers(0, 2**16),
-       reject=st.sampled_from([4, 12, 50]), data=st.data())
+@given(
+    cap=st.integers(2, 400),
+    initial=st.integers(2, 512),
+    seed=st.integers(0, 2**16),
+    reject=st.sampled_from([4, 12, 50]),
+    data=st.data(),
+)
 def test_a_hard_429_wall_is_never_crossed_far_once_met(cap, initial, seed, reject, data):
     """An API that rejects everything past `cap` (1 in `reject` of the served rows come back as
     429s while over it). Once Auto has met the wall, every later window stays within two
@@ -113,16 +119,24 @@ def test_a_hard_429_wall_is_never_crossed_far_once_met(cap, initial, seed, rejec
         seen = hist[max(0, len(hist) - 2)]
         served = min(seen, cap)
         bp = max(1, served // reject) if seen > cap else 0
-        obs = dict(waiting=None, running=None, inflight=limit, backpressure=bp, successes=served,
-                   input_bound=False, kv=None, hits=None, tok_s=served * 100.0)
+        obs = dict(
+            waiting=None,
+            running=None,
+            inflight=limit,
+            backpressure=bp,
+            successes=served,
+            input_bound=False,
+            kv=None,
+            hits=None,
+            tok_s=served * 100.0,
+        )
         limit = ctrl.decide(obs, limit)
         hist.append(limit)
         if ctrl.last_reason == "cut:bp" and seen > cap:
             met = tick if met is None else met
         if met is not None and tick > met + 60:  # past the first cuts down to the wall
             wall = ctrl.state.ceiling or ctrl.state.seen_ceiling
-            assert wall is not None and limit <= _above(wall.limit), \
-                (tick, limit, wall, hist[-20:])
+            assert wall is not None and limit <= _above(wall.limit), (tick, limit, wall, hist[-20:])
 
 
 def test_long_generations_survive_a_trial_past_the_read_timeout():
@@ -159,8 +173,9 @@ def engines(draw):
         rate *= gain ** (math.log(reach / window) / math.log(widen))
         window = reach
         curve.append((window, rate))
-    return Engine(curve, cap=cap, gauges=False, noise=draw(st.sampled_from([0.0, 0.05])),
-                  seed=draw(st.integers(0, 3)))
+    return Engine(
+        curve, cap=cap, gauges=False, noise=draw(st.sampled_from([0.0, 0.05])), seed=draw(st.integers(0, 3))
+    )
 
 
 @settings(max_examples=200, deadline=None, derandomize=True)  # the same engines on every run
@@ -194,8 +209,9 @@ LARGE_MODEL = [(16, 10.2), (32, 16.6), (64, 25.8), (128, 29.4), (256, 29.2)]
 
 
 def kv_engine(seed: int, **over) -> Engine:
-    kw: dict[str, Any] = dict(curve=LARGE_MODEL, cap=256, kv_cap=133, preempt_past=10**6, hits=0.05,
-                              noise=0.05, seed=seed)
+    kw: dict[str, Any] = dict(
+        curve=LARGE_MODEL, cap=256, kv_cap=133, preempt_past=10**6, hits=0.05, noise=0.05, seed=seed
+    )
     return Engine(**{**kw, **over})
 
 

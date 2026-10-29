@@ -72,8 +72,11 @@ def test_clients_sharing_a_hosted_api_limit_reject_few_rows(rate_limit, clients,
     assert total <= rate_limit * 1.05, total
 
 
-@pytest.mark.xfail(strict=True, reason="known: blind clients sharing an engine each judge their own "
-                   "throughput, and a larger share of a fixed total looks like a gain")
+@pytest.mark.xfail(
+    strict=True,
+    reason="known: blind clients sharing an engine each judge their own "
+    "throughput, and a larger share of a fixed total looks like a gain",
+)
 def test_blind_clients_sharing_an_engine_keep_the_queue_bounded():
     """Without gauges or 429s, nothing a client sees tells another client's requests from the
     engine's own limits: each one's throughput rises with its own window, so all grow to
@@ -89,8 +92,9 @@ def test_a_hosted_api_limit_over_many_seeds(rate_limit):
     """The fast tier's hosted-API test over 40 noise draws and trial schedules."""
     best, failed = [], []
     for seed in range(40):
-        engine = Engine(curve=[(1024, 400.0)], cap=1024, rate_limit=rate_limit, gauges=False, noise=0.05,
-                        seed=seed)
+        engine = Engine(
+            curve=[(1024, 400.0)], cap=1024, rate_limit=rate_limit, gauges=False, noise=0.05, seed=seed
+        )
         ticks = run(Auto(seed=seed), engine, 600)
         best.append(share_of_best(ticks[100:]))
         failed.append(failed_share(ticks))

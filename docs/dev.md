@@ -1,15 +1,20 @@
 # Developing
 
-Python ≥3.10; CI tests every supported version (3.14t, free-threaded, is informational). CI runs
-exactly these (plus an `[hf]` import check):
+Python ≥3.10; CI tests every supported version (3.14t, free-threaded, is informational). On every
+push CI runs these (plus a check that `uv.lock` names only public PyPI, and an `[hf]` import
+check):
 
 ```bash
 uv sync --locked
 uv run ruff check .
-uv run ty check saturate                 # types, the whole package
+uv run ty check saturate tests           # types: the package and the tests
 uv run pytest tests/ -q                  # unit + regression tests; -k name for one test
-uv run --with blacken-docs blacken-docs -l 100 README.md CONTRACT.md docs/*.md  # snippet formatting
+uv run --with blacken-docs blacken-docs -l 100 README.md CONTRACT.md docs/*.md && git diff --exit-code
 ```
+
+CI also runs the suite at the declared dependency floors (`--resolution lowest-direct`, Python
+3.10). The slow tier (`pytest --runslow`, `SATURATE_DEEP=1`) runs on demand or on a PR labelled
+`slow`.
 
 `uv.lock` is committed and CI refuses a stale one, or one that names any index other than public
 PyPI. Lock and run with user config off (`UV_NO_CONFIG=1 uv lock`, and the same for `uv run` and
@@ -23,14 +28,14 @@ refactor must pass unchanged.
 
 **End-to-end tests** (`tests/test_pump_e2e.py`) run `pump()` over real HTTP against a local
 stub inference server (`tests/stub_server.py`: stdlib asyncio, keep-alive HTTP/1.1, serves
-`/v1/chat/completions` with OpenAI-shaped JSON and `usage`, `/health`, and `/metrics` with
+`/v1/chat/completions` with OpenAI-shaped JSON and `usage`, `/v1/embeddings`, `/health`, and `/metrics` with
 vLLM-shaped gauges, so the scrape path and the gauge-mode controller run too). They cover the
 happy path against the storage CONTRACT (parts, manifests, markers, stats, telemetry keys),
 exact resume, error rows and healing via `retry_errors`, the agent-mode stdout line, the
 breaker giving up on a dead server, and the adaptive window widening as seen from the endpoint.
 The whole file runs in a few seconds (`saturate.core.TICK_S` is patched to 0.1 s); per-request
 behaviour is a `status_for(request) -> int` attribute on the stub, so a test can flip an endpoint
-between healthy and failing mid-scenario. CI runs the suite on Python 3.10 and 3.13.
+between healthy and failing mid-scenario.
 
 **The acceptance oracle** is a differential test suite in a separate, currently-private
 repo: nine end-to-end scenarios (kill/resume, breaker behavior, fan-out uniqueness, …) run

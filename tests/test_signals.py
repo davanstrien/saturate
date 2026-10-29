@@ -373,3 +373,63 @@ def test_a_healthy_vllm_prefix_cache_lets_a_full_kv_cache_with_a_preemption_stan
     assert not kv_full(auto, state, Obs(kv=0.97, hits=0.9, preempts=4), 64)
     assert kv_full(auto, state, Obs(kv=0.97, hits=0.2, preempts=4), 64)
     assert kv_full(auto, state, Obs(kv=0.97, hits=None, preempts=4), 64)
+
+
+def test_the_metrics_table_is_well_formed():
+    """A row that names an unknown field, or a key where its field takes none (or none where it
+    does), would be read wrongly without failing: each is checked here, as is a name that two
+    rows or two spellings share."""
+    from saturate.signals import _BY_NAME, FIELDS, METRICS
+
+    for m in METRICS:
+        assert m.field in FIELDS, m
+        assert (m.key is not None) == (FIELDS[m.field] == "series"), m
+        assert m.key in (None, "queries", "hits"), m
+    assert len(_BY_NAME) == 2 * len(METRICS)
+
+
+def test_every_metric_row_is_read_in_both_spellings_into_its_field():
+    """One row of METRICS is all a metric needs: each accepted spelling names its engine and
+    lands in its own field."""
+    from saturate.signals import _BY_NAME, FIELDS
+
+    for full, m in _BY_NAME.items():
+        g = parse_gauges(f'{full}{{engine="0"}} 3\n')
+        assert g is not None and g["dialect"] == m.engine, full
+        want = {'{engine="0"}': {m.key: 3.0}} if FIELDS[m.field] == "series" else 3
+        assert g[m.field] == want, full
+
+
+def test_the_sample_parser_skips_what_is_not_a_finite_sample():
+    """Comments, a non-finite value (NaN, +Inf) and a metric no row names are skipped; a label
+    value holding a brace and a trailing timestamp are read correctly."""
+    text = ("# HELP vllm:num_requests_waiting Number of requests waiting.\n"
+            "# TYPE vllm:num_requests_waiting gauge\n"
+            'vllm:num_requests_waiting{model_name="a}b"} 4 1730000000000\n'
+            "vllm:num_requests_running NaN\n"
+            "vllm:kv_cache_usage_perc +Inf\n"
+            "vllm:num_requests_swapped 9\n")
+    g = parse_gauges(text)
+    assert g is not None and (g["waiting"], g["running"], g["kv"]) == (4, None, None)
+    assert parse_gauges("# only comments\n\nup 1\n") is None
+    g = parse_gauges('vllm:prefix_cache_queries_total{model_name="a}b"} 10\n')
+    assert g is not None and g["prefix_counts"] == {'{model_name="a}b"}': {"queries": 10.0}}
+
+
+def test_the_sample_parser_reads_real_exposition_shapes():
+    """Shapes the Prometheus text format allows: a tab separator, an exemplar after the value
+    (its braces are not the labels'), an escaped quote and a brace in a label value, a line
+    separator other than a newline inside a label value. A line starting with whitespace, or
+    a value with no whitespace before it, is not a sample."""
+    exemplar = 'vllm:num_preemptions_total{engine="0"} 7 # {trace_id="abc"} 1.0\n'
+    g = parse_gauges(exemplar)
+    assert g is not None and g["preempts"] == 7
+    g = parse_gauges('vllm:prefix_cache_queries_total{engine="0"} 5 # {trace_id="x"} 1\n'
+                     'vllm:prefix_cache_hits_total{engine="0"} 2\n')
+    assert g is not None and g["prefix_counts"] == {'{engine="0"}': {"queries": 5, "hits": 2}}
+    g = parse_gauges("vllm:num_requests_waiting\t7\n")
+    assert g is not None and g["waiting"] == 7
+    g = parse_gauges('vllm:num_requests_waiting{a="x\\"}y",b="p\u2028q"} 3 1730000000000\n')
+    assert g is not None and g["waiting"] == 3
+    assert parse_gauges("  vllm:num_requests_waiting 7\n") is None
+    assert parse_gauges('vllm:num_requests_waiting{a="b"}7\n') is None

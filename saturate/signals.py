@@ -4,9 +4,9 @@ Implementations: HttpScrape (poll the engine's /metrics — MVP), Null (blind
 mode: hosted APIs, opaque LBs), and post-v1 an in-process source reading
 engine internals directly. The controller never knows which one fed it.
 
-The scrape table is keyed on the GAIE model-server-protocol semantics
-(queued / running / kv-util) rather than exact strings, and matches BOTH
-prefix spellings per engine (`sglang:` and `sglang_`). The exporters
+The scrape table (METRICS: one row per engine metric) is keyed on the GAIE
+model-server-protocol semantics (queued / running / kv-util) rather than exact
+strings, and matches BOTH prefix spellings per engine (`sglang:` and `sglang_`). The exporters
 themselves emit colons today; the dual spelling costs one character and
 absorbs a collector that normalises them away (Prometheus relabelling,
 OpenTelemetry) or a future rename. Neither engine has actually flipped:
@@ -27,34 +27,110 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-import re
-from collections.abc import Callable
+import math
+from collections.abc import Callable, Iterator
+from typing import NamedTuple
 
 from saturate.http import HttpClient, Timeouts, TransportError
 
 log = logging.getLogger(__name__)
 
-_PAT = re.compile(
-    r"^(?:"
-    r"vllm[:_](?:num_requests_(?P<v>waiting|running)"
-    r"|(?:gpu_cache|kv_cache)_usage_perc(?P<vkv>)"
-    r"|gpu_prefix_cache_hit_rate(?P<vh>)"
-    r"|(?:gpu_)?prefix_cache_(?P<vpc>queries|hits)_total"
-    r"|num_preemptions_total(?P<vp>))"
-    r"|sglang[:_](?:num_(?P<s>queue|running)_reqs"
-    r"|token_usage(?P<skv>)"
-    r"|cache_hit_rate(?P<sh>)"
-    r"|num_retracted_requests_total(?P<sp>))"
-    r"|llamacpp[:_]requests_(?P<l>deferred|processing)"
-    r"|trtllm_num_requests_(?P<t>waiting|running)"
-    r"|te[:_]queue_size(?P<eq>)"
-    r")(?P<labels>\{[^}]*\})?\s+(?P<val>[0-9.eE+-]+)",
-    re.M,
+# the gauges' fields, and how the values of a field's series (one per engine or label set)
+# combine. "sum": a count, summed as an int. "last": a ratio gauge, where the last line wins
+# if several label sets publish it. "series": kept per label set under the metric's `key`, for
+# HttpScrape to difference series by series.
+FIELDS: dict[str, str] = {"waiting": "sum", "running": "sum", "preempts": "sum",
+                          "kv": "last", "hits": "last", "prefix_counts": "series"}
+
+
+class Metric(NamedTuple):
+    """One engine metric the scrape reads, and the field of the gauges it feeds (see FIELDS).
+    A "series" field's metrics name their `key` within each series."""
+
+    engine: str
+    name: str  # without the engine prefix; matched as `prefix:name` and `prefix_name`
+    field: str
+    key: str | None = None
+
+
+METRICS: tuple[Metric, ...] = (
+    Metric("vllm", "num_requests_waiting", "waiting"),
+    Metric("vllm", "num_requests_running", "running"),
+    Metric("vllm", "kv_cache_usage_perc", "kv"),
+    Metric("vllm", "gpu_cache_usage_perc", "kv"),  # before 0.12
+    Metric("vllm", "gpu_prefix_cache_hit_rate", "hits"),  # V0; V1 has the counters below
+    Metric("vllm", "num_preemptions_total", "preempts"),
+    Metric("vllm", "prefix_cache_queries_total", "prefix_counts", "queries"),
+    Metric("vllm", "prefix_cache_hits_total", "prefix_counts", "hits"),
+    Metric("vllm", "gpu_prefix_cache_queries_total", "prefix_counts", "queries"),  # 0.8-0.9
+    Metric("vllm", "gpu_prefix_cache_hits_total", "prefix_counts", "hits"),
+    Metric("sglang", "num_queue_reqs", "waiting"),
+    Metric("sglang", "num_running_reqs", "running"),
+    Metric("sglang", "token_usage", "kv"),
+    Metric("sglang", "cache_hit_rate", "hits"),
+    Metric("sglang", "num_retracted_requests_total", "preempts"),
+    Metric("llamacpp", "requests_deferred", "waiting"),
+    Metric("llamacpp", "requests_processing", "running"),
+    Metric("trtllm", "num_requests_waiting", "waiting"),
+    Metric("trtllm", "num_requests_running", "running"),
+    Metric("tei", "queue_size", "waiting"),
 )
 
-_DIALECT = {"v": "vllm", "vkv": "vllm", "vh": "vllm", "vp": "vllm", "vpc": "vllm",
-            "s": "sglang", "skv": "sglang", "sh": "sglang", "sp": "sglang", "l": "llamacpp", "t": "trtllm",
-            "eq": "tei"}
+# the metric-name prefix of an engine whose prefix is not its name
+_PREFIX = {"tei": "te"}
+
+# every accepted spelling of every metric's full name -> its Metric
+_BY_NAME = {f"{_PREFIX.get(m.engine, m.engine)}{sep}{m.name}": m for m in METRICS for sep in (":", "_")}
+
+
+def _label_end(line: str, start: int) -> int:
+    """The index of the `}` that closes the label block opening at `line[start]`, skipping
+    braces inside quoted label values (and escaped quotes in them); -1 if it never closes."""
+    quoted = False
+    i = start + 1
+    while i < len(line):
+        char = line[i]
+        if quoted and char == "\\":
+            i += 2  # an escaped character: \" \\ \n
+            continue
+        if char == '"':
+            quoted = not quoted
+        elif char == "}" and not quoted:
+            return i
+        i += 1
+    return -1
+
+
+def _samples(text: str) -> Iterator[tuple[str, str, float]]:
+    """(name, labels, value) for each sample line of a Prometheus text body, `labels` being the
+    raw label block, braces included and order kept, or "": a name at the start
+    of the line, an optional label block, whitespace (spaces or tabs), the value, then an
+    optional timestamp or exemplar, which are ignored. Lines split on newlines only (a label
+    value may hold other line separators). Comments, blank lines, lines that do not start with
+    a name, and a value that is not a finite number (NaN, +Inf) are skipped."""
+    for line in text.split("\n"):
+        line = line.rstrip("\r")
+        if not line or line[0] in "# \t":
+            continue
+        end = 0
+        while end < len(line) and line[end] not in "{ \t":
+            end += 1
+        name, labels = line[:end], ""
+        if end < len(line) and line[end] == "{":
+            close = _label_end(line, end)
+            if close == -1:
+                continue
+            labels, end = line[end:close + 1], close + 1
+        rest = line[end:]
+        if not rest[:1].isspace():  # the value must follow whitespace
+            continue
+        try:
+            value = float(rest.split()[0])
+        except (ValueError, IndexError):
+            continue
+        if math.isfinite(value):
+            yield name, labels, value
+
 
 # boot-frozen server-side ceilings: the client can only diagnose them and hand
 # back the exact relaunch flag (advisor, not tuner)
@@ -82,36 +158,28 @@ METRICS_FLAG = {
 
 
 def parse_gauges(text: str) -> dict | None:
-    """Extract waiting/running/kv/hits/preempts + dialect from a /metrics body. `preempts` is
-    the engine's cumulative preemption count (SGLang: retractions), summed over its series.
-    `prefix_counts` is vLLM's cumulative prefix-cache token counts per series (label set ->
-    {"queries": n, "hits": n}): vLLM publishes no hit-rate gauge, so HttpScrape derives `hits`
-    from two readings, series by series, so that one engine's reset is not hidden in a sum."""
-    out: dict = {"waiting": None, "running": None, "kv": None, "hits": None,
-                 "preempts": None, "prefix_counts": None, "dialect": None}
+    """Extract waiting/running/kv/hits/preempts + dialect from a /metrics body, as METRICS
+    says. `preempts` is the engine's cumulative preemption count (SGLang: retractions), summed
+    over its series. `prefix_counts` is vLLM's cumulative prefix-cache token counts per series
+    (label set -> {"queries": n, "hits": n}): vLLM publishes no hit-rate gauge, so HttpScrape
+    derives `hits` from two readings, series by series, so that one engine's reset is not
+    hidden in a sum. None when no line is a known metric."""
+    out: dict = {field: None for field in FIELDS} | {"dialect": None}
     seen = False
-    for m in _PAT.finditer(text):
-        val = float(m.group("val"))
-        for g in ("v", "s", "l", "t", "vkv", "vh", "vp", "vpc", "skv", "sh", "sp", "eq"):
-            if m.group(g) is not None:
-                seen = True
-                out["dialect"] = _DIALECT[g]
-                if g in ("v", "s", "l", "t"):
-                    kind = m.group(g)
-                    key = "waiting" if kind in ("waiting", "queue", "deferred") else "running"
-                    out[key] = (out[key] or 0) + int(val)
-                elif g == "eq":
-                    out["waiting"] = (out["waiting"] or 0) + int(val)
-                elif g in ("vkv", "skv"):
-                    out["kv"] = val
-                elif g in ("vh", "sh"):
-                    out["hits"] = val
-                elif g in ("vp", "sp"):  # a counter per engine or label set: their sum
-                    out["preempts"] = (out["preempts"] or 0) + int(val)
-                elif g == "vpc":  # kept per series: a rate is made from each series' own deltas
-                    counts = out["prefix_counts"] = out["prefix_counts"] or {}
-                    counts.setdefault(m.group("labels") or "", {})[m.group(g)] = val
-                break
+    for name, labels, value in _samples(text):
+        metric = _BY_NAME.get(name)
+        if metric is None:
+            continue
+        seen = True
+        out["dialect"] = metric.engine
+        combine = FIELDS[metric.field]
+        if combine == "sum":
+            out[metric.field] = (out[metric.field] or 0) + int(value)
+        elif combine == "last":
+            out[metric.field] = value
+        else:
+            series = out[metric.field] = out[metric.field] or {}
+            series.setdefault(labels, {})[metric.key] = value
     return out if seen else None
 
 

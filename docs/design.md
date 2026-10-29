@@ -197,8 +197,8 @@ images live in host RAM.
   documented surface without modifying the package (RESULTS.md, TTS probe).
 - **SignalSource** — a scrape of the engine's metrics path (`/metrics`, or its own:
   `signals.METRICS_PATH`) or none; the controller only ever sees a plain
-  `Obs` dict. The dialect table matches both metric-name spellings per engine because
-  the k8s Gateway API Inference Extension (GAIE) protocol fixes gauge *semantics* but
+  `Obs` dict. The metrics table (`signals.METRICS`, one row per engine metric)
+  matches both metric-name spellings per engine because the k8s Gateway API Inference Extension (GAIE) protocol fixes gauge *semantics* but
   not their names (see [why.md §7](why.md)). Dialects may be partial: TEI publishes
   queue depth (`te_queue_size`) and nothing else — no running gauge, no KV — so the
   controller runs the queue-band branches and skips the KV ones.

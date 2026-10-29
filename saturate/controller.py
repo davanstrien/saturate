@@ -226,8 +226,8 @@ class Auto:
     The x4 move crosses a stretch where throughput is flat (SGLang's from 32 to 64) that a
     doubling cannot see past; x7/8 trims a window that overshot the engine's cap. The window
     starts at `initial` if given; else at the engine's reported capacity when the engine
-    reports one (begin: SGLang, llama.cpp, TEI); else at 64, so most of a short run is not
-    spent ramping.
+    reports one (begin: SGLang, llama.cpp, TEI, TensorRT-LLM 1.3 or later); else at 64, so most
+    of a short run is not spent ramping.
 
     A trial's readings arrive one request latency late, and a wider window has a longer latency
     at flat throughput (Little's law), so a trial is judged only after two latencies at its

@@ -127,7 +127,7 @@ flowchart TD
 | reason | when | action |
 |---|---|---|
 | `hold:cooldown` | after a cut or revert: at least max(2 ticks, the last latency) (3 ticks when unknown), longer while the oldest request in flight predates the change, capped at the stall patience | hold; the old window's completions are not evidence |
-| `cut:bp` | backpressure (429 / timeout / 5xx) on at least `bp_frac` of this tick's outcomes | halve and remember the window as a ceiling (growth stops ⅛ under it); at a ceiling met before, step under it instead. A ceiling is released after 300 s, because a provider's limit can rise |
+| `cut:bp` | backpressure (429 / timeout / 5xx) on at least `bp_frac` of this tick's outcomes | halve and remember the window as a ceiling (growth stops ⅛ under it); at a ceiling met before, step under it instead. A ceiling is released after 300 s, because a provider's limit can rise; the first move past a released ceiling goes at most ⅛ past it |
 | `cut:kv` | KV ≥ 0.9 AND prefix-hit rate < 0.5 or absent | halve — high KV with healthy hits is cache reuse |
 | `cut:stall` | window full and nothing completed for max(3 ticks, 3× latency); once per episode | halve — a wedged engine reads as an empty queue because nothing new is admitted |
 | `hold:input_bound` | the source, not the engine, starves admission | hold; starved ticks are not evidence |
@@ -136,6 +136,7 @@ flowchart TD
 | `hold` | window under 80% used, or a queue at or above the band's low end | hold |
 | `hold:ack` | waiting for an evidence window (`limit` completions and two throughput samples), or for a trial to settle | hold |
 | `hold:plateau` | waiting out the backoff between trials | hold |
+| `hold:jitter` | the backoff is out, after a failed trial (backoff > 1): a random 0–4 more ticks on which the trial is due, drawn once per trial; other holds do not count | hold — clients sharing one endpoint fall out of step, and a hold they all see (a shared queue in band) does not put them back in step |
 | `trial:up` / `trial:down` | the next move opens | move the window; judged later |
 | `hold:ceiling` / `hold:floor` | a move would cross `max_limit` or a backpressure ceiling / `min_limit`, or a cut is already at `min_limit` | skip to the next move; a cut arms nothing |
 
@@ -143,6 +144,15 @@ A cut during a trial counts as a failed trial: the window goes no higher than wh
 began (except a queue cut, which steps by what the gauge shows). Latency is the p50 of successful
 attempts only — retries, backoff, breaker waits and
 poison rows are excluded — and waits are integrated in seconds from the measured tick.
+Trial jitter follows BBR's probe timing (a fixed base plus a uniform random wait, none during
+Startup) and the additive jitter of stamina and tenacity. Without it, clients that share one
+endpoint (sharded Jobs, or a team on one server) open their trials on the same tick, all see the
+shared queue or the shared 429s, and all cut at once: a sawtooth. `Auto(seed=...)` fixes the
+schedule (tests); by default each Auto draws its own. Blind clients sharing one engine (no
+gauges, no 429s) remain a known gap: each judges its own throughput, a larger share of a fixed
+total reads as a gain, and all grow to `max_limit` (a strict xfail in tests/test_controller_slow.py
+pins it). Set `max_limit`, or expose the engine's /metrics.
+
 `bench/controller_sim.py` scores any version of the controller against simulated engines
 (tests/sim_engine.py). On random engines (a Hypothesis property) it reaches at least 75% of the
 best fixed window: past a flat stretch that starts below the initial window, a gain just over

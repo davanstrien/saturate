@@ -4,7 +4,42 @@ the stub means the client was not sending; a long service time means the stub wa
 Timeouts are covered with pytest-timeout's signal method (the Linux default): the thread
 method exits the process before any report is made."""
 
+import os
+
 import pytest
+from hypothesis import settings
+
+import saturate.controller
+
+# property tests without their own max_examples: 60 examples, or 1000 with SATURATE_DEEP=1
+settings.register_profile("default", max_examples=60, deadline=None)
+settings.register_profile("deep", max_examples=1000, deadline=None)
+settings.load_profile("deep" if os.environ.get("SATURATE_DEEP") else "default")
+
+
+def pytest_addoption(parser):
+    parser.addoption("--runslow", action="store_true", help="also run the tests marked slow")
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--runslow"):
+        return
+    skip = pytest.mark.skip(reason="slow: run with --runslow")
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True)
+def _seeded_auto(monkeypatch):
+    """An Auto built without a seed draws its trial jitter from the OS; in tests it gets seed 0,
+    so a run is repeatable. A test that wants several schedules passes `seed` itself."""
+    build = saturate.controller.Auto.__init__
+
+    def seeded(self, *args, seed=None, **kwargs):
+        build(self, *args, seed=0 if seed is None else seed, **kwargs)
+
+    monkeypatch.setattr(saturate.controller.Auto, "__init__", seeded)
 
 
 @pytest.hookimpl(hookwrapper=True)

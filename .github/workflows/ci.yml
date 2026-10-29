@@ -1,7 +1,14 @@
 name: ci
-on: [push, pull_request, workflow_call]
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_call:
+  workflow_dispatch:
 jobs:
   test:
+    # a label only matters to the slow job: adding one does not rerun the matrix
+    if: github.event.action != 'labeled'
     runs-on: ubuntu-latest
     # every supported version (requires-python >= 3.10); 3.14t (free-threaded) is informational
     # until the scientific stack ships free-threaded wheels for everything the suite imports
@@ -32,8 +39,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          uv run pytest tests/ -m 'not internals' --collect-only -q | tail -n 1
+          uv run pytest tests/ -m 'not internals and not slow' --collect-only -q | tail -n 1
       - run: uv run --extra hf python -c "from huggingface_hub import HfFileSystem; HfFileSystem()"
+  slow:
+    # the slow tier: many seeds, several clients on one engine, deep Hypothesis runs. On demand
+    # (Actions > ci > Run workflow) or on a PR labelled `slow`; not on every push
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (contains(github.event.pull_request.labels.*.name, 'slow') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'slow'))
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.13"
+      SATURATE_DEEP: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.13
+      - run: uv sync --locked
+      # deep Hypothesis runs take minutes per test: past the suite's 120 s deadlock guard
+      - run: uv run pytest -q -o timeout=1800 --runslow tests/test_controller_slow.py
+      - run: uv run pytest -q -o timeout=1800 tests/test_controller_properties.py tests/test_controller_perf.py
   types:
     # ty (pinned in the dev group) over the whole package
     runs-on: ubuntu-latest

@@ -1,4 +1,4 @@
-"""Auto starts at the engine's reported capacity: SGLang, llama.cpp and TEI report one, read once
+"""Auto starts at the engine's reported capacity: SGLang, llama.cpp, TEI and TRT-LLM report one, read once
 before the first request; the caller's own `initial` wins, a rejecting engine's limit is never
 exceeded, and engines without one (vLLM, a hosted API) keep the default start. Each run starts
 from the caller's configuration, so one Auto can run again, against any engine."""
@@ -77,6 +77,8 @@ SGLANG_LOADS = {"loads": [{"dp_rank": 0, "num_running_reqs": 0, "max_running_req
     ("/info", {"model_id": "x"}, None),  # a 200 without the field is no capacity
     ("/info", {"gateway": {"max_concurrent_requests": 3}}, None),  # a nested field is not TEI's
     ("/props", {"total_slots": True, "default_generation_settings": {}}, None),  # not a count
+    ("/server_info", {"disaggregated_params": None, "max_batch_size": 64}, Capacity(64, True, "trtllm")),
+    ("/server_info", {"max_batch_size": 64}, None),  # not TensorRT-LLM's shape
 ])
 def test_read_capacity_reads_each_engines_own_shape(path, payload, expected):
     with StubServer() as stub:
@@ -103,6 +105,18 @@ def test_the_client_starts_the_window_at_the_capacity_before_the_first_request()
         assert asyncio.run(enter(stub.endpoint, window=Auto(initial=40))) == 40  # the caller's wins
         assert asyncio.run(enter(stub.endpoint, signal_source="none")) == Auto.DEFAULT_INITIAL
         assert asyncio.run(enter(stub.endpoint, window=Fixed(5))) == 5
+
+
+def test_the_client_hands_the_probe_to_the_scrape_whatever_the_window():
+    async def enter(endpoint):
+        async with AdaptiveClient(endpoint, window=Fixed(5)) as client:
+            return client.limiter.signals
+
+    with StubServer() as stub:
+        stub.json_routes["/props"] = {"total_slots": 8, "default_generation_settings": {},
+                                      "endpoint_metrics": False}
+        signals = asyncio.run(enter(stub.endpoint))
+        assert (signals.engine, signals.reason) == ("llamacpp", "the engine reports its metrics endpoint off")
 
 
 def test_a_reused_client_reads_the_capacity_again():

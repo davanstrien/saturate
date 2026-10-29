@@ -25,7 +25,7 @@ import anyio
 from saturate import transport
 from saturate.controller import TICK_S, Auto, Fixed, Obs
 from saturate.http import HttpClient, Timeouts
-from saturate.signals import HttpScrape, Null, read_capacity
+from saturate.signals import HttpScrape, Null, probe
 from saturate.telemetry import tick_record
 from saturate.transport import Attempt, Breaker, FatalTransportError, Request, call_endpoint, coerce_request
 
@@ -376,12 +376,15 @@ class AdaptiveClient:
         return self
 
     async def _begin(self) -> None:
-        """Before the first request: read the engine's capacity once (unless signals are off),
-        and start Auto's run from it (Auto.begin)."""
+        """Before the first request: probe the engine once (unless signals are off), so the
+        scrape reads its metrics path and Auto starts its run from its capacity (Auto.begin)."""
+        found = None if self._signal_source == "none" else await probe(self._client, self.base)
+        if found is not None and isinstance(self.limiter.signals, HttpScrape):
+            self.limiter.signals.identify(found)
         controller = self.limiter.controller
         if not isinstance(controller, Auto):
             return
-        capacity = None if self._signal_source == "none" else await read_capacity(self._client, self.base)
+        capacity = found.capacity if found is not None else None
         controller.begin(capacity)
         self.limiter.set_limit(controller.initial)
         if capacity is not None:

@@ -81,7 +81,7 @@ class _FlakyClient:
         self.calls += 1
         if self.calls <= self.fail_first:
             raise TransportError("metrics not up yet")
-        return type("R", (), {"text": VLLM_METRICS})()
+        return type("R", (), {"status_code": 200, "text": VLLM_METRICS})()
 
 
 def test_scrape_retries_periodically_after_going_blind(caplog):
@@ -108,7 +108,7 @@ def test_scrape_retries_periodically_after_going_blind(caplog):
     assert calls == 6 and gauges["dialect"] == "vllm"  # read 35 probes and recovers
     assert scrape.dialect == "vllm"
     err = caplog.text
-    assert "running blind" in err and "http://x/metrics" in err
+    assert "running blind" in err and "http://x/metrics (unreachable)" in err
     assert "metrics scrape recovered (vllm)" in err
 
 
@@ -123,3 +123,111 @@ def test_preemption_counters_are_summed_over_their_series_and_sglang_retractions
     assert g is not None and g["preempts"] == 5  # the order of the series does not matter
     g = parse_gauges("sglang:num_retracted_requests_total 7\nsglang:num_running_reqs 2\n")
     assert g is not None and (g["preempts"], g["dialect"]) == (7, "sglang")
+
+
+TRTLLM_METRICS = "trtllm_num_requests_waiting 4\ntrtllm_num_requests_running 60\n"
+
+
+class _ScriptedClient:
+    """GET answers from a table of path -> (status, body); every requested path is recorded.
+    Stands in for HttpClient like _FlakyClient."""
+
+    def __init__(self, routes: dict[str, tuple[int, str]]):
+        self.routes = routes
+        self.paths: list[str] = []
+
+    async def get(self, url, timeouts=None):
+        path = url.removeprefix("http://x")
+        self.paths.append(path)
+        status, text = self.routes.get(path, (404, "Not Found"))
+        return type("R", (), {"status_code": status, "text": text,
+                              "json": lambda self: __import__("json").loads(text)})()
+
+
+def _reads(scrape, n):
+    import asyncio
+
+    async def run():
+        return [await scrape.read() for _ in range(n)]
+    return asyncio.run(run())
+
+
+def _probe(client):
+    import asyncio
+
+    from saturate.signals import probe
+    return asyncio.run(probe(cast(HttpClient, client), "http://x/v1"))
+
+
+def test_a_probed_trtllm_is_scraped_at_prometheus_metrics_and_never_at_metrics():
+    """trtllm-serve's /metrics is JSON iteration stats that each read clears: once /server_info
+    names TensorRT-LLM, the scrape never reads it."""
+    from saturate.signals import Capacity, HttpScrape
+
+    client = _ScriptedClient({
+        "/server_info": (200, '{"disaggregated_params": null, "max_batch_size": 64}'),
+        "/prometheus/metrics": (200, TRTLLM_METRICS),
+        "/metrics": (200, "[]"),
+    })
+    found = _probe(client)
+    assert (found.engine, found.capacity) == ("trtllm", Capacity(64, True, "trtllm"))
+    scrape = HttpScrape(cast(HttpClient, client), "http://x/v1")
+    scrape.identify(found)
+    gauges = _reads(scrape, 3)
+    assert all(g is not None and (g["waiting"], g["running"]) == (4, 60) for g in gauges)
+    assert "/metrics" not in client.paths
+
+
+def test_json_at_metrics_is_read_once_then_the_scrape_moves_to_prometheus_metrics(caplog):
+    """A TensorRT-LLM without /server_info (1.2 and earlier) is named by its first /metrics reply,
+    which is JSON: that read is the only one."""
+    from saturate.signals import HttpScrape
+
+    client = _ScriptedClient({"/metrics": (200, '[{"iter": 1}]'),
+                              "/prometheus/metrics": (200, TRTLLM_METRICS)})
+    scrape = HttpScrape(cast(HttpClient, client), "http://x/v1")
+    gauges = _reads(scrape, 3)
+    assert gauges[0] is None and gauges[1] is not None and gauges[1]["dialect"] == "trtllm"
+    assert client.paths == ["/metrics", "/prometheus/metrics", "/prometheus/metrics"]
+    assert "TensorRT-LLM; scraping http://x/prometheus/metrics instead" in caplog.text
+
+
+def test_a_llamacpp_that_reports_metrics_off_is_never_scraped_and_the_warning_names_the_flag(caplog):
+    from saturate.signals import HttpScrape
+
+    client = _ScriptedClient({
+        "/props": (200, '{"total_slots": 4, "default_generation_settings": {}, "endpoint_metrics": false}'),
+    })
+    found = _probe(client)
+    assert (found.engine, found.metrics_on) == ("llamacpp", False)
+    client.paths.clear()
+    scrape = HttpScrape(cast(HttpClient, client), "http://x/v1")
+    scrape.identify(found)
+    assert _reads(scrape, 40) == [None] * 40
+    assert client.paths == []
+    assert caplog.text.count("running blind") == 1
+    assert "llamacpp reports its metrics endpoint off" in caplog.text and "--metrics" in caplog.text
+
+
+def test_blind_mode_says_why_the_reads_missed_and_names_the_engines_flag(caplog):
+    """A 404 and a reply with no engine gauges each name themselves (an unreachable server: see
+    above); for a probed engine the warning adds what turns its gauges on."""
+    from saturate.signals import HttpScrape, Probe
+
+    scrape = HttpScrape(cast(HttpClient, _ScriptedClient({})), "http://x/v1")
+    scrape.identify(Probe(engine="sglang"))
+    _reads(scrape, 6)  # five misses, then the warning
+    assert "(HTTP 404)" in caplog.text and "start SGLang with --enable-metrics" in caplog.text
+    caplog.clear()
+    scrape = HttpScrape(cast(HttpClient, _ScriptedClient({"/metrics": (200, "up 1\n")})), "http://x/v1")
+    _reads(scrape, 6)
+    assert "(no engine gauges in the reply)" in caplog.text
+    assert scrape.reason == "no engine gauges in the reply"
+
+
+def test_a_probe_of_vllm_or_a_hosted_api_names_no_engine():
+    from saturate.signals import Probe
+
+    assert _probe(_ScriptedClient({"/version": (200, '{"version": "0.32.0"}')})) == Probe()
+    # SGLang has a /server_info too; without disaggregated_params it is not TensorRT-LLM's
+    assert _probe(_ScriptedClient({"/server_info": (200, '{"max_running_requests": 8}')})) == Probe()

@@ -802,14 +802,21 @@ FULL = dict(kv=0.99, hits=0.0)  # a full KV cache, unique prompts
 
 def test_preemptions_are_counted_from_the_first_reading_and_a_reset_is_not_a_preemption():
     """The engine's counter is cumulative: its first reading is the baseline (preemptions
-    before this run are not this window's), and a counter that goes down (a restarted engine)
-    counts none. A full cache with a preemption this tick halves the window."""
+    before this run are not this window's). A full cache with a preemption this tick halves
+    the window. A counter that goes down (a restart, perhaps of one engine among several whose
+    counters are summed, hiding another's preemptions) counts as a preemption: the KV rule
+    acts as it does without a counter."""
     ctrl = Auto(target_waiting=8, initial=64, step=STEP)
     ctrl.decide(healthy(64, preempts=500, **FULL), 64)
     assert ctrl.state.preempted == 0 and ctrl.last_reason != "cut:kv"
-    ctrl.decide(healthy(64, preempts=3, **FULL), 64)
-    assert ctrl.state.preempted == 0 and ctrl.last_reason != "cut:kv"
-    new = ctrl.decide(healthy(64, preempts=4, **FULL), 64)
+    ctrl.decide(healthy(64, preempts=501), 64)  # a preemption with room in the cache: no cut
+    assert ctrl.state.preempted == 1 and ctrl.last_reason != "cut:kv"
+    new = ctrl.decide(healthy(64, preempts=502, **FULL), 64)
+    assert (ctrl.state.preempted, ctrl.last_reason, new) == (1, "cut:kv", 32)
+
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    ctrl.decide(healthy(64, preempts=110, **FULL), 64)  # engines at 100 and 10
+    new = ctrl.decide(healthy(64, preempts=11, **FULL), 64)  # the first restarted, the second preempted
     assert (ctrl.state.preempted, ctrl.last_reason, new) == (1, "cut:kv", 32)
 
 

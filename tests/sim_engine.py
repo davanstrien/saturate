@@ -32,8 +32,8 @@ class Engine:
     as an engine without /metrics does. `noise` is the relative spread of each reading.
     `kv_cap` sets the KV gauge, running / kv_cap (None: a small model, the cache never near
     full). Past `preempt_past` running requests (kv_cap when None) the engine preempts, one
-    request a tick per eighth over, counted when `counts_preempts` (vLLM does; others do not). `hits` is
-    the prefix-cache hit rate (unique prompts: low)."""
+    request a tick per eighth over, counted when `counts_preempts` (vLLM and SGLang do; others
+    do not). `hits` is the prefix-cache hit rate (unique prompts: low)."""
 
     curve: list[tuple[int, float]]
     cap: int = 256

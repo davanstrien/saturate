@@ -110,7 +110,7 @@ flowchart TD
     CD{settling after a cut\nor revert?} -- yes --> HOLD[hold]
     CD -- no --> BP{backpressure share?\n429 / timeout / 5xx}
     BP -- yes --> CUT[halve, or step under\na known ceiling]
-    BP -- no --> KV{KV high AND\nhit rate low?}
+    BP -- no --> KV{KV high AND hit rate low\nAND a preemption, if counted?}
     KV -- yes --> CUT
     KV -- no --> ST{window full, nothing\ncompleting past patience?}
     ST -- yes --> CUT
@@ -129,7 +129,7 @@ flowchart TD
 |---|---|---|
 | `hold:cooldown` | after a cut or revert: at least max(2 ticks, the last latency) (3 ticks when unknown), longer while the oldest request in flight predates the change, capped at the stall patience | hold; the old window's completions are not evidence |
 | `cut:bp` | backpressure (429 / timeout / 5xx) on at least `bp_frac` of this tick's outcomes | halve and remember the window as a ceiling (growth stops ⅛ under it); at a ceiling met before, step under it instead. A ceiling is released after 300 s, because a provider's limit can rise; the first move past a released ceiling goes at most ⅛ past it |
-| `cut:kv` | KV ≥ 0.9 AND prefix-hit rate < 0.5 or absent AND, where the engine counts preemptions (vLLM; SGLang retractions), a preemption this tick | halve — a full cache without preemptions is a busy engine (a large model runs there); high KV with healthy hits is cache reuse |
+| `cut:kv` | KV ≥ 0.9 AND prefix-hit rate < 0.5 or absent AND, when this observation carries a preemption counter (vLLM; SGLang retractions), a preemption since the last reading (the first reading, or the first after a missing one, is a baseline; a counter that goes down counts as a preemption) | halve — a full cache without preemptions is a busy engine (a large model runs there); high KV with healthy hits is cache reuse |
 | `cut:stall` | window full and nothing completed for max(3 ticks, 3× latency); once per episode | halve — a wedged engine reads as an empty queue because nothing new is admitted |
 | `hold:input_bound` | the source, not the engine, starves admission | hold; starved ticks are not evidence |
 | `cut:queue` | queue above band (not before the first completion ever) | step down by the excess queue: at least `step`, at most half the window |

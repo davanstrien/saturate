@@ -391,13 +391,14 @@ def _observe(auto: Auto, state: State, obs: Obs, limit: int) -> State:
                     latency_s=obs.latency_s if obs.latency_s is not None else state.latency_s)
     # the engine's preemption counter, every tick (in a cooldown too, so the next window is not
     # charged with the last one's): preemptions since the previous reading. A missing reading
-    # starts over, so a later one is not charged with what happened in the gap; a counter
-    # that goes down (a restarted engine) counts none.
+    # starts over, so a later one is not charged with what happened in the gap. A counter that
+    # goes down (an engine, or one of several summed, restarted) may hide preemptions, so that
+    # tick counts as one: the KV rule then acts as it would without a counter.
     if obs.preempts is None:
         state = replace(state, preempts=None, preempted=0)
     else:
         since = obs.preempts - state.preempts if state.preempts is not None else 0
-        state = replace(state, preempts=obs.preempts, preempted=max(0, since))
+        state = replace(state, preempts=obs.preempts, preempted=since if since >= 0 else 1)
     if state.ceiling is not None and state.clock - state.ceiling.met >= BP_CEILING_RELEASE_S:
         state = replace(state, ceiling=None, seen_ceiling=state.ceiling)  # a provider's limit can rise
     if isinstance(state.phase, Trial):

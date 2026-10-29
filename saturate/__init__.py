@@ -18,11 +18,12 @@ import os
 import time
 from collections.abc import Callable, Iterable
 
-from saturate import _logs
-from saturate.controller import Auto, Fixed, Obs
+from saturate import _logs, settings
+from saturate.controller import MAX_COUNT, Auto, Fixed, Obs
 from saturate.core import AdaptiveClient, AdaptiveLimiter, Done
 from saturate.engine import Engine, wait_for_health
 from saturate.pipeline import through
+from saturate.settings import Setting
 from saturate.signals import CEILING_FLAG
 from saturate.sink import FileSink, ParquetSink, as_sink, read_output
 from saturate.source import (
@@ -72,6 +73,42 @@ def agent_mode() -> bool:
 def existing_ids(out_uri: str, retry_errors: bool = False) -> set[str]:
     """The resume anti-join set for an output directory (manifest-first, exact)."""
     return ParquetSink(out_uri, create=False).existing_ids(retry_errors=retry_errors)
+
+
+def _seconds(name: str, optional: bool = False) -> Setting:
+    """A duration: more than 0 and finite."""
+    return Setting(name, whole=False, low=0, low_open=True, high_open=True, optional=optional)
+
+
+PUMP_SETTINGS = (
+    Setting("flush_every", whole=True, low=1, high=MAX_COUNT, optional=True),
+    _seconds("read_timeout"),
+    _seconds("retry_budget_s", optional=True),
+    Setting("prepare_workers", whole=True, low=0, high=1024),  # threads
+    Setting("fail_fast", whole=True, low=0, high=MAX_COUNT),  # 0 disables the check
+)
+TIMEOUT_PHASES = tuple(_seconds(phase, optional=True) for phase in ("connect", "write", "pool"))
+SIGNAL_SOURCES = ("auto", "none")
+
+
+def check_pump_settings(flush_every, read_timeout, retry_budget_s, prepare_workers, fail_fast,
+                        timeouts, signal_source) -> None:
+    """Refuse a pump() setting that cannot work before the run starts, with the setting's name,
+    its range and the value given."""
+    settings.check("pump()", PUMP_SETTINGS, dict(
+        flush_every=flush_every, read_timeout=read_timeout, retry_budget_s=retry_budget_s,
+        prepare_workers=prepare_workers, fail_fast=fail_fast))
+    if timeouts is not None:
+        if not isinstance(timeouts, dict):
+            raise ValueError(f"pump() requires timeouts to be a dict or None, not {timeouts!r}")
+        unknown = sorted(set(timeouts) - {phase.name for phase in TIMEOUT_PHASES})
+        if unknown:
+            raise ValueError(f"pump() timeouts: unknown phase(s) {unknown}; the read timeout is "
+                             "read_timeout")
+        settings.check("pump() timeouts", TIMEOUT_PHASES,
+                       {phase.name: timeouts.get(phase.name) for phase in TIMEOUT_PHASES})
+    if signal_source not in SIGNAL_SOURCES:
+        raise ValueError(f"pump() requires signal_source in {SIGNAL_SOURCES}, not {signal_source!r}")
 
 
 class RowsLostError(RuntimeError):
@@ -190,7 +227,12 @@ def pump(
         bad token, a parse bug), before any of them is stored, so a fixed re-run retries
         them. 0 disables the check. Off when retry_errors=True: that input is mostly rows that
         already failed, and some rows fail for good.
+
+    A setting that cannot work (flush_every=0, read_timeout=-1, signal_source="metrics", ...)
+    raises ValueError before the run starts, naming the setting and the range it needs.
     """
+    check_pump_settings(flush_every, read_timeout, retry_budget_s, prepare_workers, fail_fast,
+                        timeouts, signal_source)
     shard = check_shard(shard)
     select_shard = shard[1] > 1
     if select_shard:

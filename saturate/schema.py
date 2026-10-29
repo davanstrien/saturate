@@ -110,8 +110,16 @@ def _is_bytes(arrow_type: pa.DataType) -> bool:
     return pa.types.is_binary(arrow_type) or pa.types.is_large_binary(arrow_type)
 
 
-SCALAR_KINDS = (pa.types.is_decimal, pa.types.is_timestamp, pa.types.is_date, pa.types.is_time,
-                pa.types.is_duration, pa.types.is_boolean, _is_text, _is_bytes)
+SCALAR_KINDS = (
+    pa.types.is_decimal,
+    pa.types.is_timestamp,
+    pa.types.is_date,
+    pa.types.is_time,
+    pa.types.is_duration,
+    pa.types.is_boolean,
+    _is_text,
+    _is_bytes,
+)
 
 
 def same_kind(value_type: pa.DataType, pinned_type: pa.DataType) -> bool:

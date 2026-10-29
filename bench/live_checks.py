@@ -46,14 +46,33 @@ def run(args) -> None:
         parse = lambda r, body: {"reply": str(len(body["data"][0]["embedding"]))}  # noqa: E731
         route = "/embeddings"
     else:
-        to_request = lambda r: {"model": args.model, "max_tokens": args.max_tokens,  # noqa: E731
-                                "messages": [{"role": "user", "content": r["text"]}]}
+        to_request = lambda r: {
+            "model": args.model,
+            "max_tokens": args.max_tokens,  # noqa: E731
+            "messages": [{"role": "user", "content": r["text"]}],
+        }
         parse = lambda r, body: {"reply": body["choices"][0]["message"]["content"]}  # noqa: E731
         route = "/chat/completions"
-    stats = pump(rows, to_request, parse, endpoint=args.endpoint, output=args.output, window=window,
-                 id_key="id", route=route)
-    print(json.dumps({"rows_processed": stats.rows_processed, "rows_failed": stats.rows_failed,
-                      "breaker_opens": stats.breaker_opens}), flush=True)
+    stats = pump(
+        rows,
+        to_request,
+        parse,
+        endpoint=args.endpoint,
+        output=args.output,
+        window=window,
+        id_key="id",
+        route=route,
+    )
+    print(
+        json.dumps(
+            {
+                "rows_processed": stats.rows_processed,
+                "rows_failed": stats.rows_failed,
+                "breaker_opens": stats.breaker_opens,
+            }
+        ),
+        flush=True,
+    )
 
 
 def written(output: str) -> dict:
@@ -70,9 +89,25 @@ def written(output: str) -> dict:
 
 
 def start_run(args, output: str, rows: int, window: str, max_tokens: int) -> subprocess.Popen:
-    cmd = [sys.executable, __file__, "run", "--endpoint", args.endpoint, "--model", args.model,
-           "--output", output, "--rows", str(rows), "--window", window, "--max-tokens", str(max_tokens),
-           "--kind", args.kind]
+    cmd = [
+        sys.executable,
+        __file__,
+        "run",
+        "--endpoint",
+        args.endpoint,
+        "--model",
+        args.model,
+        "--output",
+        output,
+        "--rows",
+        str(rows),
+        "--window",
+        window,
+        "--max-tokens",
+        str(max_tokens),
+        "--kind",
+        args.kind,
+    ]
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
 
 
@@ -95,8 +130,9 @@ def wait_healthy(endpoint: str, deadline_s: float = 900) -> None:
     raise SystemExit("engine did not come back")
 
 
-def report(check: str, rows: int, t0: float, result: dict, output: str,
-           failures: list[str] | None = None) -> None:
+def report(
+    check: str, rows: int, t0: float, result: dict, output: str, failures: list[str] | None = None
+) -> None:
     """One JSON line: the check passes when every row is written once, with no error rows, the
     run exits 0, and the check's own conditions (`failures`) are empty."""
     w = written(output)
@@ -105,8 +141,15 @@ def report(check: str, rows: int, t0: float, result: dict, output: str,
         failures.append(f"wrote {w['rows']} rows, {w['distinct_ids']} distinct, {w['error_rows']} errors")
     if result.get("exit") != 0:
         failures.append(f"run exited {result.get('exit')}")
-    record = {"check": check, "pass": not failures, "failures": failures, "rows_asked": rows,
-              "wall_s": round(time.time() - t0, 1), **w, **result}
+    record = {
+        "check": check,
+        "pass": not failures,
+        "failures": failures,
+        "rows_asked": rows,
+        "wall_s": round(time.time() - t0, 1),
+        **w,
+        **result,
+    }
     print(json.dumps(record), flush=True)
 
 
@@ -140,10 +183,14 @@ async def probe_engine(endpoint: str) -> dict:
         scrape.identify(found)
         gauges = await scrape.read()
     capacity = found.capacity
-    return {"probe_engine": found.engine, "metrics_on": found.metrics_on,
-            "capacity": None if capacity is None else capacity.requests,
-            "queues": None if capacity is None else capacity.queues,
-            "scrape_url": scrape.url, "dialect": None if gauges is None else gauges["dialect"]}
+    return {
+        "probe_engine": found.engine,
+        "metrics_on": found.metrics_on,
+        "capacity": None if capacity is None else capacity.requests,
+        "queues": None if capacity is None else capacity.queues,
+        "scrape_url": scrape.url,
+        "dialect": None if gauges is None else gauges["dialect"],
+    }
 
 
 def telemetry_ticks(output: str) -> list[dict]:
@@ -191,8 +238,17 @@ def signals_check(args, out: str, rows: int) -> None:
         failures.append(f"{ok} of {rows} rows ok, {failed} failed")
     if not loaded:
         failures.append("the run ended before the probe and scrape: they did not read a loaded engine")
-    record = {"check": "signals", "engine": args.engine, "pass": not failures, "failures": failures,
-              "wall_s": round(time.time() - t0, 1), "ticks": len(ticks), "seen": seen, **found, **result}
+    record = {
+        "check": "signals",
+        "engine": args.engine,
+        "pass": not failures,
+        "failures": failures,
+        "wall_s": round(time.time() - t0, 1),
+        "ticks": len(ticks),
+        "seen": seen,
+        **found,
+        **result,
+    }
     print(json.dumps(record), flush=True)
 
 
@@ -258,8 +314,9 @@ def stop_engine() -> None:
 
 def start_engine() -> None:
     log = open("/tmp/engine-restart.log", "w")
-    engine = subprocess.Popen(os.environ["ENGINE_START"], shell=True, stdout=log, stderr=log,
-                              start_new_session=True)
+    engine = subprocess.Popen(
+        os.environ["ENGINE_START"], shell=True, stdout=log, stderr=log, start_new_session=True
+    )
     with open(PGID_FILE, "w") as f:
         f.write(str(engine.pid))
 

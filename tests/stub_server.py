@@ -139,16 +139,20 @@ class StubServer:
                 started = self._request_started()
                 request_line, _, header_block = head.decode("latin-1").partition("\r\n")
                 method, path, _ = request_line.split(" ", 2)
-                headers = {k.strip().lower(): v.strip() for k, _, v in
-                           (line.partition(":") for line in header_block.split("\r\n") if line)}
+                headers = {
+                    k.strip().lower(): v.strip()
+                    for k, _, v in (line.partition(":") for line in header_block.split("\r\n") if line)
+                }
                 body = await reader.readexactly(int(headers.get("content-length", 0)))
                 if self.drop_for is not None and self.drop_for(json.loads(body or b"{}")):
                     return  # the connection closes with no answer, as when a server dies mid-request
-                status, ctype, payload = await self._respond(method, path.split("?", 1)[0], body,
-                                                             headers)
-                writer.write(f"HTTP/1.1 {status} {_REASON.get(status, 'OK')}\r\n"
-                             f"Content-Type: {ctype}\r\nContent-Length: {len(payload)}\r\n"
-                             "Connection: keep-alive\r\n\r\n".encode() + payload)
+                status, ctype, payload = await self._respond(method, path.split("?", 1)[0], body, headers)
+                writer.write(
+                    f"HTTP/1.1 {status} {_REASON.get(status, 'OK')}\r\n"
+                    f"Content-Type: {ctype}\r\nContent-Length: {len(payload)}\r\n"
+                    "Connection: keep-alive\r\n\r\n".encode()
+                    + payload
+                )
                 await writer.drain()
                 self._request_finished(started)
                 if headers.get("connection", "").lower() == "close":
@@ -176,16 +180,17 @@ class StubServer:
         if self.busy == 0:
             self.idle_since = now
 
-    async def _respond(self, method: str, path: str, body: bytes, headers: dict
-                       ) -> tuple[int, str, bytes]:
+    async def _respond(self, method: str, path: str, body: bytes, headers: dict) -> tuple[int, str, bytes]:
         if method == "GET" and path == "/health":
             return 200, "text/plain", b"ok"
         if method == "GET" and path in self.json_routes:
             return 200, "application/json", json.dumps(self.json_routes[path]).encode()
         if method == "GET" and path == "/metrics":
-            text = (f'vllm:num_requests_waiting{{model="stub"}} 0\n'
-                    f'vllm:num_requests_running{{model="stub"}} {self.inflight}\n'
-                    f'vllm:kv_cache_usage_perc{{model="stub"}} 0.1\n')
+            text = (
+                f'vllm:num_requests_waiting{{model="stub"}} 0\n'
+                f'vllm:num_requests_running{{model="stub"}} {self.inflight}\n'
+                f'vllm:kv_cache_usage_perc{{model="stub"}} 0.1\n'
+            )
             return 200, "text/plain", text.encode()
         if method != "POST":
             return 404, "text/plain", b"not found"
@@ -214,32 +219,53 @@ class StubServer:
             texts = [texts] if isinstance(texts, str) else texts
             usage = {"prompt_tokens": sum(len(t) for t in texts), "completion_tokens": 0}
             self.prompt_tokens += usage["prompt_tokens"]
-            resp = {"object": "list", "model": request.get("model", "stub"),
-                    "data": [{"object": "embedding", "index": i, "embedding": [float(len(t)), 0.0]}
-                             for i, t in enumerate(texts)],
-                    "usage": {**usage, "total_tokens": usage["prompt_tokens"]}}
+            resp = {
+                "object": "list",
+                "model": request.get("model", "stub"),
+                "data": [
+                    {"object": "embedding", "index": i, "embedding": [float(len(t)), 0.0]}
+                    for i, t in enumerate(texts)
+                ],
+                "usage": {**usage, "total_tokens": usage["prompt_tokens"]},
+            }
             return status, "application/json", json.dumps(resp).encode()
         content = str((request.get("messages") or [{}])[-1].get("content", ""))
         reply = f"echo: {content}"
         usage = {"prompt_tokens": len(content), "completion_tokens": len(reply)}
         self.prompt_tokens += usage["prompt_tokens"]
         self.completion_tokens += usage["completion_tokens"]
-        resp = {"id": "stub-cmpl", "object": "chat.completion", "model": request.get("model", "stub"),
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": reply},
-                             "finish_reason": "stop"}],
-                "usage": {**usage, "total_tokens": sum(usage.values())}}
+        resp = {
+            "id": "stub-cmpl",
+            "object": "chat.completion",
+            "model": request.get("model", "stub"),
+            "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": reply}, "finish_reason": "stop"}
+            ],
+            "usage": {**usage, "total_tokens": sum(usage.values())},
+        }
         return status, "application/json", json.dumps(resp).encode()
 
 
-_REASON = {200: "OK", 201: "Created", 202: "Accepted", 400: "Bad Request", 404: "Not Found",
-           429: "Too Many Requests", 500: "Internal Server Error", 503: "Service Unavailable"}
+_REASON = {
+    200: "OK",
+    201: "Created",
+    202: "Accepted",
+    400: "Bad Request",
+    404: "Not Found",
+    429: "Too Many Requests",
+    500: "Internal Server Error",
+    503: "Service Unavailable",
+}
 
 
 if __name__ == "__main__":
     latency = float(sys.argv[1]) / 1000 if len(sys.argv) > 1 else 0.0
     with StubServer(latency_s=latency) as srv:
-        print(f"stub endpoint: {srv.endpoint}  (latency {latency * 1000:.0f} ms) — Ctrl-C to stop",
-              file=sys.stderr, flush=True)
+        print(
+            f"stub endpoint: {srv.endpoint}  (latency {latency * 1000:.0f} ms) — Ctrl-C to stop",
+            file=sys.stderr,
+            flush=True,
+        )
         try:
             threading.Event().wait()
         except KeyboardInterrupt:

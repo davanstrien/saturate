@@ -41,26 +41,38 @@ def main() -> None:
 
     from huggingface_hub import HfApi
 
-    HfApi().create_repo("davanstrien/pumpjack-tier1-fanout", repo_type="dataset",
-                        private=True, exist_ok=True)
+    HfApi().create_repo("davanstrien/pumpjack-tier1-fanout", repo_type="dataset", private=True, exist_ok=True)
 
     def to_request(row: dict) -> dict:
-        return {"model": MODEL, "messages": [{"role": "user", "content": row["text"]}],
-                "max_tokens": 150, "temperature": 0.7}
+        return {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": row["text"]}],
+            "max_tokens": 150,
+            "temperature": 0.7,
+        }
 
     def parse(row: dict, body: dict) -> dict:
         usage = body.get("usage") or {}
-        return {"out": body["choices"][0]["message"]["content"],
-                "prompt_tokens": usage.get("prompt_tokens"),
-                "completion_tokens": usage.get("completion_tokens")}
+        return {
+            "out": body["choices"][0]["message"]["content"],
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+        }
 
     rows = shard_select(global_rows(), rank=args.rank, world=args.world)
-    with Engine(MODEL, engine="vllm",
-                extra_args=["--gpu-memory-utilization", "0.90",
-                            "--no-enable-prefix-caching"]) as endpoint:
-        stats = pump(rows, to_request, parse, endpoint, OUTPUT,
-                     window=Auto(target_waiting=8, initial=8),
-                     shard=(args.rank, args.world), flush_every=50)
+    with Engine(
+        MODEL, engine="vllm", extra_args=["--gpu-memory-utilization", "0.90", "--no-enable-prefix-caching"]
+    ) as endpoint:
+        stats = pump(
+            rows,
+            to_request,
+            parse,
+            endpoint,
+            OUTPUT,
+            window=Auto(target_waiting=8, initial=8),
+            shard=(args.rank, args.world),
+            flush_every=50,
+        )
     print(f"TIER1_FANOUT rank={args.rank} " + stats.to_json(), flush=True)
 
 

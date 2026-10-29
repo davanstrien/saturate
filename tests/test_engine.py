@@ -34,9 +34,14 @@ def test_accept_validator_gates_readiness(monkeypatch):
     monkeypatch.setattr(engmod, "_get", lambda *a, **k: R(200))
     monkeypatch.setattr(engmod, "_post", lambda *a, **k: R(404))
     with pytest.raises(TimeoutError):  # strict: 404 on the workload route is NOT ready
-        wait_for_health("http://x/v1", timeout_s=1, poll_interval=0.05,
-                        route="/embeddings", payload={"input": "hi"},
-                        accept=lambda r: r.status_code == 200)
+        wait_for_health(
+            "http://x/v1",
+            timeout_s=1,
+            poll_interval=0.05,
+            route="/embeddings",
+            payload={"input": "hi"},
+            accept=lambda r: r.status_code == 200,
+        )
     # default readiness: a live server answering 404 counts as alive
     wait_for_health("http://x/v1", timeout_s=5, poll_interval=0.05)
 
@@ -44,8 +49,7 @@ def test_accept_validator_gates_readiness(monkeypatch):
 def test_group_members_killed_when_leader_exits():
     """The leader exits immediately, leaving a SIGTERM-ignoring child in the
     group — teardown must sweep the group, not just wait on the leader."""
-    eng = Engine(model="x", cmd=["sh", "-c", "(trap '' TERM; sleep 60) & exit 0"],
-                 boot_timeout=5, port=59998)
+    eng = Engine(model="x", cmd=["sh", "-c", "(trap '' TERM; sleep 60) & exit 0"], boot_timeout=5, port=59998)
     with pytest.raises(RuntimeError, match="died during boot"):
         eng.__enter__()
     assert eng.proc is not None

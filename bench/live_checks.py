@@ -5,7 +5,8 @@
 
     ENGINE_START="..." python bench/live_checks.py --endpoint ... --model M --engine sglang
 
-Runs five checks and prints one JSON line per check.
+Runs five checks and prints one JSON line per check. The complete check measures the engine's
+rows/s; the later runs are sized from it, so an interrupt lands mid-run on a fast engine too.
 The engine runs in its own process group, whose id is in ENGINE_PGID_FILE; the restart check
 stops that group and starts ENGINE_START in a new one (an engine's worker processes go with it).
 
@@ -94,11 +95,24 @@ def wait_healthy(endpoint: str, deadline_s: float = 900) -> None:
     raise SystemExit("engine did not come back")
 
 
-def report(check: str, rows: int, t0: float, result: dict, output: str) -> None:
+def report(check: str, rows: int, t0: float, result: dict, output: str,
+           failures: list[str] | None = None) -> None:
+    """One JSON line: the check passes when every row is written once, with no error rows, the
+    run exits 0, and the check's own conditions (`failures`) are empty."""
     w = written(output)
-    ok = w["rows"] == rows and w["distinct_ids"] == rows and w["error_rows"] == 0 and result.get("exit") == 0
-    record = {"check": check, "pass": ok, "wall_s": round(time.time() - t0, 1), **w, **result}
+    failures = list(failures or [])
+    if not (w["rows"] == rows and w["distinct_ids"] == rows and w["error_rows"] == 0):
+        failures.append(f"wrote {w['rows']} rows, {w['distinct_ids']} distinct, {w['error_rows']} errors")
+    if result.get("exit") != 0:
+        failures.append(f"run exited {result.get('exit')}")
+    record = {"check": check, "pass": not failures, "failures": failures, "rows_asked": rows,
+              "wall_s": round(time.time() - t0, 1), **w, **result}
     print(json.dumps(record), flush=True)
+
+
+def rows_for(rows_per_s: float, seconds: float, minimum: int) -> int:
+    """Enough rows to keep this engine busy for `seconds`: an interrupt must land mid-run."""
+    return max(minimum, int(rows_per_s * seconds))
 
 
 # What each engine must say about itself, as bench/jobs_live.sh starts it. probe: the engine the
@@ -146,10 +160,10 @@ def capacity_matches(reported: int | None, expected: int | bool | None) -> bool:
     return reported == expected
 
 
-def signals_check(args, out: str) -> None:
+def signals_check(args, out: str, rows: int) -> None:
     """The probe, one scrape, and the gauges in a loaded run's telemetry, against EXPECT."""
     t0 = time.time()
-    proc = start_run(args, out, 3000, "auto", args.max_tokens)
+    proc = start_run(args, out, rows, "auto", args.max_tokens)
     time.sleep(10)  # the engine is busy: the scrape reads gauges under load
     found = asyncio.run(probe_engine(args.endpoint))
     result = finish(proc)
@@ -176,33 +190,38 @@ def checks(args) -> None:
     def fresh() -> str:
         return tempfile.mkdtemp(prefix="live-")
 
-    if args.engine:
-        signals_check(args, fresh())
-
     out, t0 = fresh(), time.time()
     report("complete", 2000, t0, finish(start_run(args, out, 2000, "auto", 64)), out)
+    rows_per_s = 2000 / max(time.time() - t0, 1.0)  # sizes the runs below to this engine
+
+    if args.engine:
+        signals_check(args, fresh(), rows_for(rows_per_s, 30, 3000))
 
     out, t0 = fresh(), time.time()
     report("high-window", 8000, t0, finish(start_run(args, out, 8000, "2048", 16)), out)
 
+    rows = rows_for(rows_per_s, 4 * args.interrupt_after_s, 4000)
     out, t0 = fresh(), time.time()
-    first = start_run(args, out, 4000, "auto", 64)
+    first = start_run(args, out, rows, "auto", 64)
     time.sleep(args.interrupt_after_s)
     first.send_signal(signal.SIGINT)
     interrupted = finish(first)
     partial = written(out)["rows"]
-    result = finish(start_run(args, out, 4000, "auto", 64))
+    result = finish(start_run(args, out, rows, "auto", 64))
     extra = {"first_exit": interrupted["exit"], "rows_before_resume": partial}
-    report("resume", 4000, t0, {**result, **extra}, out)
+    missed = [] if interrupted["exit"] != 0 else ["the interrupt came after the first run ended"]
+    report("resume", rows, t0, {**result, **extra}, out, missed)
 
     out, t0 = fresh(), time.time()
-    proc = start_run(args, out, 4000, "auto", 64)
+    proc = start_run(args, out, rows, "auto", 64)
     time.sleep(args.interrupt_after_s)
     stop_engine()
     time.sleep(10)
     start_engine()
     wait_healthy(args.endpoint)
-    report("engine-restart", 4000, t0, finish(proc), out)
+    result = finish(proc)
+    missed = [] if result.get("breaker_opens") else ["the breaker never opened: the restart missed the run"]
+    report("engine-restart", rows, t0, result, out, missed)
 
 
 PGID_FILE = os.environ.get("ENGINE_PGID_FILE", "/tmp/engine.pgid")

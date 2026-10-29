@@ -278,6 +278,12 @@ no `shard` and give each Job its own output.
 Each shard adapts to its own node independently and writes `__saturate/completions/shard-{rank}.done`
 when finished (datatrove's marker convention — a coordinator can watch the directory).
 
+When all shards send to one endpoint, each shard's `Auto` sees that endpoint's limits: a hosted
+API's 429s, or a self-hosted engine's queue gauges from /metrics. If the engine shows neither
+(blind mode), the shards cannot see each other's load, and each one grows its window to
+`max_limit`. Set `window=Auto(max_limit=...)` to about the engine's request cap divided by the
+number of shards.
+
 A check for any fan-out: the rows written across all shards must not be more than the
 unique rows in the input. If they are, shards overlap.
 

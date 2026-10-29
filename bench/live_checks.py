@@ -3,10 +3,14 @@
     ENGINE_START="vllm serve M --port 8000" python bench/live_checks.py \\
         --endpoint http://127.0.0.1:8000/v1 --model M
 
-Runs four checks and prints one JSON line per check.
+    ENGINE_START="..." python bench/live_checks.py --endpoint ... --model M --engine sglang
+
+Runs five checks and prints one JSON line per check.
 The engine runs in its own process group, whose id is in ENGINE_PGID_FILE; the restart check
 stops that group and starts ENGINE_START in a new one (an engine's worker processes go with it).
 
+- signals (with --engine): the probe names the engine and reads its capacity where it reports
+  one, and the run's telemetry carries the engine's gauges (EXPECT says which).
 - complete: a normal run writes every row once, with no error rows.
 - high-window: 2048 requests in flight with short outputs; counts error rows.
 - resume: a run interrupted (SIGINT) part-way, then run again on the same output, ends with
@@ -18,6 +22,7 @@ stops that group and starts ENGINE_START in a new one (an engine's worker proces
 from __future__ import annotations
 
 import argparse
+import asyncio
 import glob
 import json
 import os
@@ -35,10 +40,17 @@ def run(args) -> None:
 
     rows = [{"id": str(i), "text": f"Write one sentence about the number {i}."} for i in range(args.rows)]
     window = Auto() if args.window == "auto" else Fixed(int(args.window))
-    stats = pump(rows, lambda r: {"model": args.model, "max_tokens": args.max_tokens,
-                                  "messages": [{"role": "user", "content": r["text"]}]},
-                 lambda r, body: {"reply": body["choices"][0]["message"]["content"]},
-                 endpoint=args.endpoint, output=args.output, window=window, id_key="id")
+    if args.kind == "embeddings":
+        to_request = lambda r: {"model": args.model, "input": r["text"]}  # noqa: E731
+        parse = lambda r, body: {"reply": str(len(body["data"][0]["embedding"]))}  # noqa: E731
+        route = "/embeddings"
+    else:
+        to_request = lambda r: {"model": args.model, "max_tokens": args.max_tokens,  # noqa: E731
+                                "messages": [{"role": "user", "content": r["text"]}]}
+        parse = lambda r, body: {"reply": body["choices"][0]["message"]["content"]}  # noqa: E731
+        route = "/chat/completions"
+    stats = pump(rows, to_request, parse, endpoint=args.endpoint, output=args.output, window=window,
+                 id_key="id", route=route)
     print(json.dumps({"rows_processed": stats.rows_processed, "rows_failed": stats.rows_failed,
                       "breaker_opens": stats.breaker_opens}), flush=True)
 
@@ -58,7 +70,8 @@ def written(output: str) -> dict:
 
 def start_run(args, output: str, rows: int, window: str, max_tokens: int) -> subprocess.Popen:
     cmd = [sys.executable, __file__, "run", "--endpoint", args.endpoint, "--model", args.model,
-           "--output", output, "--rows", str(rows), "--window", window, "--max-tokens", str(max_tokens)]
+           "--output", output, "--rows", str(rows), "--window", window, "--max-tokens", str(max_tokens),
+           "--kind", args.kind]
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
 
 
@@ -88,9 +101,83 @@ def report(check: str, rows: int, t0: float, result: dict, output: str) -> None:
     print(json.dumps(record), flush=True)
 
 
+# What each engine must say about itself, as bench/jobs_live.sh starts it. probe: the engine the
+# probe names (vLLM has no probe endpoint: None). capacity: the requests it runs at once, as
+# reported (True: any number). gauges: the telemetry fields a tick must carry at least once.
+EXPECT = {
+    "vllm": {"probe": None, "capacity": None, "gauges": ("waiting", "running", "kv", "hits")},
+    "sglang": {"probe": "sglang", "capacity": True, "gauges": ("waiting", "running", "kv")},
+    "llamacpp": {"probe": "llamacpp", "capacity": 8, "gauges": ("waiting", "running")},
+    "tei": {"probe": "tei", "capacity": True, "gauges": ("waiting",)},
+}
+
+
+async def probe_engine(endpoint: str) -> dict:
+    """What the probe and one scrape read, as the pump reads them before its first request."""
+    from saturate.http import HttpClient
+    from saturate.signals import HttpScrape, probe
+
+    async with HttpClient() as client:
+        found = await probe(client, endpoint)
+        scrape = HttpScrape(client, endpoint)
+        scrape.identify(found)
+        gauges = await scrape.read()
+    capacity = found.capacity
+    return {"probe_engine": found.engine, "metrics_on": found.metrics_on,
+            "capacity": None if capacity is None else capacity.requests,
+            "queues": None if capacity is None else capacity.queues,
+            "scrape_url": scrape.url, "dialect": None if gauges is None else gauges["dialect"]}
+
+
+def telemetry_ticks(output: str) -> list[dict]:
+    ticks = []
+    for path in glob.glob(f"{output}/**/telemetry-shard*.jsonl", recursive=True):
+        with open(path) as f:
+            ticks += [json.loads(line) for line in f if line.strip()]
+    return ticks
+
+
+def capacity_matches(reported: int | None, expected: int | bool | None) -> bool:
+    """None: the engine reports no capacity. True: it reports one, any number. A number: exactly it."""
+    if expected is None:
+        return reported is None
+    if expected is True:
+        return reported is not None
+    return reported == expected
+
+
+def signals_check(args, out: str) -> None:
+    """The probe, one scrape, and the gauges in a loaded run's telemetry, against EXPECT."""
+    t0 = time.time()
+    proc = start_run(args, out, 3000, "auto", args.max_tokens)
+    time.sleep(10)  # the engine is busy: the scrape reads gauges under load
+    found = asyncio.run(probe_engine(args.endpoint))
+    result = finish(proc)
+    ticks = telemetry_ticks(out)
+    fields = ("waiting", "running", "kv", "hits")
+    seen = {field: any(t.get(field) is not None for t in ticks) for field in fields}
+    expect = EXPECT[args.engine]
+    failures = []
+    if found["probe_engine"] != expect["probe"]:
+        failures.append(f"probe named {found['probe_engine']}, expected {expect['probe']}")
+    if not capacity_matches(found["capacity"], expect["capacity"]):
+        failures.append(f"capacity {found['capacity']}, expected {expect['capacity']}")
+    if found["dialect"] != args.engine:
+        failures.append(f"scrape dialect {found['dialect']}, expected {args.engine}")
+    failures += [f"no tick carried {field}" for field in expect["gauges"] if not seen[field]]
+    if result.get("exit") != 0:
+        failures.append(f"run exited {result.get('exit')}")
+    record = {"check": "signals", "engine": args.engine, "pass": not failures, "failures": failures,
+              "wall_s": round(time.time() - t0, 1), "ticks": len(ticks), "seen": seen, **found, **result}
+    print(json.dumps(record), flush=True)
+
+
 def checks(args) -> None:
     def fresh() -> str:
         return tempfile.mkdtemp(prefix="live-")
+
+    if args.engine:
+        signals_check(args, fresh())
 
     out, t0 = fresh(), time.time()
     report("complete", 2000, t0, finish(start_run(args, out, 2000, "auto", 64)), out)
@@ -152,6 +239,8 @@ def main() -> None:
     ap.add_argument("--rows", type=int, default=2000)
     ap.add_argument("--window", default="auto")
     ap.add_argument("--max-tokens", type=int, default=64)
+    ap.add_argument("--kind", choices=["chat", "embeddings"], default="chat")
+    ap.add_argument("--engine", choices=sorted(EXPECT), help="run the signals check against EXPECT")
     args = ap.parse_args()
     run(args) if args.mode == "run" else checks(args)
 

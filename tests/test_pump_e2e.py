@@ -130,19 +130,19 @@ def test_error_rows_and_heal(stub, tmp_path):
     assert all(out[i]["text"].startswith("echo: poison") for i in poisoned)
 
 
-def test_agent_mode_stdout_is_one_json_line(stub, tmp_path, monkeypatch, capsys):
+def test_agent_mode_stdout_is_one_json_line(stub, tmp_path, monkeypatch, capsys, caplog):
     for var in ("CLAUDECODE", "CODEX_SANDBOX"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("AI_AGENT", "1")
     stats = pump(rows(5), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path), window=Fixed(2))
 
-    out, err = capsys.readouterr()
+    out, _ = capsys.readouterr()
     assert out.endswith("\n") and out.count("\n") == 1
     line = json.loads(out)
     assert STATS_KEYS <= line.keys()
     assert line["rows_processed"] == stats.rows_processed == 5
-    assert "[pump] done:" in err
-    assert "re-run the same command to resume" in err
+    assert "done:" in caplog.text
+    assert "re-run the same command to resume" in caplog.text
 
 
 def test_breaker_aborts_run_when_server_dies(stub, tmp_path, monkeypatch):
@@ -427,13 +427,13 @@ def test_retries_are_counted_per_attempt_in_stats_and_telemetry(stub, tmp_path, 
     assert stats.retries == 20  # 10 rows x 2 re-sends
 
 
-def test_duplicate_rows_are_named_in_the_log(stub, tmp_path, capsys):
+def test_duplicate_rows_are_named_in_the_log(stub, tmp_path, caplog):
     """Identical rows share the default content-hash id, so a synth run repeating a prompt N
     times got one sample; the count was only in the JSON stats."""
     stats = pump([{"text": "same"}] * 5, to_request, parse, endpoint=stub.endpoint,
                  output=str(tmp_path), window=Fixed(2))
     assert (stats.rows_processed, stats.rows_deduped) == (1, 4)
-    assert "dedup: 4 rows had the id of an earlier row" in capsys.readouterr().err
+    assert "dedup: 4 rows had the id of an earlier row" in caplog.text
 
 
 # --- fan-out: shard= selects input (CONTRACT §2) ---------------------------------------------

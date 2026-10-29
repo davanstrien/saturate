@@ -355,7 +355,7 @@ def test_dynamic_value_rewrite_is_error_row_at_flush(tmp_path):
     assert sink.existing_ids() == {"a", "b"} and sink.existing_ids(retry_errors=True) == {"a"}
 
 
-def test_mixed_types_in_first_buffer_cost_one_row(tmp_path, capsys):
+def test_mixed_types_in_first_buffer_cost_one_row(tmp_path, caplog):
     """Before any type is pinned, probe cannot see the buffer: {score: 1} then {score: "a"}
     in ONE buffer used to fail batch inference at flush and lose every buffered row. flush
     now falls back to a per-row pass: the first typed value pins, the conflicting row is
@@ -384,7 +384,7 @@ def test_mixed_types_in_first_buffer_cost_one_row(tmp_path, capsys):
         direct.append(rec)
     direct.flush()
     assert direct.rows_demoted == 1 and direct.existing_ids(retry_errors=True) == {"i", "j"}
-    assert "1 of 3 rows do not fit the pinned schema" in capsys.readouterr().err
+    assert "1 of 3 rows do not fit the pinned schema" in caplog.text
 
 
 def test_mixed_types_in_new_column_after_pin_cost_one_row(tmp_path):
@@ -472,7 +472,7 @@ def test_pinned_schema_is_read_back_on_resume(tmp_path):
     assert ds.dataset(parts, format="parquet").to_table().num_rows == 3  # readable as one dataset
 
 
-def test_unreadable_newest_part_falls_back_to_an_older_pin(tmp_path, capsys):
+def test_unreadable_newest_part_falls_back_to_an_older_pin(tmp_path, caplog):
     """A crash-truncated newest part must not defeat the seed: the pin comes from the newest
     part whose footer reads. Only when no part is readable does the sink start unpinned."""
     import asyncio
@@ -486,12 +486,12 @@ def test_unreadable_newest_part_falls_back_to_an_older_pin(tmp_path, capsys):
     sink = ParquetSink(str(tmp_path), flush_every=1)
     stats = asyncio.run(drain(iter_async([Done("f", {}, {"score": 0.5}, None, {})]), sink))
     assert stats.rows_failed == 1  # the older part's int64 pin held: a float is a conflict
-    assert "trying an older part" in capsys.readouterr().err
+    assert "trying an older part" in caplog.text
     only_bad = tmp_path / "only-bad"
     only_bad.mkdir()
     (only_bad / "part-1-000000-deadbeef.parquet").write_bytes(b"not parquet")
     ParquetSink(str(only_bad), flush_every=1).append({"id": "a", "score": 1, "error": None})
-    assert "starting unpinned" in capsys.readouterr().err
+    assert "starting unpinned" in caplog.text
 
 
 def test_empty_lists_never_pin(tmp_path):
@@ -836,7 +836,7 @@ def test_existing_ids_concurrent_reads_match_sequential(tmp_path):
         assert s.existing_ids(retry_errors=True) == ids - errored
 
 
-def test_existing_ids_warns_on_many_manifest_files(tmp_path, capsys):
+def test_existing_ids_warns_on_many_manifest_files(tmp_path, caplog):
     """Past ~1000 sidecars, resume cost on a remote store is the per-file round-trip;
     say so once and point at the knob (flush_every)."""
     from saturate import ParquetSink
@@ -847,7 +847,7 @@ def test_existing_ids_warns_on_many_manifest_files(tmp_path, capsys):
     for i in range(1001):
         pq.write_table(table, mdir / f"ids-part-{i:05d}.parquet")
     assert ParquetSink(str(tmp_path)).existing_ids() == {"x"}
-    err = capsys.readouterr().err
+    err = caplog.text
     assert "resume: reading 1001 manifest files" in err and "flush_every" in err
 
 

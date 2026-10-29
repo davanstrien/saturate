@@ -77,7 +77,7 @@ class _FlakyClient:
         return type("R", (), {"text": VLLM_METRICS})()
 
 
-def test_scrape_retries_periodically_after_going_blind(capsys):
+def test_scrape_retries_periodically_after_going_blind(caplog):
     """Five failures put the scrape in blind mode; it then skips requests for
     retry_every-1 reads and probes again, recovering when /metrics comes up."""
     import asyncio
@@ -100,6 +100,6 @@ def test_scrape_retries_periodically_after_going_blind(capsys):
     gauges, calls = results[34]
     assert calls == 6 and gauges["dialect"] == "vllm"  # read 35 probes and recovers
     assert scrape.dialect == "vllm"
-    err = capsys.readouterr().err
+    err = caplog.text
     assert "running blind" in err and "http://x/metrics" in err
     assert "metrics scrape recovered (vllm)" in err

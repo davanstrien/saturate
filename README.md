@@ -357,6 +357,20 @@ and everything human goes to stderr, including the run-end advisor ("server ceil
 pinned at N — relaunch with --max-num-seqs 2N") and the standing hint that re-running the
 same command is always safe.
 
+## Logging
+
+saturate logs through the standard `logging` module, under the `saturate` logger: progress
+(resume, dedup, `done:`) at INFO, degraded states (circuit open, a failed write that was
+retried) at WARNING. If your program has not configured logging, `pump()` prints INFO and
+above to stderr as `[pump] …` lines. Once you configure logging, your configuration decides:
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO)  # saturate's lines go through your handlers
+logging.getLogger("saturate").setLevel(logging.WARNING)  # or: only problems
+```
+
 ## The output contract
 
 Everything on disk is specified in [CONTRACT.md](CONTRACT.md): append-only parts, the

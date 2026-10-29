@@ -21,11 +21,13 @@ returns a partial dict and the controller runs on the one real signal.
 from __future__ import annotations
 
 import dataclasses
+import logging
 import re
-import sys
 from collections.abc import Callable
 
 from saturate.http import HttpClient, Timeouts, TransportError
+
+log = logging.getLogger(__name__)
 
 _PAT = re.compile(
     r"^(?:"
@@ -94,9 +96,6 @@ class Null:
         return None
 
 
-def _log(msg: str) -> None:
-    print(f"[pump] {msg}", file=sys.stderr, flush=True)
-
 
 SCRAPE_TIMEOUTS = Timeouts(read=5.0, connect=5.0, pool=5.0)
 
@@ -124,7 +123,8 @@ class HttpScrape:
             if not self._blind:
                 self._blind = True
                 self._skipped = 0
-                _log(f"metrics scrape unavailable at {self.url} — running blind; will retry periodically")
+                log.warning(f"metrics scrape unavailable at {self.url} — running blind; "
+                            "will retry periodically")
             self._skipped += 1
             if self._skipped < self.retry_every:
                 return None
@@ -143,7 +143,7 @@ class HttpScrape:
             self.dialect = gauges["dialect"]
         if self._blind:
             self._blind = False
-            _log(f"metrics scrape recovered ({self.dialect})")
+            log.info(f"metrics scrape recovered ({self.dialect})")
         return gauges
 
 

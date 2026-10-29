@@ -164,11 +164,13 @@ def rows_for(rows_per_s: float, seconds: float, minimum: int) -> int:
 
 
 # What each engine must say about itself, as bench/jobs_live.sh starts it. probe: the engine the
-# probe names (vLLM has no probe endpoint: None). capacity: the requests it runs at once, as
-# reported (True: any number). gauges: the telemetry fields a tick must carry at least once.
+# probe names. saturate has no vLLM probe source, so vLLM must name None: a new source changes
+# this table too. capacity: the requests it runs at once, as reported (True: any number; the
+# numbers are the --max-running-requests and --parallel flags in jobs_live.sh). gauges: the
+# telemetry fields a tick must carry at least once.
 EXPECT = {
     "vllm": {"probe": None, "capacity": None, "gauges": ("waiting", "running", "kv", "hits")},
-    "sglang": {"probe": "sglang", "capacity": True, "gauges": ("waiting", "running", "kv")},
+    "sglang": {"probe": "sglang", "capacity": 256, "gauges": ("waiting", "running", "kv")},
     "llamacpp": {"probe": "llamacpp", "capacity": 8, "gauges": ("waiting", "running")},
     "tei": {"probe": "tei", "capacity": True, "gauges": ("waiting",)},
 }
@@ -215,7 +217,7 @@ def capacity_matches(reported: int | None, expected: int | bool | None) -> bool:
 def signals_check(args, out: str, rows: int) -> None:
     """The probe, one scrape, and the gauges in a loaded run's telemetry, against EXPECT."""
     t0 = time.time()
-    proc = start_run(args, out, rows, "auto", args.max_tokens)
+    proc = start_run(args, out, rows, "auto", 64)
     time.sleep(5)  # past startup and the first tick: the scrape reads gauges under load
     loaded = proc.poll() is None
     found = asyncio.run(probe_engine(args.endpoint))
@@ -224,6 +226,10 @@ def signals_check(args, out: str, rows: int) -> None:
     ticks = telemetry_ticks(out)
     fields = ("waiting", "running", "kv", "hits")
     seen = {field: any(t.get(field) is not None for t in ticks) for field in fields}
+    peak = {}
+    for field in ("waiting", "running"):
+        values = [t[field] for t in ticks if t.get(field) is not None]
+        peak[field] = max(values, default=None)
     expect = EXPECT[args.engine]
     failures = []
     if found["probe_engine"] != expect["probe"]:
@@ -232,7 +238,11 @@ def signals_check(args, out: str, rows: int) -> None:
         failures.append(f"capacity {found['capacity']}, expected {expect['capacity']}")
     if found["dialect"] != args.engine:
         failures.append(f"scrape dialect {found['dialect']}, expected {args.engine}")
-    failures += [f"no tick carried {field}" for field in expect["gauges"] if not seen[field]]
+    for field in expect["gauges"]:
+        if not seen[field]:
+            failures.append(f"no tick carried {field}")
+    if not any(value for value in peak.values()):
+        failures.append(f"no tick saw load (peak waiting and running: {peak})")
     if result.get("exit") != 0:
         failures.append(f"run exited {result.get('exit')}")
     ok, failed = result.get("rows_processed"), result.get("rows_failed")
@@ -248,6 +258,7 @@ def signals_check(args, out: str, rows: int) -> None:
         "wall_s": round(time.time() - t0, 1),
         "ticks": len(ticks),
         "seen": seen,
+        "peak": peak,
         **found,
         **result,
     }
@@ -299,6 +310,7 @@ def checks(args) -> None:
 
 
 PGID_FILE = os.environ.get("ENGINE_PGID_FILE", "/tmp/engine.pgid")
+RESTART_LOG = os.path.join(os.path.dirname(PGID_FILE), "engine-restart.log")
 
 
 def stop_engine() -> None:
@@ -315,7 +327,7 @@ def stop_engine() -> None:
 
 
 def start_engine() -> None:
-    log = open("/tmp/engine-restart.log", "w")
+    log = open(RESTART_LOG, "w")
     engine = subprocess.Popen(
         os.environ["ENGINE_START"], shell=True, stdout=log, stderr=log, start_new_session=True
     )

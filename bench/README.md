@@ -107,6 +107,8 @@ httpx2's pool did work for every connection on each request, which also blocked 
 (up to 0.87 s per tick on SGLang). SGLang ran with `--max-running-requests 256`: at its default,
 the repetition-penalty buffers ran a 24 GB GPU out of memory.
 
-`live_checks.py` runs four checks against a real engine: a complete run, 2048 requests in flight,
-an interrupted run resumed, and the engine restarted mid-run. Each passes only if every row is
-written once with no error rows (`results/live-checks-*`: all pass on both engines, both clients).
+`live_checks.py` runs four row-count checks against a real engine: a complete run, 2048 requests
+in flight, an interrupted run resumed, and the engine restarted mid-run. Each passes only if every
+row is written once with no error rows (`results/live-checks-*`: all pass on both engines, both
+clients). With `--engine`, a fifth check (signals) compares the probe, the capacity and the
+telemetry gauges of a loaded run with what that engine must report (`EXPECT`).

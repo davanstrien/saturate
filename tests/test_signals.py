@@ -373,3 +373,30 @@ def test_a_healthy_vllm_prefix_cache_lets_a_full_kv_cache_with_a_preemption_stan
     assert not kv_full(auto, state, Obs(kv=0.97, hits=0.9, preempts=4), 64)
     assert kv_full(auto, state, Obs(kv=0.97, hits=0.2, preempts=4), 64)
     assert kv_full(auto, state, Obs(kv=0.97, hits=None, preempts=4), 64)
+
+
+def test_every_metric_row_is_read_in_both_spellings_into_its_field():
+    """One row of METRICS is all a metric needs: each is read under `prefix:name` and
+    `prefix_name`, names its engine, and lands in its own field."""
+    from saturate.signals import _PREFIX, METRICS
+
+    for m in METRICS:
+        for sep in (":", "_"):
+            g = parse_gauges(f'{_PREFIX.get(m.engine, m.engine)}{sep}{m.name}{{engine="0"}} 3\n')
+            assert g is not None and g["dialect"] == m.engine, (m, sep)
+            want = {'{engine="0"}': {m.key: 3.0}} if m.combine == "series" else 3
+            assert g[m.field] == want, (m, sep)
+
+
+def test_the_sample_parser_skips_what_is_not_a_finite_sample():
+    """Comments, a non-finite value (NaN, +Inf) and a metric no row names are skipped; a label
+    value holding a brace and a trailing timestamp are read correctly."""
+    text = ("# HELP vllm:num_requests_waiting Number of requests waiting.\n"
+            "# TYPE vllm:num_requests_waiting gauge\n"
+            'vllm:num_requests_waiting{model_name="a}b"} 4 1730000000000\n'
+            "vllm:num_requests_running NaN\n"
+            "vllm:kv_cache_usage_perc +Inf\n"
+            "vllm:num_requests_swapped 9\n")
+    g = parse_gauges(text)
+    assert g is not None and (g["waiting"], g["running"], g["kv"]) == (4, None, None)
+    assert parse_gauges("# only comments\n\nup 1\n") is None

@@ -4,9 +4,9 @@ Implementations: HttpScrape (poll the engine's /metrics — MVP), Null (blind
 mode: hosted APIs, opaque LBs), and post-v1 an in-process source reading
 engine internals directly. The controller never knows which one fed it.
 
-The scrape table is keyed on the GAIE model-server-protocol semantics
-(queued / running / kv-util) rather than exact strings, and matches BOTH
-prefix spellings per engine (`sglang:` and `sglang_`). The exporters
+The scrape table (METRICS: one row per engine metric) is keyed on the GAIE
+model-server-protocol semantics (queued / running / kv-util) rather than exact
+strings, and matches BOTH prefix spellings per engine (`sglang:` and `sglang_`). The exporters
 themselves emit colons today; the dual spelling costs one character and
 absorbs a collector that normalises them away (Prometheus relabelling,
 OpenTelemetry) or a future rename. Neither engine has actually flipped:
@@ -27,34 +27,84 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-import re
-from collections.abc import Callable
+import math
+from collections.abc import Callable, Iterator
+from typing import Literal, NamedTuple
 
 from saturate.http import HttpClient, Timeouts, TransportError
 
 log = logging.getLogger(__name__)
 
-_PAT = re.compile(
-    r"^(?:"
-    r"vllm[:_](?:num_requests_(?P<v>waiting|running)"
-    r"|(?:gpu_cache|kv_cache)_usage_perc(?P<vkv>)"
-    r"|gpu_prefix_cache_hit_rate(?P<vh>)"
-    r"|(?:gpu_)?prefix_cache_(?P<vpc>queries|hits)_total"
-    r"|num_preemptions_total(?P<vp>))"
-    r"|sglang[:_](?:num_(?P<s>queue|running)_reqs"
-    r"|token_usage(?P<skv>)"
-    r"|cache_hit_rate(?P<sh>)"
-    r"|num_retracted_requests_total(?P<sp>))"
-    r"|llamacpp[:_]requests_(?P<l>deferred|processing)"
-    r"|trtllm_num_requests_(?P<t>waiting|running)"
-    r"|te[:_]queue_size(?P<eq>)"
-    r")(?P<labels>\{[^}]*\})?\s+(?P<val>[0-9.eE+-]+)",
-    re.M,
+class Metric(NamedTuple):
+    """One engine metric the scrape reads: which `field` of the gauges it feeds, and how the
+    values of its series (one per engine or label set) combine. "sum": a count, summed. "last":
+    a ratio gauge, one per engine. "series": kept per label set under `key`, for HttpScrape to
+    difference series by series."""
+
+    engine: str
+    name: str  # without the engine prefix; matched as `prefix:name` and `prefix_name`
+    field: str
+    combine: Literal["sum", "last", "series"]
+    key: str | None = None
+
+
+METRICS: tuple[Metric, ...] = (
+    Metric("vllm", "num_requests_waiting", "waiting", "sum"),
+    Metric("vllm", "num_requests_running", "running", "sum"),
+    Metric("vllm", "kv_cache_usage_perc", "kv", "last"),
+    Metric("vllm", "gpu_cache_usage_perc", "kv", "last"),  # before 0.12
+    Metric("vllm", "gpu_prefix_cache_hit_rate", "hits", "last"),  # V0; V1 has the counters below
+    Metric("vllm", "num_preemptions_total", "preempts", "sum"),
+    Metric("vllm", "prefix_cache_queries_total", "prefix_counts", "series", "queries"),
+    Metric("vllm", "prefix_cache_hits_total", "prefix_counts", "series", "hits"),
+    Metric("vllm", "gpu_prefix_cache_queries_total", "prefix_counts", "series", "queries"),  # 0.8-0.9
+    Metric("vllm", "gpu_prefix_cache_hits_total", "prefix_counts", "series", "hits"),
+    Metric("sglang", "num_queue_reqs", "waiting", "sum"),
+    Metric("sglang", "num_running_reqs", "running", "sum"),
+    Metric("sglang", "token_usage", "kv", "last"),
+    Metric("sglang", "cache_hit_rate", "hits", "last"),
+    Metric("sglang", "num_retracted_requests_total", "preempts", "sum"),
+    Metric("llamacpp", "requests_deferred", "waiting", "sum"),
+    Metric("llamacpp", "requests_processing", "running", "sum"),
+    Metric("trtllm", "num_requests_waiting", "waiting", "sum"),
+    Metric("trtllm", "num_requests_running", "running", "sum"),
+    Metric("tei", "queue_size", "waiting", "sum"),
 )
 
-_DIALECT = {"v": "vllm", "vkv": "vllm", "vh": "vllm", "vp": "vllm", "vpc": "vllm",
-            "s": "sglang", "skv": "sglang", "sh": "sglang", "sp": "sglang", "l": "llamacpp", "t": "trtllm",
-            "eq": "tei"}
+# the metric-name prefix of an engine whose prefix is not its name
+_PREFIX = {"tei": "te"}
+
+# every accepted spelling of every metric's full name -> its Metric
+_BY_NAME = {f"{_PREFIX.get(m.engine, m.engine)}{sep}{m.name}": m for m in METRICS for sep in (":", "_")}
+
+
+def _samples(text: str) -> Iterator[tuple[str, str, float]]:
+    """(name, labels, value) for each sample line of a Prometheus text body. Comments, blank
+    lines and a value that is not a finite number (NaN, +Inf) are skipped; an optional
+    timestamp after the value is ignored."""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        brace = line.find("{")
+        space = line.find(" ")
+        if brace != -1 and (space == -1 or brace < space):
+            close = line.rfind("}")
+            if close < brace:
+                continue
+            name, labels, rest = line[:brace], line[brace:close + 1], line[close + 1:]
+        else:
+            name, labels, rest = (line[:space], "", line[space:]) if space != -1 else (line, "", "")
+        parts = rest.split()
+        if not parts:
+            continue
+        try:
+            value = float(parts[0])
+        except ValueError:
+            continue
+        if math.isfinite(value):
+            yield name, labels, value
+
 
 # boot-frozen server-side ceilings: the client can only diagnose them and hand
 # back the exact relaunch flag (advisor, not tuner)
@@ -82,36 +132,28 @@ METRICS_FLAG = {
 
 
 def parse_gauges(text: str) -> dict | None:
-    """Extract waiting/running/kv/hits/preempts + dialect from a /metrics body. `preempts` is
-    the engine's cumulative preemption count (SGLang: retractions), summed over its series.
-    `prefix_counts` is vLLM's cumulative prefix-cache token counts per series (label set ->
-    {"queries": n, "hits": n}): vLLM publishes no hit-rate gauge, so HttpScrape derives `hits`
-    from two readings, series by series, so that one engine's reset is not hidden in a sum."""
+    """Extract waiting/running/kv/hits/preempts + dialect from a /metrics body, as METRICS
+    says. `preempts` is the engine's cumulative preemption count (SGLang: retractions), summed
+    over its series. `prefix_counts` is vLLM's cumulative prefix-cache token counts per series
+    (label set -> {"queries": n, "hits": n}): vLLM publishes no hit-rate gauge, so HttpScrape
+    derives `hits` from two readings, series by series, so that one engine's reset is not
+    hidden in a sum. None when no line is a known metric."""
     out: dict = {"waiting": None, "running": None, "kv": None, "hits": None,
                  "preempts": None, "prefix_counts": None, "dialect": None}
     seen = False
-    for m in _PAT.finditer(text):
-        val = float(m.group("val"))
-        for g in ("v", "s", "l", "t", "vkv", "vh", "vp", "vpc", "skv", "sh", "sp", "eq"):
-            if m.group(g) is not None:
-                seen = True
-                out["dialect"] = _DIALECT[g]
-                if g in ("v", "s", "l", "t"):
-                    kind = m.group(g)
-                    key = "waiting" if kind in ("waiting", "queue", "deferred") else "running"
-                    out[key] = (out[key] or 0) + int(val)
-                elif g == "eq":
-                    out["waiting"] = (out["waiting"] or 0) + int(val)
-                elif g in ("vkv", "skv"):
-                    out["kv"] = val
-                elif g in ("vh", "sh"):
-                    out["hits"] = val
-                elif g in ("vp", "sp"):  # a counter per engine or label set: their sum
-                    out["preempts"] = (out["preempts"] or 0) + int(val)
-                elif g == "vpc":  # kept per series: a rate is made from each series' own deltas
-                    counts = out["prefix_counts"] = out["prefix_counts"] or {}
-                    counts.setdefault(m.group("labels") or "", {})[m.group(g)] = val
-                break
+    for name, labels, value in _samples(text):
+        metric = _BY_NAME.get(name)
+        if metric is None:
+            continue
+        seen = True
+        out["dialect"] = metric.engine
+        if metric.combine == "sum":
+            out[metric.field] = (out[metric.field] or 0) + int(value)
+        elif metric.combine == "last":
+            out[metric.field] = value
+        else:
+            series = out[metric.field] = out[metric.field] or {}
+            series.setdefault(labels, {})[metric.key] = value
     return out if seen else None
 
 

@@ -29,6 +29,7 @@ SGLANG_IMAGE = "lmsysorg/sglang:latest"
 LLAMACPP_IMAGE = "ghcr.io/ggml-org/llama.cpp:server-cuda"
 TEI_IMAGE = "ghcr.io/huggingface/text-embeddings-inference:86-latest"
 SMALL = "Qwen/Qwen2.5-0.5B-Instruct"
+STORY = "Write a 400-word story about the number {i}."  # long-output cells: about 512 tokens out
 
 
 @dataclass(frozen=True)
@@ -50,7 +51,7 @@ CELLS: tuple[Cell, ...] = (
     # small text model, three engines, three output shapes
     Cell("small-short-vllm", "small", "a10g-small", VLLM_IMAGE, SMALL, vllm(SMALL), ["--kind", "chat"]),
     Cell("small-long-vllm", "small", "a10g-small", VLLM_IMAGE, SMALL, vllm(SMALL),
-         ["--kind", "chat", "--max-tokens", "512", "--rows", "1500"]),
+         ["--kind", "chat", "--max-tokens", "512", "--prompt", STORY, "--rows", "1500"]),
     Cell("small-prompt-vllm", "small", "a10g-small", VLLM_IMAGE, SMALL, vllm(SMALL),
          ["--kind", "long-prompt", "--rows", "2000"]),
     Cell("small-short-sglang", "small", "a10g-small", SGLANG_IMAGE, SMALL,
@@ -66,7 +67,7 @@ CELLS: tuple[Cell, ...] = (
     Cell("steady-short-vllm", "small", "a10g-small", VLLM_IMAGE, SMALL, vllm(SMALL),
          ["--kind", "chat", "--rows", "35000", "--auto-reps", "2", "--fixed", "128,256,512,1024"]),
     Cell("steady-long-vllm", "small", "a10g-small", VLLM_IMAGE, SMALL, vllm(SMALL),
-         ["--kind", "chat", "--max-tokens", "512", "--rows", "30000", "--auto-reps", "2",
+         ["--kind", "chat", "--max-tokens", "512", "--prompt", STORY, "--rows", "6000", "--auto-reps", "2",
           "--fixed", "128,256,512,1024"]),
     Cell("steady-short-sglang", "small", "a10g-small", SGLANG_IMAGE, SMALL,
          f"python3 -m sglang.launch_server --model-path {SMALL} --port 8000 --host 127.0.0.1 "
@@ -88,7 +89,7 @@ CELLS: tuple[Cell, ...] = (
          vllm("Qwen/Qwen3.8-27B", "--max-model-len 8192"), ["--kind", "chat", "--no-think"]),
     Cell("large-long-vllm", "large", "a100-large", VLLM_IMAGE, "Qwen/Qwen3.8-27B",
          vllm("Qwen/Qwen3.8-27B", "--max-model-len 8192"),
-         ["--kind", "chat", "--no-think", "--max-tokens", "512", "--rows", "1500"]),
+         ["--kind", "chat", "--no-think", "--max-tokens", "512", "--prompt", STORY, "--rows", "1500"]),
     Cell("large-tp2-vllm", "large", "h200x2", VLLM_IMAGE, "Qwen/Qwen3.8-27B",
          vllm("Qwen/Qwen3.8-27B", "--max-model-len 8192 --tensor-parallel-size 2"),
          ["--kind", "chat", "--no-think", "--rows", "30000", "--fixed", "128,256,512,1024,2048"]),
@@ -100,7 +101,7 @@ def launch(cells: list[Cell], ref: str, branch: str, dry_run: bool) -> None:
     for cell in cells:
         cmd = ["hf", "jobs", "run", "-d", "--flavor", cell.flavor, "--timeout", "90m",
                "--secrets", "HF_TOKEN", "-e", f"CELL={cell.name}", "-e", f"MODEL={cell.model}",
-               "-e", f"ENGINE_CMD={cell.engine_cmd}", "-e", f"CELL_ARGS={' '.join(cell.args)}",
+               "-e", f"ENGINE_CMD={cell.engine_cmd}", "-e", f"CELL_ARGS={shlex.join(cell.args)}",
                "-e", f"REF={ref}", "-e", f"HARNESS_REF=origin/{branch}", cell.image,
                "bash", "-c", f"curl -sLo /tmp/m.sh {url} && bash /tmp/m.sh"]
         if dry_run:

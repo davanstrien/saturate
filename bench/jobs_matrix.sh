@@ -42,9 +42,9 @@ done
 echo "engine ready"
 
 out="/tmp/${CELL}.jsonl"
-# shellcheck disable=SC2086  # CELL_ARGS is a list of flags
+eval "set -- $CELL_ARGS"  # CELL_ARGS is shell-quoted (shlex.join in matrix_cells.py)
 /work/v/bin/python bench/matrix.py --cell "$CELL" --endpoint http://127.0.0.1:8000/v1 --model "$MODEL" \
-  --label "$SHA" --out "$out" $CELL_ARGS || { tail -c 4000 /tmp/engine.log; exit 1; }
+  --label "$SHA" --out "$out" "$@" || { tail -c 4000 /tmp/engine.log; exit 1; }
 
 /work/v/bin/python bench/matrix_cells.py summarise "$out"
 if [ -n "${HF_TOKEN:-}" ]; then

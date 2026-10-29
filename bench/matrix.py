@@ -7,7 +7,7 @@ windows, on the same rows. Prints and appends one JSON line per run to --out.
 The score of a cell is Auto's rows/s over the best Fixed window's rows/s (bench/matrix_cells.py
 summarises a results directory). Workloads (--kind):
 
-- chat: one short prompt per row, --max-tokens out.
+- chat: one --prompt per row (default: one sentence), up to --max-tokens out.
 - long-prompt: a prompt of about --prompt-words words per row, --max-tokens out.
 - image: one generated image per row (a data URL) and a one-line caption request.
 - embeddings: one short passage per row to /embeddings.
@@ -40,7 +40,7 @@ def make_rows(args, label: str, rep: int) -> list[dict]:
         elif args.kind == "embeddings":
             row["text"] = f"A short passage about the number {i}, for an embedding benchmark."
         else:
-            row["text"] = f"Write one sentence about the number {i}."
+            row["text"] = args.prompt.format(i=i)
         rows.append(row)
     return rows
 
@@ -127,6 +127,8 @@ def main() -> None:
     ap.add_argument("--kind", choices=["chat", "long-prompt", "image", "embeddings"], default="chat")
     ap.add_argument("--rows", type=int, default=3000)
     ap.add_argument("--max-tokens", type=int, default=64)
+    ap.add_argument("--prompt", default="Write one sentence about the number {i}.",
+                    help="chat prompt template; {i} is the row number")
     ap.add_argument("--prompt-words", type=int, default=1500)
     ap.add_argument("--image-size", type=int, default=448)
     ap.add_argument("--prepare-workers", type=int, default=0, help="threads for to_request (image: 4)")

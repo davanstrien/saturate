@@ -1,11 +1,13 @@
-"""saturate's default log output: `[pump] message` lines on stderr, only while nobody else has
+"""saturate's default log output: `[pump] message` lines on stderr while nobody else has
 configured logging.
 
-Every module logs to a logger under `saturate` (logging.getLogger(__name__)). The library never
-configures the root logger. pump() and Engine call `default_output()` when they start: with no
-handler on `saturate` or on the root logger, it adds one stderr handler and sets `saturate` to
-INFO. Once the caller configures logging (a handler on either), it removes that handler and
-restores the level, so the caller's configuration decides what is shown and where.
+Every module logs to a logger under `saturate` (logging.getLogger(__name__)). When saturate is
+imported, the `saturate` logger gets one fallback handler and, unless the caller has already
+set one, the level INFO. The fallback handler decides at each record: while neither the root
+logger nor `saturate` has another handler, it prints the record to stderr; once the caller has
+configured logging, it prints nothing and the caller's handlers get the record. The library
+never configures the root logger. To show only problems:
+`logging.getLogger("saturate").setLevel(logging.WARNING)`.
 """
 
 from __future__ import annotations
@@ -16,36 +18,36 @@ import sys
 PACKAGE = "saturate"
 
 
-class _Stderr(logging.StreamHandler):
-    """Writes to sys.stderr as it is at each record, not as it was when the handler was made:
-    pytest, notebooks and agents replace sys.stderr after import."""
+class _Fallback(logging.Handler):
+    """Prints to stderr only while nobody has configured logging. Writes to sys.stderr as it is
+    at each record: pytest, notebooks and agents replace sys.stderr after import."""
 
-    def __init__(self, level_before: int) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.level_before = level_before  # the logger's level before this handler set INFO
         self.setFormatter(logging.Formatter("[pump] %(message)s"))
 
-    @property
-    def stream(self):
-        return sys.stderr
+    def emit(self, record: logging.LogRecord) -> None:
+        if _configured():
+            return
+        try:
+            sys.stderr.write(self.format(record) + "\n")
+            sys.stderr.flush()
+        except Exception:
+            self.handleError(record)
 
-    @stream.setter
-    def stream(self, value) -> None:  # StreamHandler.__init__ sets it; sys.stderr is always used
-        pass
+
+def _configured() -> bool:
+    """True once the caller has put a handler on the root logger or on `saturate`."""
+    package = logging.getLogger(PACKAGE)
+    theirs = [handler for handler in package.handlers if not isinstance(handler, _Fallback)]
+    return bool(theirs or logging.getLogger().handlers)
 
 
-def default_output() -> None:
-    """Show saturate's INFO and above on stderr, unless the caller has configured logging."""
-    logger = logging.getLogger(PACKAGE)
-    ours = [handler for handler in logger.handlers if isinstance(handler, _Stderr)]
-    theirs = [handler for handler in logger.handlers if not isinstance(handler, _Stderr)]
-    configured = bool(theirs or logging.getLogger().handlers)
-    if configured:
-        for handler in ours:
-            logger.removeHandler(handler)
-            logger.setLevel(handler.level_before)
-    elif not ours:
-        handler = _Stderr(logger.level)
-        logger.addHandler(handler)
-        if logger.level == logging.NOTSET:
-            logger.setLevel(logging.INFO)
+def install() -> None:
+    """Attach the fallback handler once (at import, under the import lock)."""
+    package = logging.getLogger(PACKAGE)
+    if any(isinstance(handler, _Fallback) for handler in package.handlers):
+        return
+    package.addHandler(_Fallback())
+    if package.level == logging.NOTSET:  # progress lines are INFO; a caller's own level wins
+        package.setLevel(logging.INFO)

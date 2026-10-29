@@ -361,15 +361,18 @@ same command is always safe.
 
 saturate logs through the standard `logging` module, under the `saturate` logger: progress
 (resume, dedup, `done:`) at INFO, degraded states (circuit open, a failed write that was
-retried) at WARNING. If your program has not configured logging, `pump()` prints INFO and
-above to stderr as `[pump] …` lines. Once you configure logging, your configuration decides:
+retried) at WARNING. The `saturate` logger is at INFO unless you set its level. While your
+program has no logging handler (on the root logger or on `saturate`), saturate prints these
+lines to stderr as `[pump] …`. Once you add a handler, your handlers get them instead:
 
 ```python
 import logging
 
-logging.basicConfig(level=logging.INFO)  # saturate's lines go through your handlers
-logging.getLogger("saturate").setLevel(logging.WARNING)  # or: only problems
+logging.basicConfig()  # saturate's INFO and WARNING lines go through your handler
+logging.getLogger("saturate").setLevel(logging.WARNING)  # only problems
 ```
+
+In agent mode, a handler you point at stdout puts its lines next to the stats JSON line.
 
 ## The output contract
 

@@ -23,7 +23,6 @@ from collections.abc import Callable
 import anyio
 
 from saturate import transport
-from saturate._logs import default_output
 from saturate.controller import TICK_S, Auto, Fixed, Obs
 from saturate.http import HttpClient, Timeouts
 from saturate.signals import HttpScrape, Null, read_capacity
@@ -366,7 +365,6 @@ class AdaptiveClient:
         return client, AdaptiveLimiter(self._window, signals=signals, on_tick=self._on_tick)
 
     async def __aenter__(self):
-        default_output()
         if self._client.closed:  # entered again after an earlier `async with`: start fresh
             self._client, self.limiter = self._build()
         try:

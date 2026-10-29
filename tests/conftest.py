@@ -4,7 +4,6 @@ the stub means the client was not sending; a long service time means the stub wa
 Timeouts are covered with pytest-timeout's signal method (the Linux default): the thread
 method exits the process before any report is made."""
 
-import logging
 import os
 
 import pytest
@@ -41,12 +40,6 @@ def _seeded_auto(monkeypatch):
         build(self, *args, seed=0 if seed is None else seed, **kwargs)
 
     monkeypatch.setattr(saturate.controller.Auto, "__init__", seeded)
-
-
-@pytest.fixture(autouse=True)
-def _saturate_info_logged(caplog):
-    """caplog records saturate's INFO lines (progress: resume, dedup, done), not only warnings."""
-    caplog.set_level(logging.INFO, logger="saturate")
 
 
 @pytest.hookimpl(hookwrapper=True)

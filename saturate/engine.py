@@ -22,7 +22,6 @@ from urllib.parse import urlsplit
 
 from multidict import CIMultiDict  # aiohttp's case-insensitive headers (installed with it)
 
-from saturate._logs import default_output
 from saturate.http import Reply, environment_proxy
 from saturate.transport import PROBE_HEADERS, probe_body
 
@@ -62,7 +61,6 @@ class Engine:
         return f"http://127.0.0.1:{self.port}/v1"
 
     def __enter__(self) -> str:
-        default_output()
         if _port_in_use(self.port):  # readiness would be answered by that server, not ours
             raise RuntimeError(f"engine: port {self.port} is already in use — another server would answer "
                                "the readiness checks for this one; stop it or pass port=")

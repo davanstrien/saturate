@@ -18,7 +18,7 @@ import os
 import time
 from collections.abc import Callable, Iterable
 
-from saturate._logs import default_output
+from saturate import _logs
 from saturate.controller import Auto, Fixed, Obs
 from saturate.core import AdaptiveClient, AdaptiveLimiter, Done
 from saturate.engine import Engine, wait_for_health
@@ -46,6 +46,7 @@ from saturate.transport import (
 from saturate.writer import Sink, drain, sink_hooks
 
 log = logging.getLogger(__name__)
+_logs.install()  # [pump] lines on stderr until the caller configures logging
 
 __all__ = [
     "pump", "Stats", "RowsLostError", "Fixed", "Auto", "Obs", "Attempt", "Engine", "wait_for_health",
@@ -190,7 +191,6 @@ def pump(
         them. 0 disables the check. Off when retry_errors=True: that input is mostly rows that
         already failed, and some rows fail for good.
     """
-    default_output()
     shard = check_shard(shard)
     select_shard = shard[1] > 1
     if select_shard:

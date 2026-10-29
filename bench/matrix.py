@@ -1,16 +1,15 @@
-"""One defaults-matrix cell against a running engine: Auto() a few times, then a sweep of Fixed
-windows, on the same rows. Prints and appends one JSON line per run to --out.
+"""One defaults-matrix cell against a running engine: Auto and a sweep of Fixed windows,
+interleaved over rounds. Prints and appends one JSON line per run to --out.
 
     python bench/matrix.py --cell small-short-vllm --endpoint http://127.0.0.1:8000/v1 \\
         --model Qwen/Qwen2.5-0.5B-Instruct --out cell.jsonl
 
-The score of a cell is Auto's rows/s over the best Fixed window's rows/s (bench/matrix_cells.py
-summarises a results directory). Workloads (--kind):
+Each round (--reps) runs Auto and every Fixed window once, in a shuffled order. Every run has
+its own prompts and images (a run tag with a per-invocation nonce), so no arm reads another
+arm's prefix or image cache. The score of a cell is Auto's median rows/s over the best Fixed
+window's median rows/s (bench/matrix_cells.py summarises results). Workloads (--kind):
 
 - chat: one --prompt per row (default: one sentence), up to --max-tokens out.
-
-Each round (--reps) runs Auto and every Fixed window once, in a shuffled order; every run's
-prompts are its own, so no arm reads another arm's prefix cache.
 - long-prompt: a prompt of about --prompt-words words per row, --max-tokens out.
 - image: one generated image per row (a data URL) and a one-line caption request.
 - embeddings: one short passage per row to /embeddings.
@@ -157,6 +156,7 @@ def one_run(args, label: str, window, rep: int) -> dict:
         "hints": stats.hints,
         "saturate": args.label,
         "harness": args.harness,
+        "nonce": args.nonce,
         **telemetry_summary(out_dir),
     }
     print(json.dumps(record), flush=True)
@@ -194,11 +194,14 @@ def main() -> None:
     args.nonce = os.urandom(4).hex()
 
     if not args.no_warmup:
+        warmup_rows, args.rows = args.rows, min(args.rows, 2000)  # warm the engine, not a full run
         one_run(args, "warmup", Fixed(32), 0)
+        args.rows = warmup_rows
     arms = [("auto", None)] + [(f"fixed-{w}", int(w)) for w in args.fixed.split(",") if w]
     for rep in range(args.reps):
         order = list(arms)
-        random.Random(rep).shuffle(order)  # no arm always runs first, or always after a big one
+        # no arm always runs first or after a big one; the nonce varies the order across cells
+        random.Random(f"{args.nonce}-{rep}").shuffle(order)
         for label, window in order:
             one_run(args, label, Auto() if window is None else Fixed(window), rep)
 

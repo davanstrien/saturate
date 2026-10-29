@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 import numbers
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import cast
 
 
@@ -29,7 +30,7 @@ class Setting:
         """What the setting needs, in words, e.g. `0 < kv_hi <= 1, a number`."""
         low = "<" if self.low_open else "<="
         high = "<" if self.high_open else "<="
-        if self.low == -math.inf and self.high == math.inf:
+        if self.low == -math.inf and self.high == math.inf and not (self.low_open or self.high_open):
             text = self.name
         elif self.high == math.inf and not self.high_open:  # no upper bound: `step >= 1`
             text = f"{self.name} {'>' if self.low_open else '>='} {_number(self.low)}"
@@ -39,23 +40,30 @@ class Setting:
         return text + (" or None" if self.optional else "")
 
     def allows(self, value: object) -> bool:
+        """None only when optional; a whole setting takes an int (Python's or NumPy's); a real
+        one also takes a float, Fraction or Decimal. Never a bool, a string, nan or an array."""
         if value is None:
             return self.optional
         if isinstance(value, bool):  # True is an int to Python, never a window or a share
             return False
-        if not isinstance(value, numbers.Integral if self.whole else numbers.Real):
+        kinds = (numbers.Integral,) if self.whole else (numbers.Real, Decimal)
+        if not isinstance(value, kinds):
             return False
         if isinstance(value, float) and math.isnan(value):
             return False
-        number = cast(float, value)  # an int or a real: comparable with the bounds
+        if isinstance(value, Decimal) and value.is_nan():  # NaN or sNaN: neither compares
+            return False
+        number = cast(float, value)  # for the type checker: a real number, comparable with the bounds
         above = number > self.low if self.low_open else number >= self.low
         below = number < self.high if self.high_open else number <= self.high
-        return above and below
+        return bool(above and below)  # a NumPy comparison gives numpy.bool_
 
 
 def _number(bound: float) -> str:
-    """A bound as a reader writes it: 1, 0.5, 1,000,000,000, inf."""
-    return f"{int(bound):,}" if math.isfinite(bound) and bound == int(bound) else f"{bound:g}"
+    """A bound as written in the table: 1, 1,000,000,000, 0.5, inf (repr keeps every digit)."""
+    if isinstance(bound, int):
+        return f"{bound:,}"
+    return repr(bound)
 
 
 def check(owner: str, table: tuple[Setting, ...], values: dict[str, object]) -> None:

@@ -190,14 +190,14 @@ def _below(ceiling: int) -> int:
     return ceiling - max(1, ceiling // 8)
 
 
-MOST = 10**9  # any count past this is a typo; past ~10**300 it overflows a float mid-run
+MAX_COUNT = 10**9  # any count past this is a typo; past ~10**300 it overflows a float mid-run
 AUTO_SETTINGS = (
-    Setting("target_waiting", whole=True, low=1, high=MOST),  # 0 cuts on any queue at all
-    Setting("initial", whole=True, low=1, high=MOST, optional=True),
-    Setting("min_limit", whole=True, low=1, high=MOST),  # 0 deadlocks admission
-    Setting("max_limit", whole=True, low=1, high=MOST),
-    Setting("step", whole=True, low=1, high=MOST),
-    Setting("stall_ticks", whole=True, low=1, high=MOST),
+    Setting("target_waiting", whole=True, low=1, high=MAX_COUNT),  # 0 cuts on any queue at all
+    Setting("initial", whole=True, low=1, high=MAX_COUNT, optional=True),
+    Setting("min_limit", whole=True, low=1, high=MAX_COUNT),  # 0 deadlocks admission
+    Setting("max_limit", whole=True, low=1, high=MAX_COUNT),
+    Setting("step", whole=True, low=1, high=MAX_COUNT),
+    Setting("stall_ticks", whole=True, low=1, high=MAX_COUNT),
     Setting("kv_hi", whole=False, low=0, high=1, low_open=True),
     Setting("hits_lo", whole=False, low=0, high=1),
     Setting("improve", whole=False, low=1, low_open=True, high_open=True),  # at 1, noise alone keeps moves up

@@ -341,8 +341,8 @@ def bad_parse(row, resp):
 
 
 def test_a_run_where_every_row_fails_stops_early_and_stores_nothing(stub, tmp_path):
-    """A parse bug (or a wrong model name, a bad token) fails every row. The run used to pay
-    for all of them and store them as error rows, which a fixed re-run then skipped."""
+    """A parse bug (or a wrong model name, a bad token) fails every row. The run stops early
+    and stores nothing, so it does not pay for every row and a fixed re-run does them all."""
     out = str(tmp_path)
     with pytest.raises(FatalTransportError, match=r"first 32 rows all failed.*KeyError"):
         pump(rows(300), to_request, bad_parse, endpoint=stub.endpoint, output=out, window=Fixed(4))
@@ -373,7 +373,7 @@ def test_fail_fast_zero_restores_storing_every_failure(stub, tmp_path):
 
 
 def test_resume_says_how_many_skipped_rows_are_errors(stub, tmp_path):
-    """Error-only rows are skipped on resume by design; the run now says so and names
+    """Error-only rows are skipped on resume by design; the run says so and names
     retry_errors instead of reporting a silent 0 ok, 0 failed."""
     stub.status_for = lambda request: 400 if request["messages"][0]["content"] in {"row 3", "row 7"} else 200
     out = str(tmp_path)
@@ -390,7 +390,7 @@ def test_resume_says_how_many_skipped_rows_are_errors(stub, tmp_path):
 
 def test_a_parse_with_a_defaulted_second_parameter_takes_the_response(stub, tmp_path):
     """`lambda body, model="m": ...` has two parameters but one required: it is parse(resp).
-    It used to be called as parse(row, body), failing every row with KeyError 'choices'."""
+    Calling it as parse(row, body) would fail every row with KeyError 'choices'."""
     def one_arg(body, model="m"):
         return {"text": body["choices"][0]["message"]["content"], "model": model}
 
@@ -429,7 +429,7 @@ def test_retries_are_counted_per_attempt_in_stats_and_telemetry(stub, tmp_path, 
 
 def test_duplicate_rows_are_named_in_the_log(stub, tmp_path, caplog):
     """Identical rows share the default content-hash id, so a synth run repeating a prompt N
-    times got one sample; the count was only in the JSON stats."""
+    times gets one sample. The log names the duplicate count; it is not only in the JSON stats."""
     stats = pump([{"text": "same"}] * 5, to_request, parse, endpoint=stub.endpoint,
                  output=str(tmp_path), window=Fixed(2))
     assert (stats.rows_processed, stats.rows_deduped) == (1, 4)
@@ -439,9 +439,9 @@ def test_duplicate_rows_are_named_in_the_log(stub, tmp_path, caplog):
 # --- fan-out: shard= selects input (CONTRACT §2) ---------------------------------------------
 
 def test_shard_processes_only_its_own_rows(stub, tmp_path):
-    """pump(shard=(k, n)) labelled output but processed every row: an 8-Job fan-out paid for
-    the whole input 8 times (#19). Each shard must process a disjoint slice, and the slices
-    together must cover the input exactly once."""
+    """Each shard processes a disjoint slice, and the slices together cover the input exactly
+    once (#19). A shard that only labelled its output and processed every row would make an
+    8-Job fan-out pay for the whole input 8 times."""
     per_shard = []
     for rank in range(3):  # one output per shard, so a resume cannot hide an overlap
         stats = pump(rows(60), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path / str(rank)),

@@ -89,14 +89,14 @@ class Engine:
                 os.killpg(pgid, signal.SIGTERM)
                 self.proc.wait(timeout=30)
             except ProcessLookupError:
-                pass  # r6: group exited between poll() and the signal — that IS teardown
+                pass  # the group exited between poll() and the signal: that is teardown
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(pgid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
         self.proc.wait()  # reap the leader so a zombie can't hold the group open below
-        for _ in range(50):  # r5: the GROUP is the teardown unit — a leader that exited on
+        for _ in range(50):  # the GROUP is the teardown unit: a leader that exited on
             try:            # SIGTERM can leave children behind; kill and confirm they're gone
                 os.killpg(pgid, signal.SIGKILL)
             except ProcessLookupError:

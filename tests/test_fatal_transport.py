@@ -1,4 +1,4 @@
-"""Codex r3 findings #1/#4: a dead breaker aborts the run instead of writing
+"""A dead breaker aborts the run instead of writing
 durable error rows (which resume would silently skip); a non-dict parse result
 becomes a healable error row instead of crashing after the API spend."""
 

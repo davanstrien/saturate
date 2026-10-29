@@ -191,7 +191,8 @@ def test_default_ids_are_the_listed_paths(tmp_path):
 
 
 def test_a_root_on_another_filesystem_raises_before_listing(tmp_path):
-    """root="buckets/org/b" for an hf:// pattern resolved to a local path, so every match
-    was "not under root", and an empty glob said nothing."""
+    """A root on another filesystem raises before listing. root="buckets/org/b" for an hf://
+    pattern would resolve to a local path, every match would be "not under root", and an empty
+    glob would say nothing."""
     with pytest.raises(ValueError, match="same filesystem"):
         bucket_rows(f"{tmp_path}/*.png", root="memory://scans")

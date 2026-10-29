@@ -1,6 +1,5 @@
-"""Codex r3 findings #10/#23: background tasks are awaited, not abandoned — a
-crashed tick loop surfaces at limiter exit; invalid public inputs fail at
-construction (Fixed(0) previously deadlocked admission forever)."""
+"""Background tasks are awaited, not abandoned: a crashed tick loop surfaces at limiter
+exit. Invalid public inputs fail at construction (Fixed(0) would deadlock admission forever)."""
 
 import asyncio
 
@@ -29,7 +28,7 @@ def test_crashed_tick_loop_surfaces(monkeypatch):
 
 @pytest.mark.internals
 def test_client_closed_when_tick_loop_crashed(monkeypatch):
-    """Codex r4 blocker #6: surfacing a crashed tick loop at limiter exit must
+    """Surfacing a crashed tick loop at limiter exit must
     not leak the HTTP client."""
     from saturate import AdaptiveClient
 
@@ -54,8 +53,8 @@ def test_client_closed_when_tick_loop_crashed(monkeypatch):
 
 @pytest.mark.internals
 def test_admission_fails_fast_after_tick_death(monkeypatch):
-    """Codex r5 blocker #4a: a long run must not continue with a dead
-    controller — the next admission raises run-fatally (never a row error)."""
+    """A long run does not continue with a dead controller: the next admission raises
+    run-fatally (never a row error)."""
     from saturate import FatalTransportError
 
     monkeypatch.setattr(core, "TICK_S", 0.01)
@@ -76,9 +75,9 @@ def test_admission_fails_fast_after_tick_death(monkeypatch):
 
 @pytest.mark.internals
 def test_blocked_admission_fails_after_tick_death(monkeypatch):
-    """Codex r6 blocker #3: a waiter already queued behind a full window passed
-    the pre-acquire check, then proceeded after the controller died. The check
-    re-runs post-acquire (and releases the slot before raising)."""
+    """A waiter already queued behind a full window passes the pre-acquire check while the
+    controller is alive. The check re-runs after acquire, so the waiter raises once the
+    controller has died (and releases the slot before raising)."""
     from saturate import FatalTransportError
 
     monkeypatch.setattr(core, "TICK_S", 0.01)
@@ -102,7 +101,7 @@ def test_blocked_admission_fails_after_tick_death(monkeypatch):
 
 @pytest.mark.internals
 def test_body_exception_wins_over_tick_crash(monkeypatch):
-    """Codex r5 blocker #4b: a tick-loop exception at exit must not mask the
+    """A tick-loop exception at exit must not mask the
     primary body exception."""
     monkeypatch.setattr(core, "TICK_S", 0.01)
 
@@ -125,7 +124,7 @@ def test_fixed_zero_raises():
 
 
 def test_as_sink_accepts_path(tmp_path):
-    assert isinstance(as_sink(tmp_path), ParquetSink)  # Path was mistaken for a custom sink
+    assert isinstance(as_sink(tmp_path), ParquetSink)  # a Path is a ParquetSink target, not a custom sink
 
 
 @pytest.mark.internals

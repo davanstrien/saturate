@@ -20,7 +20,7 @@ def test_filesink_resume_roundtrip(tmp_path):
 
 
 def test_filesink_rejects_unsafe_ids_and_writes_atomically(tmp_path):
-    """Codex r3 #3/#15: ids become filenames — traversal/dotfile ids must raise
+    """Ids become filenames — traversal/dotfile ids must raise
     (never write outside the dir or invisibly to resume); writes are atomic."""
     import pytest
 
@@ -68,7 +68,7 @@ def test_mixed_success_error_parts_union(tmp_path):
 
 
 def test_error_row_first_keeps_success_columns(tmp_path):
-    """Codex r3 #2: from_pylist takes the schema from row 0 — an error row at
+    """from_pylist takes the schema from row 0 — an error row at
     the head of a batch must not silently drop later success columns."""
     from saturate import ParquetSink
 
@@ -81,7 +81,7 @@ def test_error_row_first_keeps_success_columns(tmp_path):
 
 
 def test_null_first_then_typed_column_evolves(tmp_path):
-    """Codex r4/r5 blocker #1: all-null columns are dropped from their part
+    """All-null columns are dropped from their part
     (sparse, §1) so a later real type — string OR float — can never conflict
     with a premature guess already on disk. read_output unifies across parts."""
     from saturate import ParquetSink
@@ -97,7 +97,7 @@ def test_null_first_then_typed_column_evolves(tmp_path):
 
 
 def test_declared_schema_is_stable_in_any_order(tmp_path):
-    """Codex r5 blocker #1: a declared schema is the fully-stable option — every
+    """A declared schema is the fully-stable option — every
     part frames to it (missing fields null), whatever order rows arrive in."""
     import pyarrow.dataset as ds
     import pytest
@@ -121,10 +121,9 @@ def test_declared_schema_is_stable_in_any_order(tmp_path):
 
 
 def test_declared_type_mismatch_becomes_error_row(tmp_path):
-    """Codex r6 blocker #1: declared score: float64 + {'score': 'not-a-number'}
-    previously passed the inferred-schema probe, counted as processed, then
-    died at flush with no record. The probe now validates against the DECLARED
-    schema; overflow ints and extra fields are error rows too."""
+    """The probe validates against the DECLARED schema: declared score: float64 +
+    {'score': 'not-a-number'} becomes a durable error row, not a row counted as processed
+    that dies at flush with no record. Overflow ints and extra fields are error rows too."""
     import asyncio
 
     from saturate import ParquetSink
@@ -149,7 +148,7 @@ def test_declared_type_mismatch_becomes_error_row(tmp_path):
 
 
 def test_declared_schema_requires_contract_types(tmp_path):
-    """Codex r6 blocker #1: declared id/error must satisfy the contract."""
+    """Declared id/error must satisfy the contract."""
     import pytest
 
     from saturate import ParquetSink
@@ -159,7 +158,7 @@ def test_declared_schema_requires_contract_types(tmp_path):
 
 
 def test_declared_schema_rejects_nonnullable_user_fields(tmp_path):
-    """Codex r7 #1: error rows write user fields as null — a declared
+    """Error rows write user fields as null — a declared
     non-nullable field would crash the Parquet write with no durable record."""
     import pytest
 
@@ -172,7 +171,7 @@ def test_declared_schema_rejects_nonnullable_user_fields(tmp_path):
 
 
 def test_declared_schema_error_row_is_durable(tmp_path):
-    """Codex r7 #1: an ordinary error Done under a declared schema must land as
+    """An ordinary error Done under a declared schema must land as
     a durable sparse error row."""
     import asyncio
 
@@ -194,7 +193,7 @@ def iter_async(items):
 
 
 def test_generic_sink_not_subject_to_arrow_rules(tmp_path):
-    """Codex r7 #2: FileSink str()s its values — a stringable object its own
+    """FileSink str()s its values — a stringable object its own
     append() can persist must NOT be rejected by an Arrow probe it never asked
     for (validation belongs to sinks that supply probe())."""
     import asyncio
@@ -232,8 +231,8 @@ def test_dynamic_type_change_becomes_error_row_at_flush(tmp_path):
 
 def test_dynamic_type_conflict_becomes_error_row_under_drain(tmp_path):
     """Under drain, a row whose type conflicts with the pinned dynamic schema must
-    become a durable error row: previously probe() only checked serializability, so
-    the conflict surfaced at flush, discarded the buffered rows and crashed the run
+    become a durable error row: probe() checks the pinned types, not only serializability.
+    A conflict left to surface at flush would discard the buffered rows and crash the run
     (and every resume of it, since the same rows arrive in the same order)."""
     import asyncio
 
@@ -357,9 +356,9 @@ def test_dynamic_value_rewrite_is_error_row_at_flush(tmp_path):
 
 def test_mixed_types_in_first_buffer_cost_one_row(tmp_path, caplog):
     """Before any type is pinned, probe cannot see the buffer: {score: 1} then {score: "a"}
-    in ONE buffer used to fail batch inference at flush and lose every buffered row. flush
-    now falls back to a per-row pass: the first typed value pins, the conflicting row is
-    written as an error row, and the flush is logged once with the count."""
+    in ONE buffer fail batch type inference at flush. flush falls back to a per-row pass,
+    so no buffered row is lost: the first typed value pins, the conflicting row is written
+    as an error row, and the flush is logged once with the count."""
     import asyncio
 
     from saturate import ParquetSink
@@ -603,8 +602,8 @@ def test_dynamic_probe_accepts_nulls_new_fields_and_empty_lists(tmp_path):
 
 
 def test_schema_rejected_for_custom_sink_objects():
-    """Codex r6 follow-up (fixed now): pump(schema=) must never be silently
-    ignored when the output is a custom sink object."""
+    """pump(schema=) is never silently ignored: a custom sink object with a schema
+    raises."""
     import pytest
 
     from saturate.sink import as_sink
@@ -624,8 +623,8 @@ def test_schema_rejected_for_custom_sink_objects():
 
 
 def test_nonserializable_parse_value_becomes_error_row(tmp_path):
-    """Codex r5 blocker #6: {'value': object()} passed the dict check but died
-    at flush with no durable record — must become a healable error row."""
+    """{'value': object()} passes the dict check but cannot be stored: it becomes a
+    healable error row, not a flush failure with no durable record."""
     import asyncio
 
     from saturate import ParquetSink
@@ -643,7 +642,7 @@ def test_nonserializable_parse_value_becomes_error_row(tmp_path):
 
 
 def test_filesink_rejects_unsafe_ext(tmp_path):
-    """Codex r5: ext lands in filenames and the resume glob."""
+    """ext lands in filenames and the resume glob."""
     import pytest
 
     for bad in ("txt", ".t/xt", "..txt"):
@@ -652,7 +651,7 @@ def test_filesink_rejects_unsafe_ext(tmp_path):
 
 
 def test_all_null_column_inherits_pinned_type(tmp_path):
-    """Codex r3 #5: an all-null user column in a later part must keep the type
+    """An all-null user column in a later part must keep the type
     pinned at first flush, so cross-part dataset reads stay schema-stable."""
     import pyarrow.dataset as ds
 
@@ -668,10 +667,9 @@ def test_all_null_column_inherits_pinned_type(tmp_path):
 
 
 def test_all_null_part_carries_full_pinned_schema(tmp_path, monkeypatch):
-    """#12: with a part-name ms collision, sorted() order was uuid-decided — and the
-    all-null part did not carry the pinned column at all, so first-fragment readers
-    (pyarrow.dataset's default) lost it whenever that part sorted first. Every part
-    must materialize the full pinned schema; the seq counter makes order deterministic."""
+    """#12: every part materializes the full pinned schema, including an all-null part, so
+    first-fragment readers (pyarrow.dataset's default) keep the column whichever part sorts
+    first. With a part-name ms collision, the seq counter keeps the order deterministic."""
     import pyarrow.dataset as ds
 
     from saturate import ParquetSink
@@ -702,7 +700,7 @@ def test_skip_done_with_external_set():
 
 
 def test_reserved_columns_win_over_parse(tmp_path):
-    """Codex finding #2: parse returning its own 'id' must not break resume."""
+    """Parse returning its own 'id' must not break resume."""
     import asyncio
 
     from saturate import ParquetSink
@@ -723,7 +721,7 @@ def test_reserved_columns_win_over_parse(tmp_path):
 
 
 def test_content_id_rejects_objects():
-    """Codex finding #3: unstable reprs must be refused, not silently hashed."""
+    """Unstable reprs must be refused, not silently hashed."""
     import pytest
 
     from saturate.source import content_id
@@ -736,7 +734,7 @@ def test_content_id_rejects_objects():
 
 
 def test_retry_after_http_date():
-    """Codex finding #6: RFC 9110 HTTP-date form."""
+    """Retry-After also parses the RFC 9110 HTTP-date form."""
     from saturate.transport import _parse_retry_after
 
     assert _parse_retry_after("3.5") == 3.5
@@ -971,9 +969,9 @@ def _flaky_open(sink, fail_times: int, monkeypatch, match: str = "part-"):
 
 
 def test_a_transient_part_write_error_is_retried_under_the_same_name(tmp_path, monkeypatch):
-    """One 503 on a part upload used to abort the whole run (re-paying every request in
-    flight). Retrying under the same name also means a write that landed despite the error
-    is overwritten, not duplicated."""
+    """One 503 on a part upload is retried: it does not abort the run (re-paying every request
+    in flight). The retry uses the same name, so a write that landed despite the error is
+    overwritten, not duplicated."""
     import saturate.sink as sink_mod
     from saturate.sink import ParquetSink
 
@@ -1018,9 +1016,8 @@ def _pinned_with_null_leaf(tmp_path):
 
 
 def test_a_rejected_record_does_not_change_the_pin(tmp_path):
-    """probe() once widened the pin with meta.a before a later field (count) failed; the
-    record was rejected but the widening stayed, so later valid rows were demoted. probe()
-    only reads the pin."""
+    """probe() only reads the pin. A record rejected on a later field (count) leaves no
+    widening of meta.a behind, so later valid rows are not demoted."""
     import pytest
 
     sink = _pinned_with_null_leaf(tmp_path)
@@ -1048,8 +1045,8 @@ def test_a_row_demoted_at_flush_does_not_change_the_pin(tmp_path):
 
 
 def test_a_value_arrow_cannot_convert_is_an_error_row_not_a_crash(tmp_path):
-    """A uuid.UUID raised ArrowNotImplementedError, which is not a TypeError: it got past every
-    handler, aborted the run, and aborted every resume at the same row."""
+    """A uuid.UUID makes Arrow raise ArrowNotImplementedError, which is not a TypeError. The row
+    becomes an error row; uncaught, it would abort the run and every resume at the same row."""
     import asyncio
     import uuid
 
@@ -1106,8 +1103,8 @@ def test_a_direct_append_of_an_unconvertible_value_is_demoted_at_flush(tmp_path)
 
 
 def test_filesink_refuses_a_uri():
-    """FileSink('hf://...') used to write to a local directory literally named 'hf:', lost when
-    a Job ends while the run reported success."""
+    """FileSink('hf://...') raises. It must not write to a local directory literally named 'hf:',
+    which is lost when a Job ends while the run reports success."""
     import pytest
 
     with pytest.raises(ValueError, match="local directory"):
@@ -1115,8 +1112,8 @@ def test_filesink_refuses_a_uri():
 
 
 def test_a_local_part_write_leaves_no_truncated_part_or_temp_file(tmp_path, monkeypatch):
-    """A kill mid-write used to leave a truncated part-*.parquet that broke every whole-dir
-    reader until deleted. Local parts are now written to a dot-prefixed temp name and moved."""
+    """A kill mid-write leaves no truncated part-*.parquet to break whole-dir readers: local
+    parts are written to a dot-prefixed temp name and then moved."""
     import pytest
 
     import saturate.sink as sink_mod
@@ -1143,8 +1140,8 @@ def test_a_local_part_write_leaves_no_truncated_part_or_temp_file(tmp_path, monk
 
 
 def test_drain_closes_the_results_stream_when_the_sink_fails(tmp_path):
-    """A sink error used to leave the upstream generator suspended: its requests kept running
-    with nothing consuming them (for an embedder on a long-lived loop)."""
+    """A sink error closes the upstream generator. A suspended generator would keep its requests
+    running with nothing consuming them (for an embedder on a long-lived loop)."""
     import asyncio
 
     import pytest
@@ -1210,7 +1207,7 @@ def test_hf_a_missing_output_read_then_created_is_writable(monkeypatch):
     assert saturate.existing_ids(uri) == set()  # read-only: caches the repo as missing
     sink = ParquetSink(uri)  # creates it
     assert exists["repo"]
-    sink.fs.resolve_path(f"{sink.root}/part-0.parquet")  # raised FileNotFoundError before the fix
+    sink.fs.resolve_path(f"{sink.root}/part-0.parquet")  # no FileNotFoundError: "missing" is cleared
 
 
 def _read_whole_dir(out):
@@ -1232,9 +1229,9 @@ def _null_typed_paths(t: pa.DataType, path: str = "") -> list[str]:
 
 
 def test_a_nested_field_first_seen_as_none_keeps_the_parts_readable_together(tmp_path):
-    """#33 (1): {"meta": {"lang": None}} was written as struct<lang: null>, and a later part
-    typed it as string; pq.read_table(dir) and pyarrow.dataset then failed with "Unsupported
-    cast from string to null". No part carries a null-typed field."""
+    """#33 (1): no part carries a null-typed field. Writing {"meta": {"lang": None}} as
+    struct<lang: null>, with a later part typing it as string, would make pq.read_table(dir)
+    and pyarrow.dataset fail with "Unsupported cast from string to null"."""
     import asyncio
 
     from saturate import ParquetSink
@@ -1277,10 +1274,10 @@ def test_a_row_demoted_in_salvage_does_not_shape_the_part_or_the_pin(tmp_path):
 
 
 def test_a_new_nested_key_extends_the_struct_like_a_new_column(tmp_path):
-    """#33 (3): a nested key missing from the first part was an error row on every retry,
-    while a new top-level key added a column. A new nested key now extends the struct; every
-    part stays readable with the whole-directory readers, and the unified schema of the parts
-    reads every field."""
+    """#33 (3): a nested key missing from the first part extends the struct, as a new
+    top-level key adds a column; it is not an error row on every retry. Every part stays
+    readable with the whole-directory readers, and the unified schema of the parts reads
+    every field."""
     import asyncio
 
     import pyarrow.dataset as ds
@@ -1321,7 +1318,8 @@ def test_a_field_typed_after_it_was_first_none_is_stored_on_every_pyarrow(tmp_pa
 
 def test_probe_checks_a_row_against_the_types_flush_stores(tmp_path):
     """m.new arrives as [] (dropped: no type yet), then as "x" in the same batch. Flush keeps
-    both rows; probe compared the raw list<null> with string and rejected the second."""
+    both rows; probe checks the types flush stores, not the raw list<null>, so it accepts the
+    second."""
     import asyncio
 
     from saturate import ParquetSink
@@ -1340,7 +1338,7 @@ def test_probe_checks_a_row_against_the_types_flush_stores(tmp_path):
 
 def test_salvage_works_out_the_shared_types_again_after_each_demotion(tmp_path):
     """Row a's 2**60 does not fit the double x that row b's 0.5 makes, so a is demoted. Without
-    a, y is int64 and b's 2**60 fits; b was demoted too, against types a had contributed."""
+    a, y is int64 and b's 2**60 fits, so b is stored: it is not judged against types a gave."""
     from saturate import ParquetSink
 
     sink = ParquetSink(str(tmp_path), flush_every=2)
@@ -1352,8 +1350,8 @@ def test_salvage_works_out_the_shared_types_again_after_each_demotion(tmp_path):
 
 
 def test_a_declared_schema_rejects_undeclared_nested_keys(tmp_path):
-    """A declared struct<a> silently dropped m.b: the row succeeded and b was lost. An undeclared
-    key at any depth (inside lists too) is refused like a top-level one, naming the key."""
+    """An undeclared key at any depth (inside lists too) is refused like a top-level one, naming
+    the key. A declared struct<a> does not silently drop m.b while the row succeeds."""
     import asyncio
 
     import pytest

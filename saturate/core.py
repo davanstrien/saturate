@@ -99,7 +99,7 @@ class _Slot:
         admitted = time.monotonic()
         self._l._wait["acquire"] += admitted - t
         try:
-            self._check()  # ...and after (r6): the controller may have died while we were queued
+            self._check()  # ...and after: the controller may have died while we were queued
         except BaseException:
             self._give_back()
             raise

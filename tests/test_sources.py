@@ -60,7 +60,7 @@ def test_unknown_id_column_raises():
 
 
 def test_revision_or_token_with_loaded_object_raises():
-    # silent no-op would void the index-id stability caveat (codex HIGH)
+    # a silent no-op would void the index-id stability caveat
     with pytest.raises(ValueError, match="repo id string"):
         list(dataset_rows(ds(), revision="some-branch"))
     with pytest.raises(ValueError, match="repo id string"):
@@ -68,26 +68,26 @@ def test_revision_or_token_with_loaded_object_raises():
 
 
 def test_empty_columns_means_empty_rows_not_all():
-    # columns=[] must not be treated as columns=None (codex MEDIUM)
+    # columns=[] is not treated as columns=None
     rows = list(dataset_rows(ds(), columns=[], limit=1))
     assert rows == [("train:000000000", {})]
 
 
 def test_id_strategy_producing_none_raises_loudly():
-    # a broken callable must not collide every row on "None" (codex MEDIUM)
+    # a broken callable does not collide every row on "None"
     with pytest.raises(ValueError, match="produced no id"):
         list(dataset_rows(ds(), ids=lambda ex: None))
 
 
 def test_id_column_need_not_be_in_columns():
-    # id lookup happens on the full example, pre-filter (codex MEDIUM)
+    # id lookup happens on the full example, before the column filter
     rows = list(dataset_rows(ds(), columns=["text"], ids="key", limit=2))
     assert rows == [("a1", {"text": "alpha"}), ("b2", {"text": "beta"})]
 
 
 def test_a_none_or_empty_id_raises_instead_of_collapsing_rows():
-    """Every row whose id_key is None used to become the id "None": the first ran, the rest
-    were silently deduped."""
+    """A None or empty id raises. As the id "None", the first such row would run and the rest
+    would be silently deduped."""
     import pytest
 
     from saturate.source import normalize
@@ -114,13 +114,13 @@ def test_rolling_map_keeps_none_items_and_what_follows():
     from saturate.source import rolling_map
 
     with ThreadPoolExecutor(2) as pool:
-        # a None after the first window used to read as "exhausted": [1, 2, 3] and the rest lost
+        # a None after the first window is an item, not "exhausted": nothing after it is lost
         assert list(rolling_map([1, 2, 3, None, 5], lambda x: x, pool, window=2)) == [1, 2, 3, None, 5]
 
 
 def test_index_ids_name_the_dataset_config_and_revision(monkeypatch):
-    """Index ids were `{split}-{i}`: a second config (or another dataset) written to the same
-    output was skipped as done (#34)."""
+    """Index ids name the dataset, config and revision, so a second config (or another dataset)
+    written to the same output is not skipped as done (#34)."""
     import datasets
 
     monkeypatch.setattr(datasets, "load_dataset", lambda *a, **kw: ds())
@@ -177,7 +177,8 @@ def test_shard_keeps_only_its_rows_and_decodes_nothing_else(monkeypatch):
 
 
 def test_fractional_or_bool_shards_raise():
-    """(0.9, 2) was truncated to (0, 2) and (1.5, 1.8) to (1, 1): a wrong shard ran quietly."""
+    """Fractional or bool shards raise: truncating (0.9, 2) to (0, 2) or (1.5, 1.8) to (1, 1)
+    would quietly run a wrong shard."""
     from saturate import shard_select
 
     for bad in [(0.9, 2), (1.5, 1.8), (True, 2), (0, "4")]:
@@ -187,7 +188,7 @@ def test_fractional_or_bool_shards_raise():
 
 def test_transformed_iterable_is_never_decoded_twice(monkeypatch):
     """A filter or map on an IterableDataset decodes the example itself; decoding it again
-    broke images ('PngImageFile' object is not subscriptable). Such pipelines are iterated
+    breaks images ('PngImageFile' object is not subscriptable). Such pipelines are iterated
     as they are, and every example is decoded exactly once."""
     from saturate import shard_of
 
@@ -220,8 +221,8 @@ def test_sharded_image_dataset_through_a_filter():
 
 
 def test_empty_and_transformed_datasets_shard():
-    """An empty Dataset raised (to_iterable_dataset cannot make one shard from zero rows), and
-    a Dataset with a transform raised NotImplementedError."""
+    """An empty Dataset shards to no rows, though to_iterable_dataset cannot make one shard from
+    zero rows. A Dataset with a transform shards without NotImplementedError."""
     empty = Dataset.from_dict({"text": []})
     assert list(dataset_rows(empty, shard=(0, 1))) == []
 
@@ -240,8 +241,8 @@ def _loaded(monkeypatch, dataset):
 
 
 def test_a_sharded_load_decodes_only_the_selected_columns(monkeypatch):
-    """With shard=, the late decode read every column: an unreadable image in a column left
-    out by columns= raised UnidentifiedImageError, where the unsharded run yielded rows."""
+    """With shard=, the late decode reads only the columns= columns: an unreadable image in a
+    column left out does not raise UnidentifiedImageError, as in the unsharded run."""
     import datasets
 
     features = datasets.Features({"text": datasets.Value("string"), "img": datasets.Image()})
@@ -256,7 +257,7 @@ def test_a_sharded_load_decodes_only_the_selected_columns(monkeypatch):
 
 def test_a_sharded_load_without_known_features_is_selected_after_reading(monkeypatch):
     """A JSON or CSV repo without dataset_info loads with features=None, and decode(False)
-    raised for it. Such rows have nothing to decode late, so they are read and selected."""
+    raises for it. Such rows have nothing to decode late, so they are read and selected."""
     from datasets import IterableDataset
 
     from saturate import shard_of
@@ -269,7 +270,8 @@ def test_a_sharded_load_without_known_features_is_selected_after_reading(monkeyp
 
 
 def test_a_sharded_empty_load_yields_nothing(monkeypatch):
-    """streaming=False with shard= raised "Unable to shard a dataset of size 0"."""
+    """streaming=False with shard= on an empty dataset yields nothing; it does not raise
+    "Unable to shard a dataset of size 0"."""
     _loaded(monkeypatch, Dataset.from_dict({"key": []}))
     assert list(dataset_rows("org/x", streaming=False, shard=(0, 4))) == []
 

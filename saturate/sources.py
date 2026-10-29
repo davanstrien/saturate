@@ -1,6 +1,6 @@
 """HF dataset -> (id, row) stream: the input half of "dataset in, endpoint out".
 
-Streaming by default. `load_dataset(streaming=True)` now runs at local-SSD
+Streaming by default. `load_dataset(streaming=True)` runs at local-SSD
 speed for exactly this access pattern — one sequential pass, no shuffle, no
 epochs (persistent file cache, bundled resolution, prefetching:
 hf.co/blog/streaming-datasets) — and a naive materializing load killed a real

@@ -110,6 +110,9 @@ def report(check: str, rows: int, t0: float, result: dict, output: str,
     print(json.dumps(record), flush=True)
 
 
+SIGINT_EXITS = (-signal.SIGINT, 128 + signal.SIGINT)  # killed by SIGINT, or exited 130 on it
+
+
 def rows_for(rows_per_s: float, seconds: float, minimum: int) -> int:
     """Enough rows to keep this engine busy for `seconds`: an interrupt must land mid-run."""
     return max(minimum, int(rows_per_s * seconds))
@@ -165,7 +168,9 @@ def signals_check(args, out: str, rows: int) -> None:
     t0 = time.time()
     proc = start_run(args, out, rows, "auto", args.max_tokens)
     time.sleep(10)  # the engine is busy: the scrape reads gauges under load
+    loaded = proc.poll() is None
     found = asyncio.run(probe_engine(args.endpoint))
+    loaded = loaded and proc.poll() is None  # the run outlasted the probe and the scrape
     result = finish(proc)
     ticks = telemetry_ticks(out)
     fields = ("waiting", "running", "kv", "hits")
@@ -181,6 +186,11 @@ def signals_check(args, out: str, rows: int) -> None:
     failures += [f"no tick carried {field}" for field in expect["gauges"] if not seen[field]]
     if result.get("exit") != 0:
         failures.append(f"run exited {result.get('exit')}")
+    ok, failed = result.get("rows_processed"), result.get("rows_failed")
+    if (ok, failed) != (rows, 0):
+        failures.append(f"{ok} of {rows} rows ok, {failed} failed")
+    if not loaded:
+        failures.append("the run ended before the probe and scrape: they did not read a loaded engine")
     record = {"check": "signals", "engine": args.engine, "pass": not failures, "failures": failures,
               "wall_s": round(time.time() - t0, 1), "ticks": len(ticks), "seen": seen, **found, **result}
     print(json.dumps(record), flush=True)
@@ -209,7 +219,11 @@ def checks(args) -> None:
     partial = written(out)["rows"]
     result = finish(start_run(args, out, rows, "auto", 64))
     extra = {"first_exit": interrupted["exit"], "rows_before_resume": partial}
-    missed = [] if interrupted["exit"] != 0 else ["the interrupt came after the first run ended"]
+    missed = []
+    if interrupted["exit"] not in SIGINT_EXITS:
+        missed.append(f"the first run exited {interrupted['exit']}, not by the interrupt")
+    if not 0 < partial < rows:
+        missed.append(f"{partial} of {rows} rows before the resume: the interrupt did not land mid-run")
     report("resume", rows, t0, {**result, **extra}, out, missed)
 
     out, t0 = fresh(), time.time()

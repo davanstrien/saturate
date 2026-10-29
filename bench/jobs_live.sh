@@ -52,6 +52,7 @@ echo "engine $ENGINE ready; /metrics HTTP $(curl -s -o /dev/null -w '%{http_code
 
 /work/v/bin/python bench/live_checks.py --endpoint http://127.0.0.1:8000/v1 --model "$MODEL" \
   --engine "$ENGINE" --kind "$KIND" 2>"$OUT/checks.stderr" | tee "$OUT/checks.jsonl"
+CHECKS_EXIT=${PIPESTATUS[0]}
 cp /tmp/engine-restart.log "$OUT/" 2>/dev/null || true
 
 echo "##### summary"
@@ -61,7 +62,9 @@ records = [json.loads(line) for line in open(sys.argv[1]) if line.startswith("{"
 for r in records:
     print(f"{r['check']:15} {'PASS' if r['pass'] else 'FAIL'}  {r.get('failures') or ''}")
 print(f"{sum(r['pass'] for r in records)}/{len(records)} passed")
+sys.exit(0 if len(records) == 5 and all(r["pass"] for r in records) else 1)
 PY
+SUMMARY_EXIT=$?
 
 if [ -n "${HF_TOKEN:-}" ]; then
   uv run -q --no-project --with huggingface_hub python - "$OUT" "$RESULTS_URI" <<'PY'
@@ -75,3 +78,6 @@ for name in os.listdir(out):
 print(f"results: {dest}/")
 PY
 fi
+
+# the Job fails when a check failed, crashed, or did not run (after the upload above)
+[ "$CHECKS_EXIT" -eq 0 ] && [ "$SUMMARY_EXIT" -eq 0 ] || { echo "live checks FAILED"; exit 1; }

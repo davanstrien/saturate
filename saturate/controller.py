@@ -238,8 +238,9 @@ class Auto:
        is skipped; there is no move down at a backpressure ceiling (nothing waits there).
 
     A cut during a trial counts as a failed trial: the window goes no higher than where the
-    trial began (except a queue cut, which steps by what the gauge shows). Every rule is a pure
-    function of (Auto, State, Obs, limit) in RULES; the state is frozen dataclasses (State, and
+    trial began (except a queue cut, which steps by what the gauge shows). Every rule in RULES is
+    a sans-IO function of (Auto, State, Obs, limit) (the only thing it changes is the jitter's
+    random generator, auto.rng); the state is frozen dataclasses (State, and
     its phase: Steady, Trial or Settling). Durations are integrated in seconds from the
     observed `tick_s` (TICK_S when absent).
     """
@@ -419,8 +420,9 @@ def when(condition: Condition, action: Action) -> Rule:
             return action(auto, state, obs, limit)
         return None
 
-    names = (getattr(part, "__name__", repr(part)) for part in (condition, action))
-    rule.__name__ = "when({}, {})".format(*names)  # readable in a traceback
+    condition_name = getattr(condition, "__name__", repr(condition))
+    action_name = getattr(action, "__name__", repr(action))
+    rule.__name__ = f"when({condition_name}, {action_name})"  # readable when RULES is printed
     return rule
 
 
@@ -434,7 +436,7 @@ def hold(reason: str) -> Action:
 
 
 def halve(reason: str) -> Action:
-    """Cut the window to half."""
+    """Cut to half the window, through Auto.cut (bounds, and a failed trial's handling)."""
     def action(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
         return auto.cut(state, obs, limit, limit // 2, reason)
 
@@ -467,7 +469,7 @@ def input_bound(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
     return obs.input_bound
 
 
-def queue_over_target(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
+def queue_above_band(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
     """More waiting than the band allows, once anything has completed (a cold engine queues the
     whole initial window)."""
     return state.acked_ever and obs.waiting is not None and obs.waiting > auto.hi
@@ -477,8 +479,10 @@ def trial_open(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
     return isinstance(state.phase, Trial)
 
 
-def underused(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
-    """Under 80% of the window in flight (the source sets the pace), or a queue in band."""
+def underused_or_queue_in_band(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
+    """Under 80% of the window in flight (the source sets the pace), or a queue at or above the
+    band's lower bound: a queue in band, or (before the first completion, when queue_above_band
+    does not apply yet) above it."""
     headroom = obs.waiting is None or obs.waiting < auto.lo
     return not (headroom and obs.inflight >= int(limit * 0.8))
 
@@ -579,8 +583,8 @@ RULES: tuple[Rule, ...] = (
     when(kv_full, halve("cut:kv")),
     when(stalled, halve("cut:stall")),
     when(input_bound, hold("hold:input_bound")),
-    when(queue_over_target, step_down_by_queue),
+    when(queue_above_band, step_down_by_queue),
     when(trial_open, judge_trial),
-    when(underused, hold("hold")),
+    when(underused_or_queue_in_band, hold("hold")),
     when(always, open_trial),
 )

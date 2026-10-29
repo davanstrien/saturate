@@ -100,8 +100,9 @@ The same search runs with or without gauges: gauges feed the cuts below, and no 
 while the engine's queue stands at or above the band's low end.
 
 Per tick, the first rule that applies wins and names itself as the tick's `reason` (telemetry
-§6); `Stats.cut_reasons` counts the `cut:*` ones. Each rule is a pure function in
-`saturate/controller.py`'s `RULES`, over a frozen `State` whose phase is `Steady`, `Trial` or
+§6); `Stats.cut_reasons` counts the `cut:*` ones. Each rule is a sans-IO function
+(it changes nothing but the jitter's `auto.rng`) in `saturate/controller.py`'s `RULES`, built from
+`when(condition, action)`, over a frozen `State` whose phase is `Steady`, `Trial` or
 `Settling`:
 
 ```mermaid

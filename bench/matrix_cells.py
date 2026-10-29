@@ -50,62 +50,180 @@ def vllm(model: str, *flags: str) -> str:
 CELLS: tuple[Cell, ...] = (
     # small text model, three engines, three output shapes
     Cell("small-short-vllm", "small", "a10g-small", VLLM_IMAGE, SMALL, vllm(SMALL), ["--kind", "chat"]),
-    Cell("small-long-vllm", "small", "a10g-small", VLLM_IMAGE, SMALL, vllm(SMALL),
-         ["--kind", "chat", "--max-tokens", "512", "--prompt", STORY, "--rows", "1500"]),
-    Cell("small-prompt-vllm", "small", "a10g-small", VLLM_IMAGE, SMALL, vllm(SMALL),
-         ["--kind", "long-prompt", "--rows", "2000"]),
-    Cell("small-short-sglang", "small", "a10g-small", SGLANG_IMAGE, SMALL,
-         f"python3 -m sglang.launch_server --model-path {SMALL} --port 8000 --host 127.0.0.1 "
-         "--mem-fraction-static 0.7 --enable-metrics", ["--kind", "chat"]),
-    Cell("small-short-llamacpp", "small", "a10g-small", LLAMACPP_IMAGE, SMALL,
-         "env LD_LIBRARY_PATH=/app /app/llama-server --hf-repo Qwen/Qwen2.5-0.5B-Instruct-GGUF "
-         "--hf-file qwen2.5-0.5b-instruct-q8_0.gguf --port 8000 --host 127.0.0.1 -ngl 99 "
-         "--parallel 8 -c 32768 --metrics",
-         ["--kind", "chat", "--rows", "1500", "--fixed", "4,8,16,32,64"]),
+    Cell(
+        "small-long-vllm",
+        "small",
+        "a10g-small",
+        VLLM_IMAGE,
+        SMALL,
+        vllm(SMALL),
+        ["--kind", "chat", "--max-tokens", "512", "--prompt", STORY, "--rows", "1500"],
+    ),
+    Cell(
+        "small-prompt-vllm",
+        "small",
+        "a10g-small",
+        VLLM_IMAGE,
+        SMALL,
+        vllm(SMALL),
+        ["--kind", "long-prompt", "--rows", "2000"],
+    ),
+    Cell(
+        "small-short-sglang",
+        "small",
+        "a10g-small",
+        SGLANG_IMAGE,
+        SMALL,
+        f"python3 -m sglang.launch_server --model-path {SMALL} --port 8000 --host 127.0.0.1 "
+        "--mem-fraction-static 0.7 --enable-metrics",
+        ["--kind", "chat"],
+    ),
+    Cell(
+        "small-short-llamacpp",
+        "small",
+        "a10g-small",
+        LLAMACPP_IMAGE,
+        SMALL,
+        "env LD_LIBRARY_PATH=/app /app/llama-server --hf-repo Qwen/Qwen2.5-0.5B-Instruct-GGUF "
+        "--hf-file qwen2.5-0.5b-instruct-q8_0.gguf --port 8000 --host 127.0.0.1 -ngl 99 "
+        "--parallel 8 -c 32768 --metrics",
+        ["--kind", "chat", "--rows", "1500", "--fixed", "4,8,16,32,64"],
+    ),
     # the same engines in steady state: about 2 minutes per run at the best window, so the
     # ramp from Auto's start is a small share (the cells above measure short runs)
-    Cell("steady-short-vllm", "small", "a10g-small", VLLM_IMAGE, SMALL, vllm(SMALL),
-         ["--kind", "chat", "--rows", "35000", "--fixed", "128,256,512,1024"]),
-    Cell("steady-long-vllm", "small", "a10g-small", VLLM_IMAGE, SMALL, vllm(SMALL),
-         ["--kind", "chat", "--max-tokens", "512", "--prompt", STORY, "--rows", "6000",
-          "--fixed", "128,256,512,1024"]),
+    Cell(
+        "steady-short-vllm",
+        "small",
+        "a10g-small",
+        VLLM_IMAGE,
+        SMALL,
+        vllm(SMALL),
+        ["--kind", "chat", "--rows", "35000", "--fixed", "128,256,512,1024"],
+    ),
+    Cell(
+        "steady-long-vllm",
+        "small",
+        "a10g-small",
+        VLLM_IMAGE,
+        SMALL,
+        vllm(SMALL),
+        [
+            "--kind",
+            "chat",
+            "--max-tokens",
+            "512",
+            "--prompt",
+            STORY,
+            "--rows",
+            "6000",
+            "--fixed",
+            "128,256,512,1024",
+        ],
+    ),
     # --max-running-requests 256: at SGLang's default cap, 1024 requests in flight run the
     # repetition-penalty buffers out of memory on a 24 GB GPU (engine-side OOM, 2026-10-29)
-    Cell("steady-short-sglang", "small", "a10g-small", SGLANG_IMAGE, SMALL,
-         f"python3 -m sglang.launch_server --model-path {SMALL} --port 8000 --host 127.0.0.1 "
-         "--mem-fraction-static 0.7 --max-running-requests 256 --enable-metrics",
-         ["--kind", "chat", "--rows", "30000", "--fixed", "128,256,512,1024"]),
+    Cell(
+        "steady-short-sglang",
+        "small",
+        "a10g-small",
+        SGLANG_IMAGE,
+        SMALL,
+        f"python3 -m sglang.launch_server --model-path {SMALL} --port 8000 --host 127.0.0.1 "
+        "--mem-fraction-static 0.7 --max-running-requests 256 --enable-metrics",
+        ["--kind", "chat", "--rows", "30000", "--fixed", "128,256,512,1024"],
+    ),
     # embeddings
-    Cell("embed-tei", "small", "a10g-small", TEI_IMAGE, "BAAI/bge-small-en-v1.5",
-         "text-embeddings-router --model-id BAAI/bge-small-en-v1.5 --port 8000 --hostname 127.0.0.1",
-         ["--kind", "embeddings", "--rows", "20000", "--fixed", "32,64,128,256,512,1024"]),
+    Cell(
+        "embed-tei",
+        "small",
+        "a10g-small",
+        TEI_IMAGE,
+        "BAAI/bge-small-en-v1.5",
+        "text-embeddings-router --model-id BAAI/bge-small-en-v1.5 --port 8000 --hostname 127.0.0.1",
+        ["--kind", "embeddings", "--rows", "20000", "--fixed", "32,64,128,256,512,1024"],
+    ),
     # images: one generated image per row, a multimodal model
-    Cell("image-4b-vllm", "small", "a10g-large", VLLM_IMAGE, "Qwen/Qwen3.5-4B",
-         vllm("Qwen/Qwen3.5-4B", "--max-model-len 8192"),
-         ["--kind", "image", "--rows", "1500", "--no-think", "--prepare-workers", "4"]),
+    Cell(
+        "image-4b-vllm",
+        "small",
+        "a10g-large",
+        VLLM_IMAGE,
+        "Qwen/Qwen3.5-4B",
+        vllm("Qwen/Qwen3.5-4B", "--max-model-len 8192"),
+        ["--kind", "image", "--rows", "1500", "--no-think", "--prepare-workers", "4"],
+    ),
     # a mid-size model on one bigger GPU
-    Cell("mid-short-vllm", "small", "l40sx1", VLLM_IMAGE, "Qwen/Qwen3.5-9B",
-         vllm("Qwen/Qwen3.5-9B", "--max-model-len 8192"), ["--kind", "chat", "--no-think"]),
+    Cell(
+        "mid-short-vllm",
+        "small",
+        "l40sx1",
+        VLLM_IMAGE,
+        "Qwen/Qwen3.5-9B",
+        vllm("Qwen/Qwen3.5-9B", "--max-model-len 8192"),
+        ["--kind", "chat", "--no-think"],
+    ),
     # large models (the 2026-10-29 pilot cells, with more rows so the ramp is a small share)
-    Cell("large-short-vllm", "large", "a100-large", VLLM_IMAGE, "Qwen/Qwen3.8-27B",
-         vllm("Qwen/Qwen3.8-27B", "--max-model-len 8192"), ["--kind", "chat", "--no-think"]),
-    Cell("large-long-vllm", "large", "a100-large", VLLM_IMAGE, "Qwen/Qwen3.8-27B",
-         vllm("Qwen/Qwen3.8-27B", "--max-model-len 8192"),
-         ["--kind", "chat", "--no-think", "--max-tokens", "512", "--prompt", STORY, "--rows", "1500"]),
-    Cell("large-tp2-vllm", "large", "h200x2", VLLM_IMAGE, "Qwen/Qwen3.8-27B",
-         vllm("Qwen/Qwen3.8-27B", "--max-model-len 8192 --tensor-parallel-size 2"),
-         ["--kind", "chat", "--no-think", "--rows", "30000", "--fixed", "128,256,512,1024,2048"]),
+    Cell(
+        "large-short-vllm",
+        "large",
+        "a100-large",
+        VLLM_IMAGE,
+        "Qwen/Qwen3.8-27B",
+        vllm("Qwen/Qwen3.8-27B", "--max-model-len 8192"),
+        ["--kind", "chat", "--no-think"],
+    ),
+    Cell(
+        "large-long-vllm",
+        "large",
+        "a100-large",
+        VLLM_IMAGE,
+        "Qwen/Qwen3.8-27B",
+        vllm("Qwen/Qwen3.8-27B", "--max-model-len 8192"),
+        ["--kind", "chat", "--no-think", "--max-tokens", "512", "--prompt", STORY, "--rows", "1500"],
+    ),
+    Cell(
+        "large-tp2-vllm",
+        "large",
+        "h200x2",
+        VLLM_IMAGE,
+        "Qwen/Qwen3.8-27B",
+        vllm("Qwen/Qwen3.8-27B", "--max-model-len 8192 --tensor-parallel-size 2"),
+        ["--kind", "chat", "--no-think", "--rows", "30000", "--fixed", "128,256,512,1024,2048"],
+    ),
 )
 
 
 def launch(cells: list[Cell], ref: str, branch: str, dry_run: bool) -> None:
     url = SCRIPT_URL.format(branch=branch)
     for cell in cells:
-        cmd = ["hf", "jobs", "run", "-d", "--flavor", cell.flavor, "--timeout", "90m",
-               "--secrets", "HF_TOKEN", "-e", f"CELL={cell.name}", "-e", f"MODEL={cell.model}",
-               "-e", f"ENGINE_CMD={cell.engine_cmd}", "-e", f"CELL_ARGS={shlex.join(cell.args)}",
-               "-e", f"REF={ref}", "-e", f"HARNESS_REF=origin/{branch}", cell.image,
-               "bash", "-c", f"curl -sLo /tmp/m.sh {shlex.quote(url)} && bash /tmp/m.sh"]
+        cmd = [
+            "hf",
+            "jobs",
+            "run",
+            "-d",
+            "--flavor",
+            cell.flavor,
+            "--timeout",
+            "90m",
+            "--secrets",
+            "HF_TOKEN",
+            "-e",
+            f"CELL={cell.name}",
+            "-e",
+            f"MODEL={cell.model}",
+            "-e",
+            f"ENGINE_CMD={cell.engine_cmd}",
+            "-e",
+            f"CELL_ARGS={shlex.join(cell.args)}",
+            "-e",
+            f"REF={ref}",
+            "-e",
+            f"HARNESS_REF=origin/{branch}",
+            cell.image,
+            "bash",
+            "-c",
+            f"curl -sLo /tmp/m.sh {shlex.quote(url)} && bash /tmp/m.sh",
+        ]
         if dry_run:
             print(shlex.join(cmd))
             continue
@@ -131,8 +249,10 @@ def summarise(paths: list[str]) -> None:
                     record = json.loads(line)
                     key = (record["cell"], record.get("saturate", ""), record.get("harness", ""))
                     runs[key].append(record)
-    print(f"{'cell':22} {'sat/harness':15} {'auto rows/s':>11} {'best fixed':>16} {'ratio':>6}  "
-          "settles  cuts  dropped")
+    print(
+        f"{'cell':22} {'sat/harness':15} {'auto rows/s':>11} {'best fixed':>16} {'ratio':>6}  "
+        "settles  cuts  dropped"
+    )
     for (cell, revision, harness), records in sorted(runs.items()):
         version = f"{revision}/{harness}"
         dropped = sum(not complete(r) for r in records if r["arm"] != "warmup")
@@ -151,8 +271,10 @@ def summarise(paths: list[str]) -> None:
         cuts = collections.Counter()
         for r in auto:
             cuts.update(r.get("cut_reasons") or {})
-        print(f"{cell:22} {version:15} {auto_rate:11.1f} {best_arm:>9} {fixed[best_arm]:6.1f} "
-              f"{auto_rate / fixed[best_arm]:6.0%}  {settles}  {dict(cuts)}  {dropped}")
+        print(
+            f"{cell:22} {version:15} {auto_rate:11.1f} {best_arm:>9} {fixed[best_arm]:6.1f} "
+            f"{auto_rate / fixed[best_arm]:6.0%}  {settles}  {dict(cuts)}  {dropped}"
+        )
 
 
 def main() -> None:

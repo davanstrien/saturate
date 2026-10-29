@@ -32,8 +32,10 @@ import zlib
 
 from saturate import Auto, Fixed, pump
 
-WORDS = ("archive ledger river harbour engine signal library county parish volume letter map "
-         "survey census railway market council school chapel bridge mill canal station").split()
+WORDS = (
+    "archive ledger river harbour engine signal library county parish volume letter map "
+    "survey census railway market council school chapel bridge mill canal station"
+).split()
 
 
 def make_rows(args, label: str, rep: int) -> list[dict]:
@@ -79,12 +81,18 @@ def make_to_request(args):
             return {"model": args.model, "input": row["text"]}
         if args.kind == "image":
             url = image_data_url(row["seed"], args.image_size)
-            content = [{"type": "text", "text": row["text"]},
-                       {"type": "image_url", "image_url": {"url": url}}]
+            content = [
+                {"type": "text", "text": row["text"]},
+                {"type": "image_url", "image_url": {"url": url}},
+            ]
         else:
             content = row["text"]
-        return {"model": args.model, "max_tokens": args.max_tokens,
-                "messages": [{"role": "user", "content": content}], **extra}
+        return {
+            "model": args.model,
+            "max_tokens": args.max_tokens,
+            "messages": [{"role": "user", "content": content}],
+            **extra,
+        }
 
     return to_request
 
@@ -107,26 +115,50 @@ def telemetry_summary(out_dir: str) -> dict:
     kv = [t["kv"] for t in ticks if t.get("kv") is not None]
     preempts = [t["preempts"] for t in ticks if t.get("preempts") is not None]
     limits = [t["limit"] for t in ticks if t.get("limit") is not None]
-    return {"ticks": len(ticks), "kv_max": max(kv, default=None),
-            "kv_mean": round(statistics.mean(kv), 3) if kv else None,
-            "preempts": preempts[-1] - preempts[0] if preempts else None,
-            "limit_max": max(limits, default=None)}
+    return {
+        "ticks": len(ticks),
+        "kv_max": max(kv, default=None),
+        "kv_mean": round(statistics.mean(kv), 3) if kv else None,
+        "preempts": preempts[-1] - preempts[0] if preempts else None,
+        "limit_max": max(limits, default=None),
+    }
 
 
 def one_run(args, label: str, window, rep: int) -> dict:
     out_dir = tempfile.mkdtemp()
     route = "/embeddings" if args.kind == "embeddings" else "/chat/completions"
     t0 = time.time()
-    stats = pump(make_rows(args, label, rep), make_to_request(args), make_parse(args),
-                 endpoint=args.endpoint, output=out_dir, window=window, route=route,
-                 prepare_workers=args.prepare_workers)
+    stats = pump(
+        make_rows(args, label, rep),
+        make_to_request(args),
+        make_parse(args),
+        endpoint=args.endpoint,
+        output=out_dir,
+        window=window,
+        route=route,
+        prepare_workers=args.prepare_workers,
+    )
     wall = time.time() - t0
-    record = {"cell": args.cell, "model": args.model, "kind": args.kind, "arm": label, "rep": rep,
-              "rows": args.rows, "ok": stats.rows_processed, "failed": stats.rows_failed,
-              "wall_s": round(wall, 1), "rows_per_s": round(stats.rows_processed / wall, 2),
-              "tok_s": stats.tokens_per_sec, "final_limit": stats.final_limit,
-              "cut_reasons": stats.cut_reasons, "bound_by": stats.bound_by, "hints": stats.hints,
-              "saturate": args.label, "harness": args.harness, **telemetry_summary(out_dir)}
+    record = {
+        "cell": args.cell,
+        "model": args.model,
+        "kind": args.kind,
+        "arm": label,
+        "rep": rep,
+        "rows": args.rows,
+        "ok": stats.rows_processed,
+        "failed": stats.rows_failed,
+        "wall_s": round(wall, 1),
+        "rows_per_s": round(stats.rows_processed / wall, 2),
+        "tok_s": stats.tokens_per_sec,
+        "final_limit": stats.final_limit,
+        "cut_reasons": stats.cut_reasons,
+        "bound_by": stats.bound_by,
+        "hints": stats.hints,
+        "saturate": args.label,
+        "harness": args.harness,
+        **telemetry_summary(out_dir),
+    }
     print(json.dumps(record), flush=True)
     with open(args.out, "a") as f:
         f.write(json.dumps(record) + "\n")
@@ -141,16 +173,19 @@ def main() -> None:
     ap.add_argument("--kind", choices=["chat", "long-prompt", "image", "embeddings"], default="chat")
     ap.add_argument("--rows", type=int, default=3000)
     ap.add_argument("--max-tokens", type=int, default=64)
-    ap.add_argument("--prompt", default="Write one sentence about the number {i}.",
-                    help="chat prompt template; {i} is the row number")
+    ap.add_argument(
+        "--prompt",
+        default="Write one sentence about the number {i}.",
+        help="chat prompt template; {i} is the row number",
+    )
     ap.add_argument("--prompt-words", type=int, default=1500)
     ap.add_argument("--image-size", type=int, default=448)
     ap.add_argument("--prepare-workers", type=int, default=0, help="threads for to_request (image: 4)")
     ap.add_argument("--no-think", action="store_true", help="chat_template_kwargs enable_thinking=False")
-    ap.add_argument("--reps", type=int, default=2,
-                    help="rounds; each round runs every arm once, in a shuffled order")
-    ap.add_argument("--fixed", default="16,32,64,128,256,512",
-                    help="Fixed windows to sweep, comma-separated")
+    ap.add_argument(
+        "--reps", type=int, default=2, help="rounds; each round runs every arm once, in a shuffled order"
+    )
+    ap.add_argument("--fixed", default="16,32,64,128,256,512", help="Fixed windows to sweep, comma-separated")
     ap.add_argument("--no-warmup", action="store_true")
     ap.add_argument("--label", default="", help="recorded as `saturate`: the version under test")
     ap.add_argument("--harness", default="", help="recorded as `harness`: the bench/ revision")

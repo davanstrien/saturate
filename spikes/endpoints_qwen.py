@@ -48,21 +48,35 @@ def main() -> None:
     output = f"/tmp/pumpjack-ie-{arm}"
 
     def to_request(row: dict) -> dict:
-        return {"model": MODEL,
-                "messages": [{"role": "user", "content": row["instruction"]}],
-                "max_tokens": 150, "temperature": 0.7}
+        return {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": row["instruction"]}],
+            "max_tokens": 150,
+            "temperature": 0.7,
+        }
 
     def parse(row: dict, body: dict) -> dict:
         usage = body.get("usage") or {}
-        return {"instruction": row["instruction"], "category": row["category"],
-                "response": body["choices"][0]["message"]["content"],
-                "prompt_tokens": usage.get("prompt_tokens"),
-                "completion_tokens": usage.get("completion_tokens")}
+        return {
+            "instruction": row["instruction"],
+            "category": row["category"],
+            "response": body["choices"][0]["message"]["content"],
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+        }
 
     if arm == "warm":
         wait_for_health(endpoint, 900, headers=headers)
-    stats = pump(rows(N[arm]), to_request, parse, endpoint, output,
-                 headers=headers, window=Auto(initial=8), flush_every=100)
+    stats = pump(
+        rows(N[arm]),
+        to_request,
+        parse,
+        endpoint,
+        output,
+        headers=headers,
+        window=Auto(initial=8),
+        flush_every=100,
+    )
     print(f"IE_{arm.upper()} " + stats.to_json(), flush=True)
 
 

@@ -28,8 +28,7 @@ OUTPUT = "/tmp/pumpjack-tei-test"
 def batch_rows():
     from datasets import load_dataset
 
-    ds = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT",
-                      split="train", streaming=True)
+    ds = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train", streaming=True)
     buf, b = [], 0
     for ex in ds:
         text = (ex.get("text") or "")[:800]
@@ -54,14 +53,24 @@ def main() -> None:
         data = body["data"]
         if len(data) != len(row["texts"]):
             raise ValueError(f"expected {len(row['texts'])} embeddings, got {len(data)}")
-        return {"n_texts": len(data), "dim": len(data[0]["embedding"]),
-                "prompt_tokens": (body.get("usage") or {}).get("prompt_tokens")}
+        return {
+            "n_texts": len(data),
+            "dim": len(data[0]["embedding"]),
+            "prompt_tokens": (body.get("usage") or {}).get("prompt_tokens"),
+        }
 
     wait_for_health(endpoint, 900, headers=headers)
-    stats = pump(batch_rows(), to_request, parse, endpoint, OUTPUT,
-                 route="/embeddings", headers=headers,
-                 window=Auto(target_waiting=8, initial=4, max_limit=32),
-                 flush_every=25)
+    stats = pump(
+        batch_rows(),
+        to_request,
+        parse,
+        endpoint,
+        OUTPUT,
+        route="/embeddings",
+        headers=headers,
+        window=Auto(target_waiting=8, initial=4, max_limit=32),
+        flush_every=25,
+    )
     print("TEI_LOCAL " + stats.to_json(), flush=True)
 
 

@@ -39,10 +39,25 @@ SUITES = {
         # the default local flush (1000 rows or 10 s): what an out-of-the-box run pays
         "default-flush-w64": (0, ["--rows", "3000", "--window", "64"]),
         "latency50-w256": (50, ["--rows", "4000", "--window", "256"]),
-        "prep-cpu-4workers": (10, ["--rows", "1500", "--window", "64", "--prep-ms", "4",
-                                   "--prepare-workers", "4"]),
-        "slow-sink": (0, ["--rows", "6000", "--window", "256", "--output", "slowmem",
-                          "--write-delay-ms", "200", "--flush-every", "500"]),
+        "prep-cpu-4workers": (
+            10,
+            ["--rows", "1500", "--window", "64", "--prep-ms", "4", "--prepare-workers", "4"],
+        ),
+        "slow-sink": (
+            0,
+            [
+                "--rows",
+                "6000",
+                "--window",
+                "256",
+                "--output",
+                "slowmem",
+                "--write-delay-ms",
+                "200",
+                "--flush-every",
+                "500",
+            ],
+        ),
         "auto-ramp-200ms": (200, ["--rows", "2000", "--window", "auto"]),
     },
     # against a real engine (--endpoint); the prompt varies per row so the prefix cache cannot
@@ -58,19 +73,41 @@ SUITES = {
     "vllm": {
         "short-auto": (None, ["--rows", "3000", "--window", "auto", "--max-tokens", "64"]),
         "short-fixed256": (None, ["--rows", "3000", "--window", "256", "--max-tokens", "64"]),
-        "long-auto-initial4": (None, ["--rows", "600", "--window", "auto", "--initial", "4",
-                                      "--max-tokens", "512"]),
+        "long-auto-initial4": (
+            None,
+            ["--rows", "600", "--window", "auto", "--initial", "4", "--max-tokens", "512"],
+        ),
     },
     "smoke": {  # seconds, for checking the harness itself
         "overhead-w64": (0, ["--rows", "1000", "--window", "64"]),
-        "slow-sink": (0, ["--rows", "600", "--window", "64", "--output", "slowmem",
-                          "--write-delay-ms", "50", "--flush-every", "200"]),
+        "slow-sink": (
+            0,
+            [
+                "--rows",
+                "600",
+                "--window",
+                "64",
+                "--output",
+                "slowmem",
+                "--write-delay-ms",
+                "50",
+                "--flush-every",
+                "200",
+            ],
+        ),
     },
 }
 
 # metric -> True when higher is better (only used to label the report)
-METRICS = {"rows_per_s": True, "tokens_per_s": True, "cpu_ms_per_row": False, "loop_lag_max_s": False,
-           "loop_lag_mean_s": False, "first_durable_s": False, "peak_rss_mib": False}
+METRICS = {
+    "rows_per_s": True,
+    "tokens_per_s": True,
+    "cpu_ms_per_row": False,
+    "loop_lag_max_s": False,
+    "loop_lag_mean_s": False,
+    "first_durable_s": False,
+    "peak_rss_mib": False,
+}
 
 
 def sh(*cmd: str, **kw) -> str:
@@ -95,8 +132,12 @@ def build_arm(name: str, ref: str, workdir: pathlib.Path, python: str) -> dict:
 
 
 def start_server(python: str, latency_ms: float) -> tuple[subprocess.Popen, str]:
-    proc = subprocess.Popen([python, str(BENCH / "serve.py"), str(latency_ms)],
-                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    proc = subprocess.Popen(
+        [python, str(BENCH / "serve.py"), str(latency_ms)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
     endpoint = proc.stdout.readline().strip()
     if not endpoint.startswith("http"):
         proc.kill()
@@ -106,9 +147,14 @@ def start_server(python: str, latency_ms: float) -> tuple[subprocess.Popen, str]
 
 def run_workload(arm: dict, endpoint: str, args: list[str], cwd: str) -> dict:
     # TMPDIR=cwd: a local output lands in the A/B's own work dir, removed with it
-    out = subprocess.run([arm["python"], str(BENCH / "workload.py"), "--endpoint", endpoint, *args],
-                         capture_output=True, text=True, cwd=cwd, timeout=900,
-                         env={**os.environ, "TMPDIR": cwd})
+    out = subprocess.run(
+        [arm["python"], str(BENCH / "workload.py"), "--endpoint", endpoint, *args],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        timeout=900,
+        env={**os.environ, "TMPDIR": cwd},
+    )
     if out.returncode != 0:
         raise RuntimeError(f"{arm['name']} workload failed:\n{out.stderr[-2000:]}")
     return json.loads(out.stdout.strip().splitlines()[-1])
@@ -117,8 +163,11 @@ def run_workload(arm: dict, endpoint: str, args: list[str], cwd: str) -> dict:
 def paired_ratios(base: list[dict], head: list[dict], metric: str) -> list[float]:
     """head/base for each rep: the two arms of a rep ran back to back, so machine drift between
     reps cancels within each ratio."""
-    return [h[metric] / b[metric] for b, h in zip(base, head, strict=True)
-            if b.get(metric) and h.get(metric) is not None]
+    return [
+        h[metric] / b[metric]
+        for b, h in zip(base, head, strict=True)
+        if b.get(metric) and h.get(metric) is not None
+    ]
 
 
 def bootstrap_ratio(base: list[float], head: list[float], n: int = 2000, seed: int = 0):
@@ -138,8 +187,10 @@ def bootstrap_ratio(base: list[float], head: list[float], n: int = 2000, seed: i
 def summarise(results: dict) -> tuple[list[str], dict]:
     """Per scenario and metric: each arm's median, the median of the per-rep paired ratios with
     their range (the headline), and the bootstrap interval of the ratio of medians (secondary)."""
-    lines = ["| scenario | metric | base median | head median | paired head/base (min–max) "
-             "| bootstrap 95% |", "|---|---|---|---|---|---|"]
+    lines = [
+        "| scenario | metric | base median | head median | paired head/base (min–max) | bootstrap 95% |",
+        "|---|---|---|---|---|---|",
+    ]
     summary: dict = {}
     for scenario, arms in results.items():
         for metric in METRICS:
@@ -151,11 +202,18 @@ def summarise(results: dict) -> tuple[list[str], dict]:
             mb, mh = statistics.median(base), statistics.median(head)
             lo, hi = bootstrap_ratio(base, head)
             summary.setdefault(scenario, {})[metric] = {
-                "base_median": mb, "head_median": mh, "paired_median": statistics.median(pairs),
-                "paired_min": min(pairs), "paired_max": max(pairs), "bootstrap_95": [lo, hi]}
-            lines.append(f"| {scenario} | {metric} | {mb:.3g} | {mh:.3g} | "
-                         f"{statistics.median(pairs):.3f} ({min(pairs):.3f}–{max(pairs):.3f}) | "
-                         f"{lo:.3f}–{hi:.3f} |")
+                "base_median": mb,
+                "head_median": mh,
+                "paired_median": statistics.median(pairs),
+                "paired_min": min(pairs),
+                "paired_max": max(pairs),
+                "bootstrap_95": [lo, hi],
+            }
+            lines.append(
+                f"| {scenario} | {metric} | {mb:.3g} | {mh:.3g} | "
+                f"{statistics.median(pairs):.3f} ({min(pairs):.3f}–{max(pairs):.3f}) | "
+                f"{lo:.3f}–{hi:.3f} |"
+            )
     return lines, summary
 
 
@@ -168,18 +226,28 @@ def main() -> None:
     ap.add_argument("--python", default="3.13")
     ap.add_argument("--out", default=None, help="JSON results path (default: bench/results/...)")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--warmup", type=int, default=1,
-                    help="discarded runs per scenario and arm before the measured reps (first-request "
-                         "costs: imports, an engine's CUDA-graph capture)")
-    ap.add_argument("--endpoint", default=None,
-                    help="a running engine to measure against instead of the stub servers")
+    ap.add_argument(
+        "--warmup",
+        type=int,
+        default=1,
+        help="discarded runs per scenario and arm before the measured reps (first-request "
+        "costs: imports, an engine's CUDA-graph capture)",
+    )
+    ap.add_argument(
+        "--endpoint", default=None, help="a running engine to measure against instead of the stub servers"
+    )
     ap.add_argument("--model", default=None, help="model name for --endpoint")
-    ap.add_argument("--extra", default="", help="extra workload arguments for every scenario, e.g. "
-                    "'--output-uri hf://buckets/me/scratch'")
+    ap.add_argument(
+        "--extra",
+        default="",
+        help="extra workload arguments for every scenario, e.g. '--output-uri hf://buckets/me/scratch'",
+    )
     args = ap.parse_args()
     if os.environ.get("UV_NO_CONFIG") != "1":
-        print("warning: UV_NO_CONFIG is not 1: a user-level uv config may change what gets installed",
-              file=sys.stderr)
+        print(
+            "warning: UV_NO_CONFIG is not 1: a user-level uv config may change what gets installed",
+            file=sys.stderr,
+        )
 
     suite = SUITES[args.suite]
     if args.endpoint is None and any(latency is None for latency, _ in suite.values()):
@@ -188,10 +256,14 @@ def main() -> None:
     workdir = pathlib.Path(tempfile.mkdtemp(prefix="saturate-ab-"))
     arms, servers = [], {}
     try:
-        arms = [build_arm("base", args.base, workdir, args.python),
-                build_arm("head", args.head, workdir, args.python)]
-        print(f"base {arms[0]['sha']}  head {arms[1]['sha']}  suite {args.suite}  reps {args.reps}",
-              file=sys.stderr)
+        arms = [
+            build_arm("base", args.base, workdir, args.python),
+            build_arm("head", args.head, workdir, args.python),
+        ]
+        print(
+            f"base {arms[0]['sha']}  head {arms[1]['sha']}  suite {args.suite}  reps {args.reps}",
+            file=sys.stderr,
+        )
         if args.endpoint is None:
             for latency in sorted({lat for lat, _ in suite.values()}):
                 servers[latency] = start_server(arms[1]["python"], latency)
@@ -213,19 +285,33 @@ def main() -> None:
                     endpoint = args.endpoint or servers[latency][1]
                     r = run_workload(arm, endpoint, wl_args + extra, cwd=str(workdir))
                     results[name][arm["name"]].append(r)
-                    print(f"rep {rep + 1}/{args.reps} {name:<20} {arm['name']:<4} "
-                          f"{r['rows_per_s']:>9} rows/s  {r['cpu_ms_per_row']:.3f} cpu ms/row",
-                          file=sys.stderr)
+                    print(
+                        f"rep {rep + 1}/{args.reps} {name:<20} {arm['name']:<4} "
+                        f"{r['rows_per_s']:>9} rows/s  {r['cpu_ms_per_row']:.3f} cpu ms/row",
+                        file=sys.stderr,
+                    )
         lines, summary = summarise(results)
         print("\n".join(lines))
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         out = pathlib.Path(args.out or BENCH / "results" / f"{stamp}-{arms[0]['sha']}-{arms[1]['sha']}.json")
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps({
-            "base": {k: arms[0][k] for k in ("ref", "sha")}, "head": {k: arms[1][k] for k in ("ref", "sha")},
-            "suite": args.suite, "reps": args.reps, "warmup": args.warmup, "python": args.python,
-            "platform": sys.platform, "machine": os.uname().machine, "summary": summary,
-            "runs": results}, indent=1))
+        out.write_text(
+            json.dumps(
+                {
+                    "base": {k: arms[0][k] for k in ("ref", "sha")},
+                    "head": {k: arms[1][k] for k in ("ref", "sha")},
+                    "suite": args.suite,
+                    "reps": args.reps,
+                    "warmup": args.warmup,
+                    "python": args.python,
+                    "platform": sys.platform,
+                    "machine": os.uname().machine,
+                    "summary": summary,
+                    "runs": results,
+                },
+                indent=1,
+            )
+        )
         print(f"\nwrote {out}", file=sys.stderr)
     finally:
         for proc, _ in servers.values():
@@ -233,8 +319,9 @@ def main() -> None:
             proc.wait(5)
         for arm in arms:
             if arm["ref"] != ".":
-                subprocess.run(["git", "-C", str(REPO), "worktree", "remove", "--force", arm["src"]],
-                               capture_output=True)
+                subprocess.run(
+                    ["git", "-C", str(REPO), "worktree", "remove", "--force", arm["src"]], capture_output=True
+                )
         shutil.rmtree(workdir, ignore_errors=True)
 
 

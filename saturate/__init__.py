@@ -14,7 +14,6 @@ import dataclasses
 import importlib.metadata
 import json
 import logging
-import numbers
 import os
 import time
 from collections.abc import Callable, Iterable
@@ -87,26 +86,36 @@ PUMP_SETTINGS = (
     _seconds("read_timeout", optional=True),  # 0: no read timer; None needs retry_budget_s
     _seconds("retry_budget_s", optional=True, infinite=True),  # 0: the first attempt only
     Setting("prepare_workers", whole=True, low=0),  # threads; 0 runs to_request on the loop
-    Setting("fail_fast", whole=True, low=0),  # 0 disables the check
+    Setting("fail_fast", whole=True),  # 0 or less disables the check
 )
 TIMEOUT_PHASES = tuple(_seconds(phase, optional=True) for phase in ("connect", "write", "pool"))
 SIGNAL_SOURCES = ("auto", "none")
 
 
-def _native(value):
-    """An accepted number as Python's own int or float (a Decimal or a NumPy scalar breaks the
-    float arithmetic and the thread limiter downstream); None stays None."""
-    if value is None or isinstance(value, int):
-        return value
-    if isinstance(value, numbers.Integral):
+def _native(setting: Setting, value):
+    """An accepted number as Python's own int (a count) or float (a duration): a Decimal or a
+    NumPy scalar breaks the float arithmetic and the thread limiter downstream. A duration
+    that does not survive as a float (it overflows, or a positive value rounds to 0, which
+    would mean no timer) is refused. None stays None."""
+    if value is None:
+        return None
+    if setting.whole:
         return int(value)
-    return float(value)
+    try:
+        seconds = float(value)
+    except OverflowError:
+        raise ValueError(f"pump() requires {setting.requirement()}, not {value!r} (too large)") from None
+    if (value > 0 and seconds == 0) or not setting.allows(seconds):
+        raise ValueError(f"pump() requires {setting.requirement()}, not {value!r} (as a float: {seconds!r})")
+    return seconds
 
 
 def _check_pump_settings(flush_every, read_timeout, retry_budget_s, prepare_workers, fail_fast,
                          timeouts, signal_source) -> dict:
-    """Refuse a pump() setting that cannot work before the run starts, with the setting's name,
-    its range and the value given. Returns the numbers as Python ints and floats."""
+    """Refuse a pump() setting outside its range before the run starts, with the setting's name,
+    the range and the value given. Negative counts and durations, fractional counts and infinite
+    timeouts (an infinite HTTP timeout fails every request: 0 or None means no timer) are
+    refused even where a run would have gone on. Returns the numbers as Python ints and floats."""
     numbers_given = dict(flush_every=flush_every, read_timeout=read_timeout, retry_budget_s=retry_budget_s,
                          prepare_workers=prepare_workers, fail_fast=fail_fast)
     settings.check("pump()", PUMP_SETTINGS, numbers_given)
@@ -121,10 +130,12 @@ def _check_pump_settings(flush_every, read_timeout, retry_budget_s, prepare_work
                              "read_timeout")
         settings.check("pump() timeouts", TIMEOUT_PHASES,
                        {phase.name: timeouts.get(phase.name) for phase in TIMEOUT_PHASES})
-        timeouts = {phase: _native(value) for phase, value in timeouts.items()}
+        by_name = {phase.name: phase for phase in TIMEOUT_PHASES}
+        timeouts = {phase: _native(by_name[phase], value) for phase, value in timeouts.items()}
     if signal_source not in SIGNAL_SOURCES:
         raise ValueError(f"pump() requires signal_source in {SIGNAL_SOURCES}, not {signal_source!r}")
-    return {name: _native(value) for name, value in numbers_given.items()} | dict(timeouts=timeouts)
+    native = {setting.name: _native(setting, numbers_given[setting.name]) for setting in PUMP_SETTINGS}
+    return native | dict(timeouts=timeouts)
 
 
 class RowsLostError(RuntimeError):
@@ -244,8 +255,8 @@ def pump(
         them. 0 disables the check. Off when retry_errors=True: that input is mostly rows that
         already failed, and some rows fail for good.
 
-    A setting that cannot work (read_timeout=-1, prepare_workers=2.5, signal_source="metrics", ...)
-    raises ValueError before the run starts, naming the setting and the range it needs.
+    A setting outside its range (read_timeout=-1, prepare_workers=2.5, signal_source="metrics",
+    ...) raises ValueError before the run starts, naming the setting and the range it needs.
     """
     checked = _check_pump_settings(flush_every, read_timeout, retry_budget_s, prepare_workers,
                                    fail_fast, timeouts, signal_source)

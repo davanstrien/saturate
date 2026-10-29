@@ -78,7 +78,8 @@ Terms used below:
   snapshot and returns the new window limit.
 - **gauges** — engine-reported queue metrics scraped from `/metrics`: `waiting`
   (queued requests), `kv` (KV-cache utilization, 0–1), `hits` (prefix-cache hit
-  rate). No gauges = **blind mode** (successes, errors/timeouts and delivered throughput only).
+  rate: SGLang's gauge; on vLLM, new hits over new queries between two scrapes of its
+  `prefix_cache_{queries,hits}_total` counters). No gauges = **blind mode** (successes, errors/timeouts and delivered throughput only).
 - **band** — the target range for the engine's `waiting` queue:
   `[max(1, target_waiting//4), target_waiting*2]` (default target 8 → band [2, 16]). Small
   and positive: the engine always has work, never a runaway backlog.

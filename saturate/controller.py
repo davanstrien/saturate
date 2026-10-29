@@ -34,7 +34,7 @@ class Obs:
     successes: int = 0  # completed requests since last tick
     input_bound: bool = False  # admission starved by the source, not the engine
     kv: float | None = None  # kv-cache utilisation gauge (0-1)
-    hits: float | None = None  # prefix-cache hit rate gauge (0-1)
+    hits: float | None = None  # prefix-cache hit rate (0-1): SGLang's gauge, or derived from vLLM's counters
     tok_s: float | None = None  # delivered tokens/sec this tick; 0.0 = nothing delivered, None = unobservable
     preempts: int | None = None  # cumulative preemption count
     latency_s: float | None = None  # p50 duration of recent successful attempts (None = unknown)

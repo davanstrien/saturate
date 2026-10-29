@@ -60,7 +60,7 @@ errored id is called healing; readers let the success win.
 |---|---|
 | `controller.py` | pure `decide(obs, limit) -> new_limit`: `Fixed(n)` or `Auto` (below) |
 | `window.py` | asyncio admission gate whose limit the controller adjusts at runtime |
-| `signals.py` | `SignalSource`: engine `/metrics` scrape (vLLM/SGLang/llama.cpp/TRT-LLM dialects, TEI queue-depth only) or none |
+| `signals.py` | `SignalSource`: engine metrics scrape (vLLM/SGLang/llama.cpp/TRT-LLM dialects, TEI queue-depth only) or none; the startup `probe` (engine, capacity, metrics on?) |
 | `transport.py` | typed `Request` (json ⊕ multipart), retry ladder, circuit breaker |
 | `core.py` | `AdaptiveLimiter` (slot/observe) → `AdaptiveClient` (+HTTP) → `through()` (stream of `Done` results — id, row, output, error, token usage) |
 | `source.py` | `stream` (lazy normalize, content-hash ids), `skip_done` (anti-join + dedup), `shard_of` / `shard_select` (fan-out by a hash of the id) |
@@ -159,14 +159,26 @@ pins it). Set `max_limit`, or expose the engine's /metrics.
 best fixed window: past a flat stretch that starts below the initial window, a gain just over
 `improve` can read as flat, and the climber stays below it.
 
-Before the first request, `AdaptiveClient` reads the engine's capacity once
-(`signals.read_capacity`: SGLang `/v1/loads` or `/get_server_info` `max_running_requests`,
-llama.cpp `/props` `total_slots`, TEI `/info` `max_concurrent_requests`; vLLM reports none).
-Unless the caller set `initial`, `Auto` starts there (`Auto.begin`, once per run, from the
-caller's unchanged configuration): above it by min(capacity, 2 × target_waiting) for an engine
-that queues the rest, so a waiting request refills a free slot; exactly there, and never above
-it, for TEI, which rejects the rest with 429s. The sources are asked at once, with 2 s
-timeouts, and each is read by its engine's own response shape.
+Before the first request, `AdaptiveClient` probes the engine once (`signals.probe`, unless
+signals are off) for three things. Its capacity: SGLang `/v1/loads` or `/get_server_info`
+`max_running_requests`, llama.cpp `/props` `total_slots`, TEI `/info`
+`max_concurrent_requests`, TensorRT-LLM `/server_info` `max_batch_size` (1.3 and later); vLLM
+reports none. Its engine, from the same response shapes. And, on llama.cpp, whether its metrics
+endpoint is on (`/props` `endpoint_metrics`). The paths are asked at once, with 2 s timeouts,
+and each is read by its engine's own response shape.
+
+Unless the caller set `initial`, `Auto` starts at the capacity (`Auto.begin`, once per run, from
+the caller's unchanged configuration): above it by min(capacity, 2 × target_waiting) for an
+engine that queues the rest, so a waiting request refills a free slot; exactly there, and never
+above it, for TEI, which rejects the rest with 429s.
+
+The scrape reads the probed engine's own metrics path. TensorRT-LLM's `/metrics` is JSON
+iteration stats that each read clears, so a scrape there would take them from every other
+reader: its Prometheus gauges are read at `/prometheus/metrics` instead. A TensorRT-LLM too old
+for `/server_info` is named by its first `/metrics` reply (JSON); that read is the only one. An
+engine that reports its metrics off is never scraped. Blind mode names why the reads missed
+(unreachable, an HTTP status, no engine gauges in the reply) and, for a known engine, the flag
+that turns its gauges on (`signals.METRICS_FLAG`).
 
 `Fixed(n)` bypasses all of it. Defaults: `Auto(target_waiting=8, initial=None (the engine's
 capacity, else 64),
@@ -179,7 +191,8 @@ images live in host RAM.
   vLLM/SGLang transport is the planned second one (high-rate, short-output regime).
   Proven bring-your-own: a binary-audio TTS transport was written against the
   documented surface without modifying the package (RESULTS.md, TTS probe).
-- **SignalSource** — `/metrics` scrape or none; the controller only ever sees a plain
+- **SignalSource** — a scrape of the engine's metrics path (`/metrics`, or its own:
+  `signals.METRICS_PATH`) or none; the controller only ever sees a plain
   `Obs` dict. The dialect table matches both metric-name spellings per engine because
   the k8s Gateway API Inference Extension (GAIE) protocol fixes gauge *semantics* but
   not their names (see [why.md §7](why.md)). Dialects may be partial: TEI publishes

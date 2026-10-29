@@ -167,7 +167,7 @@ def signals_check(args, out: str, rows: int) -> None:
     """The probe, one scrape, and the gauges in a loaded run's telemetry, against EXPECT."""
     t0 = time.time()
     proc = start_run(args, out, rows, "auto", args.max_tokens)
-    time.sleep(10)  # the engine is busy: the scrape reads gauges under load
+    time.sleep(5)  # past startup and the first tick: the scrape reads gauges under load
     loaded = proc.poll() is None
     found = asyncio.run(probe_engine(args.endpoint))
     loaded = loaded and proc.poll() is None  # the run outlasted the probe and the scrape
@@ -205,7 +205,9 @@ def checks(args) -> None:
     rows_per_s = 2000 / max(time.time() - t0, 1.0)  # sizes the runs below to this engine
 
     if args.engine:
-        signals_check(args, fresh(), rows_for(rows_per_s, 30, 3000))
+        # 60 s by the complete check's rate, which counts startup: a fast engine (TEI) runs
+        # several times faster in steady state, and the probe at 5 s must still see a busy engine
+        signals_check(args, fresh(), rows_for(rows_per_s, 60, 3000))
 
     out, t0 = fresh(), time.time()
     report("high-window", 8000, t0, finish(start_run(args, out, 8000, "2048", 16)), out)

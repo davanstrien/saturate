@@ -112,11 +112,12 @@ def test_scrape_retries_periodically_after_going_blind(caplog):
     assert "metrics scrape recovered (vllm)" in err
 
 
-
 def test_preemption_counters_are_summed_over_their_series_and_sglang_retractions_count():
-    vllm = ('vllm:num_preemptions_total{engine="0"} 5\n'
-            'vllm:num_preemptions_total{engine="1"} 0\n'
-            'vllm:num_requests_running 3\n')
+    vllm = (
+        'vllm:num_preemptions_total{engine="0"} 5\n'
+        'vllm:num_preemptions_total{engine="1"} 0\n'
+        "vllm:num_requests_running 3\n"
+    )
     g = parse_gauges(vllm)
     assert g is not None and g["preempts"] == 5
     g = parse_gauges("\n".join(reversed(vllm.strip().splitlines())))
@@ -140,8 +141,11 @@ class _ScriptedClient:
         path = url.removeprefix("http://x")
         self.paths.append(path)
         status, text = self.routes.get(path, (404, "Not Found"))
-        return type("R", (), {"status_code": status, "text": text,
-                              "json": lambda self: __import__("json").loads(text)})()
+        return type(
+            "R",
+            (),
+            {"status_code": status, "text": text, "json": lambda self: __import__("json").loads(text)},
+        )()
 
 
 def _reads(scrape, n):
@@ -149,6 +153,7 @@ def _reads(scrape, n):
 
     async def run():
         return [await scrape.read() for _ in range(n)]
+
     return asyncio.run(run())
 
 
@@ -156,6 +161,7 @@ def _probe(client):
     import asyncio
 
     from saturate.signals import probe
+
     return asyncio.run(probe(cast(HttpClient, client), "http://x/v1"))
 
 
@@ -164,11 +170,13 @@ def test_a_probed_trtllm_is_scraped_at_prometheus_metrics_and_never_at_metrics()
     names TensorRT-LLM, the scrape never reads it."""
     from saturate.signals import Capacity, HttpScrape
 
-    client = _ScriptedClient({
-        "/server_info": (200, '{"disaggregated_params": null, "max_batch_size": 64}'),
-        "/prometheus/metrics": (200, TRTLLM_METRICS),
-        "/metrics": (200, "[]"),
-    })
+    client = _ScriptedClient(
+        {
+            "/server_info": (200, '{"disaggregated_params": null, "max_batch_size": 64}'),
+            "/prometheus/metrics": (200, TRTLLM_METRICS),
+            "/metrics": (200, "[]"),
+        }
+    )
     found = _probe(client)
     assert (found.engine, found.capacity) == ("trtllm", Capacity(64, True, "trtllm"))
     scrape = HttpScrape(cast(HttpClient, client), "http://x/v1")
@@ -183,8 +191,9 @@ def test_json_at_metrics_is_read_once_then_the_scrape_moves_to_prometheus_metric
     which is JSON: that read is the only one."""
     from saturate.signals import HttpScrape
 
-    client = _ScriptedClient({"/metrics": (200, '[{"iter": 1}]'),
-                              "/prometheus/metrics": (200, TRTLLM_METRICS)})
+    client = _ScriptedClient(
+        {"/metrics": (200, '[{"iter": 1}]'), "/prometheus/metrics": (200, TRTLLM_METRICS)}
+    )
     scrape = HttpScrape(cast(HttpClient, client), "http://x/v1")
     gauges = _reads(scrape, 3)
     assert gauges[0] is None and gauges[1] is not None and gauges[1]["dialect"] == "trtllm"
@@ -195,9 +204,14 @@ def test_json_at_metrics_is_read_once_then_the_scrape_moves_to_prometheus_metric
 def test_a_llamacpp_that_reports_metrics_off_is_never_scraped_and_the_warning_names_the_flag(caplog):
     from saturate.signals import HttpScrape
 
-    client = _ScriptedClient({
-        "/props": (200, '{"total_slots": 4, "default_generation_settings": {}, "endpoint_metrics": false}'),
-    })
+    client = _ScriptedClient(
+        {
+            "/props": (
+                200,
+                '{"total_slots": 4, "default_generation_settings": {}, "endpoint_metrics": false}',
+            ),
+        }
+    )
     found = _probe(client)
     assert (found.engine, found.metrics_on) == ("llamacpp", False)
     client.paths.clear()
@@ -260,9 +274,11 @@ def test_json_that_is_not_trtllms_list_is_an_ordinary_miss():
     off) and any JSON from a probed engine each stay at /metrics."""
     from saturate.signals import HttpScrape, Probe
 
-    for status, body, probed in [(200, '{"error": "upstream restarting"}', None),
-                                 (501, '[{"error": "metrics off"}]', None),
-                                 (200, "[]", "sglang")]:
+    for status, body, probed in [
+        (200, '{"error": "upstream restarting"}', None),
+        (501, '[{"error": "metrics off"}]', None),
+        (200, "[]", "sglang"),
+    ]:
         client = _ScriptedClient({"/metrics": (status, body)})
         scrape = HttpScrape(cast(HttpClient, client), "http://x/v1")
         if probed:
@@ -274,10 +290,12 @@ def test_json_that_is_not_trtllms_list_is_an_ordinary_miss():
 def test_a_probe_names_the_engine_from_its_shape_without_a_capacity():
     from saturate.signals import Probe
 
-    assert _probe(_ScriptedClient({"/get_server_info": (200, '{"max_prefill_tokens": 16384}')})) \
-        == Probe(engine="sglang")
-    assert _probe(_ScriptedClient({"/info": (200, '{"model_id": "m", "max_batch_tokens": 16384}')})) \
-        == Probe(engine="tei")
+    assert _probe(_ScriptedClient({"/get_server_info": (200, '{"max_prefill_tokens": 16384}')})) == Probe(
+        engine="sglang"
+    )
+    assert _probe(_ScriptedClient({"/info": (200, '{"model_id": "m", "max_batch_tokens": 16384}')})) == Probe(
+        engine="tei"
+    )
 
 
 def test_a_trtllm_named_by_its_json_names_its_flag_when_prometheus_metrics_is_off(caplog):
@@ -293,14 +311,16 @@ def _vllm_prefix(queries: float, hits: float, engine1: tuple[float, float] | Non
     `_created` sample prometheus_client adds beside each `_total`. Engine 1 holds a quarter of
     each count unless given its own (queries, hits)."""
     q1, h1 = engine1 if engine1 is not None else (queries * 0.25, hits * 0.25)
-    return (f'vllm:prefix_cache_queries_total{{engine="0",model_name="x"}} {queries - q1}\n'
-            f'vllm:prefix_cache_queries_total{{engine="1",model_name="x"}} {q1}\n'
-            'vllm:prefix_cache_queries_created{engine="0",model_name="x"} 1.7e9\n'
-            f'vllm:prefix_cache_hits_total{{engine="0",model_name="x"}} {hits - h1}\n'
-            f'vllm:prefix_cache_hits_total{{engine="1",model_name="x"}} {h1}\n'
-            'vllm:prefix_cache_hits_created{engine="0",model_name="x"} 1.7e9\n'
-            'vllm:external_prefix_cache_queries_total{engine="0",model_name="x"} 99999\n'
-            'vllm:kv_cache_usage_perc{engine="0",model_name="x"} 0.97\n')
+    return (
+        f'vllm:prefix_cache_queries_total{{engine="0",model_name="x"}} {queries - q1}\n'
+        f'vllm:prefix_cache_queries_total{{engine="1",model_name="x"}} {q1}\n'
+        'vllm:prefix_cache_queries_created{engine="0",model_name="x"} 1.7e9\n'
+        f'vllm:prefix_cache_hits_total{{engine="0",model_name="x"}} {hits - h1}\n'
+        f'vllm:prefix_cache_hits_total{{engine="1",model_name="x"}} {h1}\n'
+        'vllm:prefix_cache_hits_created{engine="0",model_name="x"} 1.7e9\n'
+        'vllm:external_prefix_cache_queries_total{engine="0",model_name="x"} 99999\n'
+        'vllm:kv_cache_usage_perc{engine="0",model_name="x"} 0.97\n'
+    )
 
 
 def test_vllm_prefix_counters_are_kept_per_series_and_name_no_rate():
@@ -308,7 +328,8 @@ def test_vllm_prefix_counters_are_kept_per_series_and_name_no_rate():
     assert g is not None and g["dialect"] == "vllm"
     assert g["prefix_counts"] == {  # _created and the external cache's counter ignored
         '{engine="0",model_name="x"}': {"queries": 750, "hits": 450},
-        '{engine="1",model_name="x"}': {"queries": 250, "hits": 150}}
+        '{engine="1",model_name="x"}': {"queries": 250, "hits": 150},
+    }
     assert g["hits"] is None  # a rate needs two readings: parse_gauges sees one
     g = parse_gauges("vllm:gpu_prefix_cache_queries_total 10\nvllm:gpu_prefix_cache_hits_total 4\n")
     assert g is not None and g["prefix_counts"] == {"": {"queries": 10, "hits": 4}}  # vLLM 0.8-0.9
@@ -356,7 +377,7 @@ def test_a_counter_missing_from_a_reading_is_no_baseline():
 def test_the_baseline_follows_every_read_and_restarts_after_a_miss():
     """A reading that carries a hit-rate gauge (vLLM V0, SGLang) still moves the counter
     baseline, and a missed read starts a new one, so no rate spans a reading it did not see."""
-    gauge = 'vllm:gpu_prefix_cache_hit_rate 0.5\n'
+    gauge = "vllm:gpu_prefix_cache_hit_rate 0.5\n"
     one, two, three = _vllm_prefix(1000, 900), _vllm_prefix(2000, 1900), _vllm_prefix(2100, 1900)
     assert _rates([one, two + gauge, three]) == [None, 0.5, 0.0]
     assert _rates([one, None, two, three]) == [None, "miss", None, 0.0]
@@ -403,12 +424,14 @@ def test_every_metric_row_is_read_in_both_spellings_into_its_field():
 def test_the_sample_parser_skips_what_is_not_a_finite_sample():
     """Comments, a non-finite value (NaN, +Inf) and a metric no row names are skipped; a label
     value holding a brace and a trailing timestamp are read correctly."""
-    text = ("# HELP vllm:num_requests_waiting Number of requests waiting.\n"
-            "# TYPE vllm:num_requests_waiting gauge\n"
-            'vllm:num_requests_waiting{model_name="a}b"} 4 1730000000000\n'
-            "vllm:num_requests_running NaN\n"
-            "vllm:kv_cache_usage_perc +Inf\n"
-            "vllm:num_requests_swapped 9\n")
+    text = (
+        "# HELP vllm:num_requests_waiting Number of requests waiting.\n"
+        "# TYPE vllm:num_requests_waiting gauge\n"
+        'vllm:num_requests_waiting{model_name="a}b"} 4 1730000000000\n'
+        "vllm:num_requests_running NaN\n"
+        "vllm:kv_cache_usage_perc +Inf\n"
+        "vllm:num_requests_swapped 9\n"
+    )
     g = parse_gauges(text)
     assert g is not None and (g["waiting"], g["running"], g["kv"]) == (4, None, None)
     assert parse_gauges("# only comments\n\nup 1\n") is None
@@ -424,8 +447,10 @@ def test_the_sample_parser_reads_real_exposition_shapes():
     exemplar = 'vllm:num_preemptions_total{engine="0"} 7 # {trace_id="abc"} 1.0\n'
     g = parse_gauges(exemplar)
     assert g is not None and g["preempts"] == 7
-    g = parse_gauges('vllm:prefix_cache_queries_total{engine="0"} 5 # {trace_id="x"} 1\n'
-                     'vllm:prefix_cache_hits_total{engine="0"} 2\n')
+    g = parse_gauges(
+        'vllm:prefix_cache_queries_total{engine="0"} 5 # {trace_id="x"} 1\n'
+        'vllm:prefix_cache_hits_total{engine="0"} 2\n'
+    )
     assert g is not None and g["prefix_counts"] == {'{engine="0"}': {"queries": 5, "hits": 2}}
     g = parse_gauges("vllm:num_requests_waiting\t7\n")
     assert g is not None and g["waiting"] == 7

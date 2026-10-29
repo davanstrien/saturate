@@ -45,28 +45,49 @@ def stream_rows():
 def main() -> None:
     from huggingface_hub import HfApi
 
-    HfApi().create_repo("davanstrien/pumpjack-tier1-moh5k", repo_type="dataset",
-                        private=True, exist_ok=True)
+    HfApi().create_repo("davanstrien/pumpjack-tier1-moh5k", repo_type="dataset", private=True, exist_ok=True)
 
     def to_request(row: dict) -> dict:
-        return {"model": MODEL,
-                "messages": [{"role": "user", "content": [
-                    {"type": "image_url", "image_url": {"url": row["uri"]}}]}],
-                "max_tokens": 4096, "temperature": 0.2, "top_p": 0.9}
+        return {
+            "model": MODEL,
+            "messages": [
+                {"role": "user", "content": [{"type": "image_url", "image_url": {"url": row["uri"]}}]}
+            ],
+            "max_tokens": 4096,
+            "temperature": 0.2,
+            "top_p": 0.9,
+        }
 
     def parse(row: dict, body: dict) -> dict:
         usage = body.get("usage") or {}
-        return {"markdown": body["choices"][0]["message"]["content"],
-                "prompt_tokens": usage.get("prompt_tokens"),
-                "completion_tokens": usage.get("completion_tokens")}
+        return {
+            "markdown": body["choices"][0]["message"]["content"],
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+        }
 
-    with Engine(MODEL, engine="vllm",
-                extra_args=["--max-model-len", "16384", "--gpu-memory-utilization", "0.90",
-                            "--no-enable-prefix-caching"]) as endpoint:
+    with Engine(
+        MODEL,
+        engine="vllm",
+        extra_args=[
+            "--max-model-len",
+            "16384",
+            "--gpu-memory-utilization",
+            "0.90",
+            "--no-enable-prefix-caching",
+        ],
+    ) as endpoint:
         # max_limit=128: host-RAM guard for multimodal — hundreds of in-flight
         # 1540px images live in container RAM (client bodies + server preprocess)
-        stats = pump(stream_rows(), to_request, parse, endpoint, OUTPUT,
-                     window=Auto(target_waiting=8, initial=8, max_limit=128), flush_every=50)
+        stats = pump(
+            stream_rows(),
+            to_request,
+            parse,
+            endpoint,
+            OUTPUT,
+            window=Auto(target_waiting=8, initial=8, max_limit=128),
+            flush_every=50,
+        )
     print("TIER1_BIGOCR " + stats.to_json(), flush=True)
 
 

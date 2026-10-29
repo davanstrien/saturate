@@ -38,15 +38,18 @@ def content_id(row: dict, keys: list[str] | None = None) -> str:
     return hashlib.sha1(blob.encode()).hexdigest()[:16]
 
 
-def normalize(rows: Iterable, id_key: str | None = None, id_keys: list[str] | None = None,
-              id_fn=None) -> Iterator[tuple[str, dict]]:
+def normalize(
+    rows: Iterable, id_key: str | None = None, id_keys: list[str] | None = None, id_fn=None
+) -> Iterator[tuple[str, dict]]:
     """Yield (id, row) lazily. Accepts (id, row) tuples as-is; dicts get an id
     from `id_fn(row)`, else `id_key`, else a content hash (over `id_keys`)."""
     for item in rows:
         if isinstance(item, tuple) and len(item) == 2:
             if id_fn is not None or id_key is not None:
-                raise TypeError("id_key/id_fn apply to dict rows, but this source yields (id, row) "
-                                "pairs that already carry an id; drop id_key/id_fn or pass dicts")
+                raise TypeError(
+                    "id_key/id_fn apply to dict rows, but this source yields (id, row) "
+                    "pairs that already carry an id; drop id_key/id_fn or pass dicts"
+                )
             yield str(item[0]), item[1]
         elif isinstance(item, dict):
             if id_fn is not None or id_key is not None:
@@ -64,8 +67,9 @@ def normalize(rows: Iterable, id_key: str | None = None, id_keys: list[str] | No
 stream = normalize  # the README-facing name
 
 
-def skip_done(rows: Iterable[tuple[str, dict]], done, retry_errors: bool = False,
-              stats=None) -> Iterator[tuple[str, dict]]:
+def skip_done(
+    rows: Iterable[tuple[str, dict]], done, retry_errors: bool = False, stats=None
+) -> Iterator[tuple[str, dict]]:
     """Exact resume filter + within-run dedup (first admission wins).
 
     `done` may be: a set of ids, a sink/object with existing_ids(), or an
@@ -128,8 +132,12 @@ def _apply_to_row(fn: Callable[[dict], dict], item: tuple[str, dict]) -> tuple[s
     return id_, fn(row)
 
 
-def prepare_ahead(rows: Iterable[tuple[str, dict]], fn: Callable[[dict], dict], workers: int = 4,
-                  executor: Executor | None = None) -> Iterator[tuple[str, dict]]:
+def prepare_ahead(
+    rows: Iterable[tuple[str, dict]],
+    fn: Callable[[dict], dict],
+    workers: int = 4,
+    executor: Executor | None = None,
+) -> Iterator[tuple[str, dict]]:
     """(id, row) -> (id, fn(row)) computed ahead of the consumer on `executor`, order
     preserved, at most `workers` calls in flight. The default executor is a
     `ThreadPoolExecutor(workers)` owned by the iterator; pass your own (a
@@ -174,8 +182,9 @@ def shard_of(row_id: str, world: int) -> int:
     return int.from_bytes(digest[:8], "big") % world
 
 
-def shard_select(rows: Iterable[tuple[str, dict]], rank: int = 0,
-                 world: int = 1) -> Iterator[tuple[str, dict]]:
+def shard_select(
+    rows: Iterable[tuple[str, dict]], rank: int = 0, world: int = 1
+) -> Iterator[tuple[str, dict]]:
     """The (id, row) pairs that belong to shard `rank` of `world`: those with
     `shard_of(id, world) == rank` (CONTRACT §2). pump(shard=) applies this to its input."""
     rank, world = check_shard((rank, world))  # checked now, not at the first row

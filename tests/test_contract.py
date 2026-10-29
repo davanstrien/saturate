@@ -83,6 +83,7 @@ def known_gap(reason: str):
 # The only places these tests reach below the public API. A refactor that moves them changes
 # these lines; the tests stay as they are.
 
+
 @pytest.fixture(autouse=True)
 def fast_ticks(monkeypatch):
     monkeypatch.setattr(saturate.core, "TICK_S", TICK)  # controller ticks fast enough to observe
@@ -139,19 +140,31 @@ class _Gated:
         return await self._results.__anext__()
 
 
-async def pipeline(endpoint, data, sink, *, window=None, to_request=None, parse=None, clients=None,
-                   gate: asyncio.Event | None = None, **kw):
+async def pipeline(
+    endpoint,
+    data,
+    sink,
+    *,
+    window=None,
+    to_request=None,
+    parse=None,
+    clients=None,
+    gate: asyncio.Event | None = None,
+    **kw,
+):
     """The functional layer end to end: AdaptiveClient -> through -> drain. With `gate`, the
     consumer stalls after the first result until the gate opens."""
     async with AdaptiveClient(endpoint, window=window or Fixed(4), signal_source="none") as client:
         if clients is not None:
             clients.append(client)
-        async with through(client, stream(data), to_request or default_to_request,
-                           parse or default_parse, **kw) as results:
+        async with through(
+            client, stream(data), to_request or default_to_request, parse or default_parse, **kw
+        ) as results:
             return await drain(_Gated(results, gate) if gate is not None else results, sink)
 
 
 # --- helpers ---------------------------------------------------------------------------------
+
 
 @pytest.fixture
 def stub():
@@ -192,9 +205,14 @@ async def until(condition, what: str, timeout: float = 10.0) -> None:
 def _new_threads(before: set[int | None], include_runtime: bool) -> list[threading.Thread]:
     """Non-daemon threads started since `before`. The loop's own executor workers (asyncio_N)
     belong to the runtime until the loop shuts its executor down."""
-    return [t for t in threading.enumerate()
-            if t.ident not in before and not t.daemon and t.is_alive()
-            and (include_runtime or not t.name.startswith("asyncio_"))]
+    return [
+        t
+        for t in threading.enumerate()
+        if t.ident not in before
+        and not t.daemon
+        and t.is_alive()
+        and (include_runtime or not t.name.startswith("asyncio_"))
+    ]
 
 
 def _wait_for_threads(before: set[int | None], include_runtime: bool, timeout: float = 2.0) -> list:
@@ -280,6 +298,7 @@ class SourceBoom(RuntimeError):
 
 # --- failure policy --------------------------------------------------------------------------
 
+
 def test_source_failure_lands_the_submitted_rows_then_raises(stub, tmp_path):
     stub.latency_s = 0.01
 
@@ -312,8 +331,15 @@ def test_fatal_cancels_in_flight_rows_instead_of_waiting_for_them(stub, tmp_path
 
     t = time.monotonic()
     with pytest.raises(FatalTransportError):
-        run_checked(lambda: pipeline(stub.endpoint, rows(2), ParquetSink(str(tmp_path)),
-                                     to_request=to_request_fatal_on_r1, prepare_workers=1))
+        run_checked(
+            lambda: pipeline(
+                stub.endpoint,
+                rows(2),
+                ParquetSink(str(tmp_path)),
+                to_request=to_request_fatal_on_r1,
+                prepare_workers=1,
+            )
+        )
     assert r0_arrived.is_set()
     assert time.monotonic() - t < 3.0  # not the 5 s r0 would have taken
     assert on_disk(tmp_path) == set()  # r0 was cancelled, never completed
@@ -344,9 +370,15 @@ def test_fatal_lands_every_row_that_completed_before_it(stub, tmp_path):
                 consumer_may_go_on.set()
             return default_parse(row, resp)
 
-        await pipeline(stub.endpoint, rows(3), ParquetSink(str(tmp_path), flush_every=1000),
-                       to_request=to_request_fatal_on_r2, parse=recording_parse, prepare_workers=1,
-                       gate=consumer_may_go_on)
+        await pipeline(
+            stub.endpoint,
+            rows(3),
+            ParquetSink(str(tmp_path), flush_every=1000),
+            to_request=to_request_fatal_on_r2,
+            parse=recording_parse,
+            prepare_workers=1,
+            gate=consumer_may_go_on,
+        )
 
     with pytest.raises(FatalTransportError):
         run_checked(go)
@@ -357,8 +389,11 @@ def test_fatal_lands_every_row_that_completed_before_it(stub, tmp_path):
 def test_fail_fast_stores_nothing_when_every_early_row_fails(stub, tmp_path):
     stub.status_for = lambda request: 400
     with pytest.raises(FatalTransportError, match="first 4 rows all failed"):
-        run_checked(lambda: pipeline(stub.endpoint, rows(20), ParquetSink(str(tmp_path)),
-                                     window=Fixed(1), fail_fast=4))
+        run_checked(
+            lambda: pipeline(
+                stub.endpoint, rows(20), ParquetSink(str(tmp_path)), window=Fixed(1), fail_fast=4
+            )
+        )
     assert on_disk(tmp_path) == set()
 
 
@@ -367,8 +402,9 @@ def test_fail_fast_releases_the_held_errors_once_a_row_succeeds(stub, tmp_path):
     land as ordinary error rows."""
     early = {"row 0", "row 1", "row 2"}
     stub.status_for = lambda request: 400 if content(request) in early else 200
-    stats = run_checked(lambda: pipeline(stub.endpoint, rows(10), ParquetSink(str(tmp_path)),
-                                         window=Fixed(1), fail_fast=8))
+    stats = run_checked(
+        lambda: pipeline(stub.endpoint, rows(10), ParquetSink(str(tmp_path)), window=Fixed(1), fail_fast=8)
+    )
     assert (stats.rows_processed, stats.rows_failed) == (7, 3)
     sink = ParquetSink(str(tmp_path))
     assert sink.existing_ids() == {f"r{i}" for i in range(10)}
@@ -410,8 +446,9 @@ def test_caller_cancellation_lands_the_completed_rows_and_cleans_up(stub, tmp_pa
             return default_parse(row, resp)
 
         sink = ParquetSink(str(tmp_path), flush_every=1000)
-        task = asyncio.ensure_future(pipeline(stub.endpoint, rows(200), sink, parse=recording_parse,
-                                              clients=clients, gate=never))
+        task = asyncio.ensure_future(
+            pipeline(stub.endpoint, rows(200), sink, parse=recording_parse, clients=clients, gate=never)
+        )
         await until(lambda: len(parsed) >= 6, "six rows parsed")
         task.cancel()
         await task
@@ -434,8 +471,9 @@ def test_a_second_cancel_does_not_hang_the_run(stub, tmp_path):
             parsed.append(row["text"])
             return default_parse(row, resp)
 
-        task = asyncio.ensure_future(pipeline(stub.endpoint, rows(200), ParquetSink(str(tmp_path)),
-                                              parse=recording_parse, gate=never))
+        task = asyncio.ensure_future(
+            pipeline(stub.endpoint, rows(200), ParquetSink(str(tmp_path)), parse=recording_parse, gate=never)
+        )
         await until(lambda: len(parsed) >= 6, "six rows parsed")
         task.cancel()
         await asyncio.sleep(0)
@@ -450,6 +488,7 @@ def test_a_second_cancel_does_not_hang_the_run(stub, tmp_path):
 
 
 # --- the reader and the writer threads ------------------------------------------------------
+
 
 def test_an_input_stuck_in_next_does_not_hold_up_a_cancel(stub, tmp_path):
     """The reader thread cannot interrupt a blocking next(); a cancel abandons it, and the run
@@ -517,10 +556,12 @@ def test_a_slow_sink_bounds_the_rows_waiting_and_is_named_the_bottleneck(stub, t
 
     async def go():
         nonlocal most_waiting
-        async with AdaptiveClient(stub.endpoint, window=Fixed(4), signal_source="none",
-                                  on_tick=ticks.append) as client:
-            async with through(client, stream(rows(200)), default_to_request, default_parse,
-                               backlog=8, fail_fast=0) as results:
+        async with AdaptiveClient(
+            stub.endpoint, window=Fixed(4), signal_source="none", on_tick=ticks.append
+        ) as client:
+            async with through(
+                client, stream(rows(200)), default_to_request, default_parse, backlog=8, fail_fast=0
+            ) as results:
                 run = asyncio.ensure_future(drain(results, SlowSink()))
                 while not run.done():
                     most_waiting = max(most_waiting, stub.requests - len(appended))
@@ -538,6 +579,7 @@ def test_a_slow_sink_bounds_the_rows_waiting_and_is_named_the_bottleneck(stub, t
 
 # --- cancellation and failure edges ---------------------------------------------------------
 
+
 def test_a_cancel_landing_as_a_row_is_handed_over_loses_nothing(stub, tmp_path):
     """parse schedules a cancel of the consumer before it returns: the row is published while
     the consumer is being cancelled. The row was finished, so it must land."""
@@ -550,8 +592,9 @@ def test_a_cancel_landing_as_a_row_is_handed_over_loses_nothing(stub, tmp_path):
 
     async def go():
         holder["task"] = asyncio.current_task()
-        await pipeline(stub.endpoint, rows(1), ParquetSink(str(tmp_path)), parse=parse_then_cancel,
-                       fail_fast=0)
+        await pipeline(
+            stub.endpoint, rows(1), ParquetSink(str(tmp_path)), parse=parse_then_cancel, fail_fast=0
+        )
 
     with pytest.raises(asyncio.CancelledError):
         run_checked(go)
@@ -609,8 +652,9 @@ def test_a_failed_write_wakes_a_drain_waiting_for_the_next_row(tmp_path):
 def test_a_backlog_smaller_than_fail_fast_is_refused(stub):
     async def go():
         async with AdaptiveClient(stub.endpoint, signal_source="none") as client:
-            async with through(client, stream(rows(3)), default_to_request, default_parse,
-                               backlog=8, fail_fast=32):
+            async with through(
+                client, stream(rows(3)), default_to_request, default_parse, backlog=8, fail_fast=32
+            ):
                 pass
 
     with pytest.raises(ValueError, match="smaller than fail_fast"):
@@ -675,8 +719,9 @@ def test_the_reader_reads_at_most_read_ahead_rows_beyond_what_was_taken(stub):
 
     async def go():
         async with AdaptiveClient(stub.endpoint, window=Fixed(1), signal_source="none") as client:
-            async with through(client, counting_source(), default_to_request, default_parse,
-                               backlog=2, fail_fast=0) as results:
+            async with through(
+                client, counting_source(), default_to_request, default_parse, backlog=2, fail_fast=0
+            ) as results:
                 await asyncio.sleep(0.5)  # the feeder is stuck on the backlog; the reader runs ahead
                 await results.stop()
 
@@ -816,23 +861,30 @@ def test_a_zero_flush_interval_means_no_timer():
 
 # --- the transport and the sink ------------------------------------------------
 
+
 def test_any_2xx_is_a_success(stub, tmp_path, no_retries):
     stub.status_for = lambda request: 201
     stats = run_checked(lambda: pipeline(stub.endpoint, rows(3), ParquetSink(str(tmp_path)), fail_fast=0))
     assert (stats.rows_processed, stats.rows_failed) == (3, 0)
 
 
-@pytest.mark.parametrize("status, page", [(200, b"<html>down for maintenance</html>"),
-                                          (200, b"[1, 2]"),  # JSON, but not an object
-                                          (204, b"")])
+@pytest.mark.parametrize(
+    "status, page",
+    [
+        (200, b"<html>down for maintenance</html>"),
+        (200, b"[1, 2]"),  # JSON, but not an object
+        (204, b""),
+    ],
+)
 def test_a_2xx_without_a_json_object_is_a_server_error_not_a_success(stub, no_retries, status, page):
     stub.status_for = lambda request: status
     stub.raw_for = lambda request: page
     ticks: list[dict] = []
 
     async def go():
-        async with AdaptiveClient(stub.endpoint, window=Fixed(1), signal_source="none",
-                                  on_tick=ticks.append) as client:
+        async with AdaptiveClient(
+            stub.endpoint, window=Fixed(1), signal_source="none", on_tick=ticks.append
+        ) as client:
             got = await client.post(default_to_request({"text": "hi"}))
             await until(lambda: len(ticks) >= 3, "three ticks")
             return got
@@ -887,6 +939,7 @@ def test_a_buffered_row_is_flushed_by_age_without_new_arrivals(tmp_path):
 def test_a_trickling_stream_cannot_hold_a_row_past_the_flush_interval(tmp_path):
     """The flush interval counts from the oldest buffered row, not the latest: a row arriving
     just before the interval runs out does not restart it for the rows already waiting."""
+
     async def go():
         async def trickle():
             yield Done("r0", {"text": "row 0"}, {"reply": "x"}, None)
@@ -907,9 +960,11 @@ def test_a_trickling_stream_cannot_hold_a_row_past_the_flush_interval(tmp_path):
 
 # --- retry budget, timeouts, resume reads ----------------------------------------------------
 
+
 @pytest.mark.parametrize("retry_budget_s, lands", [(None, True), (0.3, False)])
-def test_the_default_retry_budget_holds_a_retry_of_a_slow_request(stub, tmp_path, scaled_retry_budget,
-                                                                   retry_budget_s, lands):
+def test_the_default_retry_budget_holds_a_retry_of_a_slow_request(
+    stub, tmp_path, scaled_retry_budget, retry_budget_s, lands
+):
     """Each attempt takes 0.5 s and the first fails. The default budget is max(floor,
     2 * read_timeout) = 2 s here, so the retry runs and the row lands; a budget held at the
     0.3 s floor (the old fixed budget, scaled) leaves no time for a retry."""
@@ -922,9 +977,17 @@ def test_the_default_retry_budget_holds_a_retry_of_a_slow_request(stub, tmp_path
 
     stub.latency_for = latency
     stub.status_for = lambda request: 500 if attempts == 1 else 200
-    stats = pump([{"text": "row 0"}], default_to_request, default_parse, endpoint=stub.endpoint,
-                 output=str(tmp_path), window=Fixed(1), read_timeout=1.0, retry_budget_s=retry_budget_s,
-                 fail_fast=0)
+    stats = pump(
+        [{"text": "row 0"}],
+        default_to_request,
+        default_parse,
+        endpoint=stub.endpoint,
+        output=str(tmp_path),
+        window=Fixed(1),
+        read_timeout=1.0,
+        retry_budget_s=retry_budget_s,
+        fail_fast=0,
+    )
     assert (stats.rows_processed, stats.rows_failed) == ((1, 0) if lands else (0, 1))
     assert attempts == (2 if lands else 1)
 
@@ -940,8 +1003,16 @@ def test_a_row_whose_attempts_fail_differently_keeps_the_first_failure(stub, tmp
         return 503 if attempts == 1 else 400
 
     stub.status_for = status
-    stats = pump([{"text": "row 0"}], default_to_request, default_parse, endpoint=stub.endpoint,
-                 output=str(tmp_path), window=Fixed(1), retry_budget_s=10.0, fail_fast=0)
+    stats = pump(
+        [{"text": "row 0"}],
+        default_to_request,
+        default_parse,
+        endpoint=stub.endpoint,
+        output=str(tmp_path),
+        window=Fixed(1),
+        retry_budget_s=10.0,
+        fail_fast=0,
+    )
     assert stats.rows_failed == 1
     (error,) = [e for e in pq.read_table(next(tmp_path.glob("part-*.parquet")))["error"].to_pylist() if e]
     assert error.startswith("http 400") and "(first attempt: http 503" in error
@@ -950,18 +1021,31 @@ def test_a_row_whose_attempts_fail_differently_keeps_the_first_failure(stub, tmp
 def test_a_response_with_malformed_usage_lands_its_row(stub, tmp_path):
     """A server that sends null token counts: the row's output is fine, so it lands; the counts
     are taken as 0 in the stats."""
-    stub.raw_for = lambda request: (b'{"choices": [{"message": {"content": "hi"}}], '
-                                    b'"usage": {"prompt_tokens": null, "completion_tokens": 3}}')
-    stats = pump([{"text": "row 0"}], default_to_request, default_parse, endpoint=stub.endpoint,
-                 output=str(tmp_path), window=Fixed(1), fail_fast=0)
+    stub.raw_for = lambda request: (
+        b'{"choices": [{"message": {"content": "hi"}}], '
+        b'"usage": {"prompt_tokens": null, "completion_tokens": 3}}'
+    )
+    stats = pump(
+        [{"text": "row 0"}],
+        default_to_request,
+        default_parse,
+        endpoint=stub.endpoint,
+        output=str(tmp_path),
+        window=Fixed(1),
+        fail_fast=0,
+    )
     assert (stats.rows_processed, stats.rows_failed) == (1, 0)
     assert (stats.prompt_tokens, stats.completion_tokens) == (0, 3)
 
 
 def test_timeouts_reach_the_http_client_and_unknown_phases_are_refused():
     async def go():
-        async with AdaptiveClient("http://127.0.0.1:1/v1", signal_source="none", read_timeout=99.0,
-                                  timeouts={"connect": 1.5, "pool": 7.0}) as client:
+        async with AdaptiveClient(
+            "http://127.0.0.1:1/v1",
+            signal_source="none",
+            read_timeout=99.0,
+            timeouts={"connect": 1.5, "pool": 7.0},
+        ) as client:
             return http_client_timeouts(client)
 
     timeout = run_checked(go)
@@ -994,6 +1078,7 @@ def test_an_output_whose_store_does_not_exist_reads_as_empty():
 
 
 # --- concurrency primitives ------------------------------------------------------------------
+
 
 class ShrinkTo:
     """A controller that starts at `initial` and asks for `n` from the first tick on. It has the
@@ -1090,8 +1175,9 @@ def test_the_controller_hears_backpressure_while_the_row_is_still_retrying(stub)
     ticks: list[dict] = []
 
     async def go():
-        async with AdaptiveClient(stub.endpoint, window=Fixed(2), signal_source="none",
-                                  on_tick=ticks.append) as client:
+        async with AdaptiveClient(
+            stub.endpoint, window=Fixed(2), signal_source="none", on_tick=ticks.append
+        ) as client:
             post = asyncio.ensure_future(client.post(default_to_request({"text": "hi"})))
             await until(lambda: any(t["bp"] for t in ticks), "a tick with backpressure")
             still_retrying = not post.done()
@@ -1122,6 +1208,7 @@ def test_a_cancellation_right_after_an_immediate_admission_leaks_no_slot():
 
     async def go():
         async with AdaptiveLimiter(Fixed(2)) as limiter:
+
             async def hold():
                 async with limiter.slot():
                     await asyncio.sleep(10)
@@ -1370,9 +1457,23 @@ def test_a_run_that_loses_a_row_raises_and_writes_no_marker(stub, tmp_path, monk
 
     monkeypatch.setattr(writer._Writer, "_append", lossy_append)
     with pytest.raises(saturate.RowsLostError, match="1 of 5 rows"):
-        pump(rows(5), default_to_request, default_parse, endpoint=stub.endpoint,
-             output=str(tmp_path), window=Fixed(2), fail_fast=0)
+        pump(
+            rows(5),
+            default_to_request,
+            default_parse,
+            endpoint=stub.endpoint,
+            output=str(tmp_path),
+            window=Fixed(2),
+            fail_fast=0,
+        )
     assert not list(tmp_path.glob("__saturate/completions/*.done"))
-    stats = pump(rows(5), default_to_request, default_parse, endpoint=stub.endpoint,
-                 output=str(tmp_path), window=Fixed(2), fail_fast=0)  # the re-run fills the gap
+    stats = pump(
+        rows(5),
+        default_to_request,
+        default_parse,
+        endpoint=stub.endpoint,
+        output=str(tmp_path),
+        window=Fixed(2),
+        fail_fast=0,
+    )  # the re-run fills the gap
     assert stats.rows_processed == 1 and stats.rows_unaccounted == 0

@@ -36,42 +36,83 @@ from sim_engine import (  # noqa: E402
 
 SCENARIOS: list[tuple[str, dict]] = []
 for gauges in (False, True):
-    for name, curve, cap in (("sglang-like", SGLANG_LIKE, 256), ("linear-256", LINEAR, 256),
-                             ("linear-100", [(100, 200.0)], 100), ("linear-48", [(48, 60.0)], 48),
-                             ("preempting", PREEMPTING, 512)):
+    for name, curve, cap in (
+        ("sglang-like", SGLANG_LIKE, 256),
+        ("linear-256", LINEAR, 256),
+        ("linear-100", [(100, 200.0)], 100),
+        ("linear-48", [(48, 60.0)], 48),
+        ("preempting", PREEMPTING, 512),
+    ):
         for noise in (0.0, 0.07):
-            SCENARIOS.append((f"{'gauges' if gauges else 'blind'} {name} noise={noise}",
-                              dict(curve=curve, cap=cap, gauges=gauges, noise=noise)))
+            SCENARIOS.append(
+                (
+                    f"{'gauges' if gauges else 'blind'} {name} noise={noise}",
+                    dict(curve=curve, cap=cap, gauges=gauges, noise=noise),
+                )
+            )
 for limit in (64, 100, 127, 200, 500):
-    SCENARIOS.append((f"hosted, 429 past {limit}", dict(curve=[(1024, 400.0)], cap=1024, rate_limit=limit,
-                                                        gauges=False, noise=0.05)))
-SCENARIOS.append(("blind, flat 32 -> 64 as on real SGLang", dict(curve=[(32, 64.0), (64, 64.0), (192, 150.0)],
-                                                              cap=256, gauges=False, noise=0.07)))
+    SCENARIOS.append(
+        (
+            f"hosted, 429 past {limit}",
+            dict(curve=[(1024, 400.0)], cap=1024, rate_limit=limit, gauges=False, noise=0.05),
+        )
+    )
+SCENARIOS.append(
+    (
+        "blind, flat 32 -> 64 as on real SGLang",
+        dict(curve=[(32, 64.0), (64, 64.0), (192, 150.0)], cap=256, gauges=False, noise=0.07),
+    )
+)
 # a request leaves its slot idle for a client round trip unless one waits in the queue
 REAL_SGLANG = [(32, 64.0), (64, 64.0), (256, 160.0)]  # 2026-10-28 Jobs: flat 32-64, rising to the cap
 for gauges in (False, True):
-    SCENARIOS.append((f"{'gauges' if gauges else 'blind'}, real-SGLang-like with 0.15 s refill",
-                      dict(curve=REAL_SGLANG, cap=256, gauges=gauges, noise=0.05, refill_s=0.15)))
-SCENARIOS.append(("blind, linear-256 with 0.15 s refill",
-                  dict(curve=LINEAR, cap=256, gauges=False, noise=0.05, refill_s=0.15)))
+    SCENARIOS.append(
+        (
+            f"{'gauges' if gauges else 'blind'}, real-SGLang-like with 0.15 s refill",
+            dict(curve=REAL_SGLANG, cap=256, gauges=gauges, noise=0.05, refill_s=0.15),
+        )
+    )
+SCENARIOS.append(
+    (
+        "blind, linear-256 with 0.15 s refill",
+        dict(curve=LINEAR, cap=256, gauges=False, noise=0.05, refill_s=0.15),
+    )
+)
 SCENARIOS.append(("blind, 32 s requests", dict(curve=[(256, 8.0)], cap=256, gauges=False, noise=0.05)))
-SCENARIOS.append(("blind, 12 s requests, 60 s timeout", dict(curve=[(100, 8.0)], cap=100, gauges=False,
-                                                             noise=0.05, read_timeout_s=60)))
+SCENARIOS.append(
+    (
+        "blind, 12 s requests, 60 s timeout",
+        dict(curve=[(100, 8.0)], cap=100, gauges=False, noise=0.05, read_timeout_s=60),
+    )
+)
 for slots, rate in ((1, 0.5), (4, 0.8), (8, 3.0)):  # llama.cpp: a few slots, the rest queue
-    SCENARIOS.append((f"blind llama.cpp-like, {slots} slots", dict(curve=[(slots, rate)], cap=slots,
-                                                                   gauges=False, noise=0.05)))
-    SCENARIOS.append((f"blind llama.cpp-like, {slots} slots, reports them",
-                      dict(curve=[(slots, rate)], cap=slots, gauges=False, noise=0.05, refill_s=0.15,
-                           reports=True)))
+    SCENARIOS.append(
+        (
+            f"blind llama.cpp-like, {slots} slots",
+            dict(curve=[(slots, rate)], cap=slots, gauges=False, noise=0.05),
+        )
+    )
+    SCENARIOS.append(
+        (
+            f"blind llama.cpp-like, {slots} slots, reports them",
+            dict(curve=[(slots, rate)], cap=slots, gauges=False, noise=0.05, refill_s=0.15, reports=True),
+        )
+    )
 
 # mid-run changes at tick 300: (name, before, after)
 SHIFTS = [
     ("blind, capacity 256 -> 128", dict(curve=LINEAR, cap=256), dict(curve=[(128, 100.0)], cap=128)),
     ("blind, capacity 128 -> 256", dict(curve=[(128, 100.0)], cap=128), dict(curve=LINEAR, cap=256)),
-    ("hosted, 429 limit 100 -> 200", dict(curve=[(1024, 400.0)], cap=1024, rate_limit=100),
-     dict(curve=[(1024, 400.0)], cap=1024, rate_limit=200)),
-    ("blind sglang-like, prompts twice as long", dict(curve=SGLANG_LIKE, cap=256),
-     dict(curve=[(x, y / 2) for x, y in SGLANG_LIKE], cap=256, tokens_per_row=200.0)),
+    (
+        "hosted, 429 limit 100 -> 200",
+        dict(curve=[(1024, 400.0)], cap=1024, rate_limit=100),
+        dict(curve=[(1024, 400.0)], cap=1024, rate_limit=200),
+    ),
+    (
+        "blind sglang-like, prompts twice as long",
+        dict(curve=SGLANG_LIKE, cap=256),
+        dict(curve=[(x, y / 2) for x, y in SGLANG_LIKE], cap=256, tokens_per_row=200.0),
+    ),
 ]
 
 
@@ -80,8 +121,12 @@ def load_auto(ref: str):
     if ref == ".":
         path = ROOT / "saturate" / "controller.py"
     else:
-        source = subprocess.run(["git", "-C", str(ROOT), "show", f"{ref}:saturate/controller.py"],
-                                check=True, capture_output=True, text=True).stdout
+        source = subprocess.run(
+            ["git", "-C", str(ROOT), "show", f"{ref}:saturate/controller.py"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
         path = Path(tempfile.mkdtemp()) / "controller.py"
         path.write_text(source)
     spec = importlib.util.spec_from_file_location(f"controller_{abs(hash(ref))}", path)
@@ -116,8 +161,13 @@ def score(auto, kwargs: dict, after: dict | None = None) -> tuple[float, float, 
         lat.append(latency_inflation(tail))
         fail.append(failed_share(ticks))
         ramp.append(ramp_ticks(ticks))
-    return (statistics.mean(best), statistics.mean(first), statistics.mean(lat), statistics.mean(fail),
-            statistics.mean(ramp))
+    return (
+        statistics.mean(best),
+        statistics.mean(first),
+        statistics.mean(lat),
+        statistics.mean(fail),
+        statistics.mean(ramp),
+    )
 
 
 def main(refs: list[str]) -> None:
@@ -138,9 +188,11 @@ def main(refs: list[str]) -> None:
     means = []
     for ref, _ in autos:
         t = totals[ref]
-        means.append(f"{statistics.mean(x[0] for x in t):.0%} / {statistics.mean(x[1] for x in t):.0%} / "
-                     f"{statistics.mean(x[2] for x in t):.1f}x / {statistics.mean(x[3] for x in t):.1%} / "
-                     f"{statistics.mean(x[4] for x in t):.0f}")
+        means.append(
+            f"{statistics.mean(x[0] for x in t):.0%} / {statistics.mean(x[1] for x in t):.0%} / "
+            f"{statistics.mean(x[2] for x in t):.1f}x / {statistics.mean(x[3] for x in t):.1%} / "
+            f"{statistics.mean(x[4] for x in t):.0f}"
+        )
     print("| **mean** | " + " | ".join(means) + " |")
     worst = [f"{min(x[0] for x in totals[ref]):.0%}" for ref, _ in autos]
     print("| **worst best** | " + " | ".join(worst) + " |")

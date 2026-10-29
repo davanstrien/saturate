@@ -21,8 +21,7 @@ def main() -> None:
     from datasets import load_dataset
     from huggingface_hub import HfApi
 
-    HfApi().create_repo("davanstrien/pumpjack-tier1-sglang", repo_type="dataset",
-                        private=True, exist_ok=True)
+    HfApi().create_repo("davanstrien/pumpjack-tier1-sglang", repo_type="dataset", private=True, exist_ok=True)
     ds = load_dataset("databricks/databricks-dolly-15k", split="train", streaming=True)
     rows = []
     for i, ex in enumerate(ds):
@@ -33,20 +32,23 @@ def main() -> None:
     print(f"[tier1] loaded {len(rows)} prompts", flush=True)
 
     def to_request(row: dict) -> dict:
-        return {"model": MODEL,
-                "messages": [{"role": "user", "content": row["text"]}],
-                "max_tokens": 200, "temperature": 0.0}
+        return {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": row["text"]}],
+            "max_tokens": 200,
+            "temperature": 0.0,
+        }
 
     def parse(row: dict, body: dict) -> dict:
         usage = body.get("usage") or {}
-        return {"out": body["choices"][0]["message"]["content"],
-                "prompt_tokens": usage.get("prompt_tokens"),
-                "completion_tokens": usage.get("completion_tokens")}
+        return {
+            "out": body["choices"][0]["message"]["content"],
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+        }
 
-    with Engine(MODEL, engine="sglang",
-                extra_args=["--mem-fraction-static", "0.85"]) as endpoint:
-        stats = pump(rows, to_request, parse, endpoint, OUTPUT,
-                     window=Auto(target_waiting=8, initial=8))
+    with Engine(MODEL, engine="sglang", extra_args=["--mem-fraction-static", "0.85"]) as endpoint:
+        stats = pump(rows, to_request, parse, endpoint, OUTPUT, window=Auto(target_waiting=8, initial=8))
     print("TIER1_SGLANG " + stats.to_json(), flush=True)
 
 

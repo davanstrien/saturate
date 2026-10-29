@@ -94,7 +94,8 @@ class Engine:
         if ("useful", max_window) not in self._memo:
             _, top = self.best(max_window)
             self._memo["useful", max_window] = next(
-                w for w in range(1, max_window + 1) if self.rows_per_s(w) >= top * 0.98)
+                w for w in range(1, max_window + 1) if self.rows_per_s(w) >= top * 0.98
+            )
         return self._memo["useful", max_window]
 
 
@@ -115,8 +116,13 @@ def run(ctrl, engine: Engine, ticks: int, then: tuple[int, Engine] | None = None
     return run_shared([ctrl], engine, ticks, then=then)[0]
 
 
-def run_shared(ctrls: list, engine: Engine, ticks: int, starts: list[int] | None = None,
-               then: tuple[int, Engine] | None = None) -> list[list[Tick]]:
+def run_shared(
+    ctrls: list,
+    engine: Engine,
+    ticks: int,
+    starts: list[int] | None = None,
+    then: tuple[int, Engine] | None = None,
+) -> list[list[Tick]]:
     """Drive several controllers against one engine, as sharded Jobs pumping one endpoint do.
     Client i joins at tick `starts[i]` (default: all at once). Everything admitted shares the
     engine: the running cap, the queue, the throughput (split by each client's share of what is
@@ -173,9 +179,12 @@ def run_shared(ctrls: list, engine: Engine, ticks: int, starts: list[int] | None
             obs = dict(
                 waiting=queued if engine.gauges else None,
                 running=min(total_now, engine.cap) if engine.gauges else None,
-                inflight=limits[c], backpressure=rejected + timed_out,
-                successes=successes, input_bound=False,
-                kv=kv if engine.gauges else None, hits=engine.hits if engine.gauges else None,
+                inflight=limits[c],
+                backpressure=rejected + timed_out,
+                successes=successes,
+                input_bound=False,
+                kv=kv if engine.gauges else None,
+                hits=engine.hits if engine.gauges else None,
                 preempts=preempts if engine.gauges and engine.counts_preempts else None,
                 tok_s=rate * engine.tokens_per_row,
                 latency_s=latency if rate else None,
@@ -216,8 +225,9 @@ def share_past_useful(ticks: list[Tick], engine: Engine | None = None, max_windo
 
 def latency_inflation(ticks: list[Tick], max_window: int = 512) -> float:
     """Mean latency over `ticks` as a multiple of the latency at the useful window."""
-    return sum(t.latency_s / t.engine.latency_s(t.engine.useful_window(max_window))
-               for t in ticks) / len(ticks)
+    return sum(t.latency_s / t.engine.latency_s(t.engine.useful_window(max_window)) for t in ticks) / len(
+        ticks
+    )
 
 
 def failed_share(ticks: list[Tick]) -> float:

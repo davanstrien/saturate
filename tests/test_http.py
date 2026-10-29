@@ -10,7 +10,7 @@ import saturate.http as http
 from saturate.engine import _get
 from saturate.http import HttpClient, TimedOut, Timeouts, TransportError, multipart
 
-OK = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 12\r\n\r\n{\"ok\": true}"
+OK = b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 12\r\n\r\n{"ok": true}'
 
 
 class RawServer:
@@ -39,8 +39,14 @@ class RawServer:
         try:
             while True:
                 head = await reader.readuntil(b"\r\n\r\n")
-                length = next((int(line.split(b":")[1]) for line in head.split(b"\r\n")
-                               if line.lower().startswith(b"content-length:")), 0)
+                length = next(
+                    (
+                        int(line.split(b":")[1])
+                        for line in head.split(b"\r\n")
+                        if line.lower().startswith(b"content-length:")
+                    ),
+                    0,
+                )
                 self.received.append(head + await reader.readexactly(length))
                 self.requests += 1
                 if await self.handle(writer) is False:
@@ -71,7 +77,7 @@ def test_a_dropped_connection_is_a_transport_error_and_the_request_reached_the_s
 
 def test_a_cut_off_body_is_a_transport_error():
     async def short(writer):
-        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"ok\"")
+        writer.write(b'HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{"ok"')
         await writer.drain()
         return False
 
@@ -195,6 +201,7 @@ def test_a_boot_check_reads_an_error_status_as_a_reply():
 def test_a_redirect_is_the_answer_not_followed():
     """A 3xx reaches the retry ladder, which rejects it; following it could turn a POST into a
     GET whose reply would be taken as the result."""
+
     async def moved(writer):
         writer.write(b"HTTP/1.1 302 Found\r\nLocation: /elsewhere\r\nContent-Length: 0\r\n\r\n")
         await writer.drain()
@@ -210,6 +217,7 @@ def test_a_redirect_is_the_answer_not_followed():
 def test_a_server_that_stops_reading_an_upload_hits_the_total_limit():
     """aiohttp times reading the reply only after the body is sent; a server that never reads
     the body is stopped by the total limit (pool + write + read)."""
+
     async def never_reads(reader, writer):
         await asyncio.sleep(1.5)  # longer than the 0.6 s total
         writer.close()
@@ -220,8 +228,12 @@ def test_a_server_that_stops_reading_an_upload_hits_the_total_limit():
         async with server, HttpClient() as client:
             limits = Timeouts(read=0.2, connect=1.0, pool=0.2, write=0.2)
             with pytest.raises(TimedOut):
-                await asyncio.wait_for(client.post(f"http://127.0.0.1:{port}/v1/upload",
-                                                   json={"x": "a" * 5_000_000}, timeouts=limits), 3.0)
+                await asyncio.wait_for(
+                    client.post(
+                        f"http://127.0.0.1:{port}/v1/upload", json={"x": "a" * 5_000_000}, timeouts=limits
+                    ),
+                    3.0,
+                )
 
     run(go())
 

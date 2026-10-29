@@ -23,12 +23,17 @@ def observations(draw, limit: int):
     """One tick's observation for a window of `limit`."""
     successes = draw(st.integers(0, 4 * limit + 4))
     return dict(
-        waiting=draw(maybe_count), running=draw(maybe_count),
-        inflight=draw(st.integers(0, limit)), backpressure=draw(st.integers(0, limit + 4)),
-        successes=successes, input_bound=draw(st.booleans()),
-        kv=draw(maybe_share), hits=draw(maybe_share),
+        waiting=draw(maybe_count),
+        running=draw(maybe_count),
+        inflight=draw(st.integers(0, limit)),
+        backpressure=draw(st.integers(0, limit + 4)),
+        successes=successes,
+        input_bound=draw(st.booleans()),
+        kv=draw(maybe_share),
+        hits=draw(maybe_share),
         tok_s=draw(st.one_of(st.none(), st.just(0.0), st.floats(0.0, 1e6, allow_nan=False))),
-        latency_s=draw(maybe_seconds), oldest_s=draw(maybe_seconds),
+        latency_s=draw(maybe_seconds),
+        oldest_s=draw(maybe_seconds),
         tick_s=draw(st.one_of(st.none(), st.floats(0.1, 10.0))),
     )
 
@@ -37,10 +42,15 @@ def observations(draw, limit: int):
 def autos(draw):
     min_limit = draw(st.integers(1, 64))
     max_limit = draw(st.integers(min_limit, 1024))
-    auto = Auto(target_waiting=draw(st.integers(1, 64)),
-                initial=draw(st.one_of(st.none(), st.integers(1, 2048))),
-                min_limit=min_limit, max_limit=max_limit, step=draw(st.integers(1, 32)),
-                bp_frac=draw(st.floats(0.0, 1.0)), seed=draw(st.integers(0, 2**32)))
+    auto = Auto(
+        target_waiting=draw(st.integers(1, 64)),
+        initial=draw(st.one_of(st.none(), st.integers(1, 2048))),
+        min_limit=min_limit,
+        max_limit=max_limit,
+        step=draw(st.integers(1, 32)),
+        bp_frac=draw(st.floats(0.0, 1.0)),
+        seed=draw(st.integers(0, 2**32)),
+    )
     if draw(st.booleans()):
         auto.begin(Capacity(draw(st.integers(1, 1024)), draw(st.booleans()), "any"))
     return auto
@@ -166,8 +176,12 @@ def test_trials_at_a_backpressure_wall_each_wait_their_own_jitter(cap, seed):
         hist.append(limit)
         seen = hist[max(0, len(hist) - 3)]
         served = min(seen, cap)
-        return dict(inflight=limit, backpressure=max(1, served // 12) if seen > cap else 0,
-                    successes=served, tok_s=served * 100.0)
+        return dict(
+            inflight=limit,
+            backpressure=max(1, served // 12) if seen > cap else 0,
+            successes=served,
+            tok_s=served * 100.0,
+        )
 
     check_jitter(Auto(initial=16, max_limit=512, seed=seed), wall)
 
@@ -186,8 +200,9 @@ def test_a_hold_every_client_sees_does_not_spend_the_jitter():
     auto.rng = Longest()
     limit = auto.initial
     for _ in range(200):  # until a trial fails and the next one is due
-        limit = auto.decide(dict(inflight=limit, successes=limit, tok_s=100.0 * 64, waiting=0, running=limit),
-                            limit)
+        limit = auto.decide(
+            dict(inflight=limit, successes=limit, tok_s=100.0 * 64, waiting=0, running=limit), limit
+        )
         if auto.last_reason == "hold:jitter":
             break
     assert auto.last_reason == "hold:jitter", auto.last_reason
@@ -195,17 +210,34 @@ def test_a_hold_every_client_sees_does_not_spend_the_jitter():
     left = auto.state.phase.jitter
     assert left == auto.JITTER_TICKS - 1
     for _ in range(10):  # a queue in band: hold
-        limit = auto.decide(dict(inflight=limit, successes=limit, tok_s=100.0 * 64, waiting=4, running=limit),
-                            limit)
+        limit = auto.decide(
+            dict(inflight=limit, successes=limit, tok_s=100.0 * 64, waiting=4, running=limit), limit
+        )
         assert auto.last_reason == "hold"
     assert auto.state.phase.jitter == left
 
 
-whole = st.one_of(st.integers(-5, 2000), st.booleans(), st.floats(-5, 2000), st.just(float("nan")),
-                  st.text(max_size=2), st.integers(10**300, 10**400))
+whole = st.one_of(
+    st.integers(-5, 2000),
+    st.booleans(),
+    st.floats(-5, 2000),
+    st.just(float("nan")),
+    st.text(max_size=2),
+    st.integers(10**300, 10**400),
+)
 real = st.one_of(st.floats(allow_nan=True, allow_infinity=True), st.text(max_size=2), st.fractions())
-SETTINGS = dict(target_waiting=whole, initial=st.one_of(st.none(), whole), min_limit=whole, max_limit=whole,
-                step=whole, stall_ticks=whole, kv_hi=real, hits_lo=real, improve=real, bp_frac=real)
+SETTINGS = dict(
+    target_waiting=whole,
+    initial=st.one_of(st.none(), whole),
+    min_limit=whole,
+    max_limit=whole,
+    step=whole,
+    stall_ticks=whole,
+    kv_hi=real,
+    hits_lo=real,
+    improve=real,
+    bp_frac=real,
+)
 
 
 @given(st.data())
@@ -223,15 +255,38 @@ def test_any_configuration_is_refused_up_front_or_runs(data):
         assert auto.min <= limit <= auto.max
 
 
-@pytest.mark.parametrize("kwargs", [
-    dict(target_waiting=0), dict(initial=0), dict(initial=-3), dict(kv_hi=0.0), dict(kv_hi=1.5),
-    dict(hits_lo=-0.1), dict(hits_lo=1.1), dict(improve=1.0), dict(improve=0.9),
-    dict(improve=float("nan")), dict(bp_frac=float("nan")), dict(min_limit=0), dict(max_limit=1, min_limit=2),
-    dict(step=0), dict(stall_ticks=0), dict(improve=float("inf")), dict(target_waiting=True),
-    dict(kv_hi=True), dict(bp_frac=False), dict(seed=True), dict(max_limit=float("nan")),
-    dict(stall_ticks=float("nan")), dict(step=2.5), dict(initial=float("inf")), dict(min_limit=4.0),
-    dict(target_waiting="8"), dict(seed=1.5),
-])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(target_waiting=0),
+        dict(initial=0),
+        dict(initial=-3),
+        dict(kv_hi=0.0),
+        dict(kv_hi=1.5),
+        dict(hits_lo=-0.1),
+        dict(hits_lo=1.1),
+        dict(improve=1.0),
+        dict(improve=0.9),
+        dict(improve=float("nan")),
+        dict(bp_frac=float("nan")),
+        dict(min_limit=0),
+        dict(max_limit=1, min_limit=2),
+        dict(step=0),
+        dict(stall_ticks=0),
+        dict(improve=float("inf")),
+        dict(target_waiting=True),
+        dict(kv_hi=True),
+        dict(bp_frac=False),
+        dict(seed=True),
+        dict(max_limit=float("nan")),
+        dict(stall_ticks=float("nan")),
+        dict(step=2.5),
+        dict(initial=float("inf")),
+        dict(min_limit=4.0),
+        dict(target_waiting="8"),
+        dict(seed=1.5),
+    ],
+)
 def test_a_setting_that_cannot_work_is_refused(kwargs):
     with pytest.raises(ValueError):
         Auto(**kwargs)

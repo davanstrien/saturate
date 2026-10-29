@@ -63,8 +63,14 @@ def arm_offline(prompts: list[str]) -> dict:
     outs = llm.generate(prompts, sampling())
     dt = time.monotonic() - t0
     toks = sum(len(o.outputs[0].token_ids) for o in outs)
-    return {"arm": "offline", "wall_s": round(dt, 1), "completion_tokens": toks,
-            "tok_s": round(toks / dt, 1), "peak_rss_mb": peak_rss_mb(), "n": len(outs)}
+    return {
+        "arm": "offline",
+        "wall_s": round(dt, 1),
+        "completion_tokens": toks,
+        "tok_s": round(toks / dt, 1),
+        "peak_rss_mb": peak_rss_mb(),
+        "n": len(outs),
+    }
 
 
 async def _drain(engine, prompt: str, i: int, sp) -> int:
@@ -78,8 +84,9 @@ async def arm_async(prompts: list[str], window: int | None) -> dict:
     from vllm.engine.arg_utils import AsyncEngineArgs
     from vllm.v1.engine.async_llm import AsyncLLM
 
-    engine = AsyncLLM.from_engine_args(AsyncEngineArgs(
-        model=MODEL, max_num_seqs=MAX_NUM_SEQS, gpu_memory_utilization=0.90))
+    engine = AsyncLLM.from_engine_args(
+        AsyncEngineArgs(model=MODEL, max_num_seqs=MAX_NUM_SEQS, gpu_memory_utilization=0.90)
+    )
     sp = sampling()
     sem = asyncio.Semaphore(window) if window else None
     t0 = time.monotonic()
@@ -93,9 +100,15 @@ async def arm_async(prompts: list[str], window: int | None) -> dict:
     toks = sum(await asyncio.gather(*[one(p, i) for i, p in enumerate(prompts)]))
     dt = time.monotonic() - t0
     name = "windowed" if window else "naive"
-    result = {"arm": name, "wall_s": round(dt, 1), "completion_tokens": toks,
-              "tok_s": round(toks / dt, 1), "peak_rss_mb": peak_rss_mb(),
-              "n": len(prompts), "window": window}
+    result = {
+        "arm": name,
+        "wall_s": round(dt, 1),
+        "completion_tokens": toks,
+        "tok_s": round(toks / dt, 1),
+        "peak_rss_mb": peak_rss_mb(),
+        "n": len(prompts),
+        "window": window,
+    }
     engine.shutdown()
     return result
 
@@ -120,18 +133,29 @@ def main() -> None:
     results = []
     for arm in ARMS:
         print(f"=== arm: {arm} ===", flush=True)
-        proc = subprocess.run([sys.executable, __file__, "--arm", arm],
-                              capture_output=True, text=True, timeout=1800)
+        proc = subprocess.run(
+            [sys.executable, __file__, "--arm", arm], capture_output=True, text=True, timeout=1800
+        )
         for line in proc.stdout.splitlines():
             if line.startswith("SPIKE_RESULT "):
-                results.append(json.loads(line[len("SPIKE_RESULT "):]))
+                results.append(json.loads(line[len("SPIKE_RESULT ") :]))
                 print(line, flush=True)
                 break
         else:
             print(f"ARM_FAILED {arm} rc={proc.returncode}\n{proc.stderr[-3000:]}", flush=True)
-    print("SPIKE_SUMMARY " + json.dumps({
-        "model": MODEL, "n_prompts": N_PROMPTS, "max_tokens": MAX_TOKENS,
-        "max_num_seqs": MAX_NUM_SEQS, "results": results}), flush=True)
+    print(
+        "SPIKE_SUMMARY "
+        + json.dumps(
+            {
+                "model": MODEL,
+                "n_prompts": N_PROMPTS,
+                "max_tokens": MAX_TOKENS,
+                "max_num_seqs": MAX_NUM_SEQS,
+                "results": results,
+            }
+        ),
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

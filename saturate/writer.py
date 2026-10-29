@@ -57,13 +57,15 @@ class SinkHooks:
 
 def sink_hooks(sink) -> SinkHooks:
     interval = getattr(sink, "flush_interval_s", None)
-    return SinkHooks(probe=getattr(sink, "probe", None),
-                     flush_interval_s=interval if interval and interval > 0 else None,  # 0: no timer
-                     begin_run=getattr(sink, "begin_run", None),
-                     write_telemetry=getattr(sink, "write_telemetry", None),
-                     write_stats=getattr(sink, "write_stats", None),
-                     write_marker=getattr(sink, "write_marker", None),
-                     telemetry_every_ticks=max(1, getattr(sink, "telemetry_every_ticks", 30)))
+    return SinkHooks(
+        probe=getattr(sink, "probe", None),
+        flush_interval_s=interval if interval and interval > 0 else None,  # 0: no timer
+        begin_run=getattr(sink, "begin_run", None),
+        write_telemetry=getattr(sink, "write_telemetry", None),
+        write_stats=getattr(sink, "write_stats", None),
+        write_marker=getattr(sink, "write_marker", None),
+        telemetry_every_ticks=max(1, getattr(sink, "telemetry_every_ticks", 30)),
+    )
 
 
 async def drain(results: AsyncIterable[Done], sink, shard: tuple[int, int] = (0, 1), stats=None):
@@ -97,8 +99,9 @@ async def drain(results: AsyncIterable[Done], sink, shard: tuple[int, int] = (0,
                 caller_error = e
         cancelled = isinstance(caller_error, asyncio.CancelledError)
         # one cleanup, in order: the finished rows still waiting (on a cancel), then the end
-        cleanup = asyncio.ensure_future(_close(results, writer, holding, hand_over=cancelled,
-                                               failed=caller_error is not None))
+        cleanup = asyncio.ensure_future(
+            _close(results, writer, holding, hand_over=cancelled, failed=caller_error is not None)
+        )
         await _wait_out(cleanup, cancelled_before=cancelled)
     # The first failure is the error. A failed write stops the reading at once, so drain ends
     # without an error of its own: an error the caller hit (a cancel included) came first.
@@ -111,8 +114,9 @@ async def drain(results: AsyncIterable[Done], sink, shard: tuple[int, int] = (0,
     return stats
 
 
-async def _close(results: AsyncIterable[Done], writer: _Writer, holding: Done | None,
-                 hand_over: bool, failed: bool) -> None:
+async def _close(
+    results: AsyncIterable[Done], writer: _Writer, holding: Done | None, hand_over: bool, failed: bool
+) -> None:
     """Finish the writing, in order: on a cancel, stop the run and hand over every finished row
     still waiting; then tell the writer there are no more, and wait for its last flush."""
     if hand_over:

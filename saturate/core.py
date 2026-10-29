@@ -142,8 +142,9 @@ class AdaptiveLimiter:
     observed outcomes + delivered tokens + gauges.
     """
 
-    def __init__(self, window: Fixed | Auto | None = None, signals=None,
-                 on_tick: Callable[[dict], None] | None = None):
+    def __init__(
+        self, window: Fixed | Auto | None = None, signals=None, on_tick: Callable[[dict], None] | None = None
+    ):
         self.controller = window or Auto()
         self.signals = signals or Null()
         self.on_tick = on_tick
@@ -308,20 +309,42 @@ class AdaptiveLimiter:
         # None means unobservable: nothing in flight, or an endpoint that never reports usage
         observable = self.inflight > 0 and self.tokens_total > 0
         latency_s = self.latency_s
-        obs = Obs(waiting=g.get("waiting"), running=g.get("running"),
-                  inflight=self.inflight, backpressure=counts.backpressure,
-                  successes=counts.successes, input_bound=input_bound,
-                  kv=g.get("kv"), hits=g.get("hits"), tok_s=tok_s if tok_s or observable else None,
-                  preempts=g.get("preempts"), latency_s=latency_s, oldest_s=self.oldest_s,
-                  tick_s=dt if dt > 0 else None)
+        obs = Obs(
+            waiting=g.get("waiting"),
+            running=g.get("running"),
+            inflight=self.inflight,
+            backpressure=counts.backpressure,
+            successes=counts.successes,
+            input_bound=input_bound,
+            kv=g.get("kv"),
+            hits=g.get("hits"),
+            tok_s=tok_s if tok_s or observable else None,
+            preempts=g.get("preempts"),
+            latency_s=latency_s,
+            oldest_s=self.oldest_s,
+            tick_s=dt if dt > 0 else None,
+        )
         new_limit = self.controller.decide(obs, self.limit)
-        rec = tick_record(now - self._t0, self.limit, self.inflight, gauges,
-                          counts.backpressure, counts.successes, input_bound, tok_s,
-                          self.controller.last_reason, latency_s, bound_by=bound_by,
-                          source_s=self._wait["source"], prep_s=self._wait["prep"],
-                          sink_s=self._wait["sink"],
-                          prep_n=self._prep_n, prep_workers=self.prep_workers, loop_lag_s=loop_lag_s,
-                          retries=counts.retries)
+        rec = tick_record(
+            now - self._t0,
+            self.limit,
+            self.inflight,
+            gauges,
+            counts.backpressure,
+            counts.successes,
+            input_bound,
+            tok_s,
+            self.controller.last_reason,
+            latency_s,
+            bound_by=bound_by,
+            source_s=self._wait["source"],
+            prep_s=self._wait["prep"],
+            sink_s=self._wait["sink"],
+            prep_n=self._prep_n,
+            prep_workers=self.prep_workers,
+            loop_lag_s=loop_lag_s,
+            retries=counts.retries,
+        )
         self.ticks.append(rec)
         if self.on_tick:
             self.on_tick(rec)
@@ -335,22 +358,30 @@ class AdaptiveClient:
     slot, runs the retry ladder + breaker, feeds the controller, and returns
     (body, error). Use as an async context manager."""
 
-    def __init__(self, endpoint: str, window: Fixed | Auto | None = None,
-                 headers: dict | None = None, read_timeout: float = 1800.0,
-                 signal_source: str = "auto",
-                 on_tick: Callable[[dict], None] | None = None,
-                 retry_budget_s: float | None = None,
-                 timeouts: dict[str, float] | None = None,
-                 proxy: str | bool | None = None):
+    def __init__(
+        self,
+        endpoint: str,
+        window: Fixed | Auto | None = None,
+        headers: dict | None = None,
+        read_timeout: float = 1800.0,
+        signal_source: str = "auto",
+        on_tick: Callable[[dict], None] | None = None,
+        retry_budget_s: float | None = None,
+        timeouts: dict[str, float] | None = None,
+        proxy: str | bool | None = None,
+    ):
         self.base = endpoint.rstrip("/")
         # a row's attempts share one wall-clock budget; it must hold a retry of a long request,
         # so by default it grows with the read timeout (300 s floor: 3600 s at the default 1800)
-        self.retry_budget_s = (retry_budget_s if retry_budget_s is not None
-                               else max(transport.RETRY_BUDGET_S, 2 * read_timeout))
+        self.retry_budget_s = (
+            retry_budget_s if retry_budget_s is not None else max(transport.RETRY_BUDGET_S, 2 * read_timeout)
+        )
         unknown = set(timeouts or {}) - {"connect", "write", "pool"}
         if unknown:
-            raise ValueError(f"timeouts: unknown phase(s) {sorted(unknown)}; the read timeout is "
-                             "read_timeout=, the others are 'connect', 'write' and 'pool'")
+            raise ValueError(
+                f"timeouts: unknown phase(s) {sorted(unknown)}; the read timeout is "
+                "read_timeout=, the others are 'connect', 'write' and 'pool'"
+            )
         self._timeouts = Timeouts(read=read_timeout, **(timeouts or {}))
         self._headers, self._proxy = headers or {}, proxy
         self._signal_source, self._window, self._on_tick = signal_source, window, on_tick
@@ -388,9 +419,11 @@ class AdaptiveClient:
         controller.begin(capacity)
         self.limiter.set_limit(controller.initial)
         if capacity is not None:
-            log.info(f"{capacity.engine} reports {capacity.requests} requests at once"
-                     f"{'' if capacity.queues else ' (and rejects the rest)'}: "
-                     f"starting at {controller.initial}")
+            log.info(
+                f"{capacity.engine} reports {capacity.requests} requests at once"
+                f"{'' if capacity.queues else ' (and rejects the rest)'}: "
+                f"starting at {controller.initial}"
+            )
 
     async def __aexit__(self, *exc):
         try:
@@ -402,8 +435,12 @@ class AdaptiveClient:
     def dialect(self) -> str | None:
         return getattr(self.limiter.signals, "dialect", None)
 
-    async def post(self, request: Request | dict, route: str = "/chat/completions",
-                   on_admit: Callable[[], None] | None = None) -> tuple[dict | None, str | None]:
+    async def post(
+        self,
+        request: Request | dict,
+        route: str = "/chat/completions",
+        on_admit: Callable[[], None] | None = None,
+    ) -> tuple[dict | None, str | None]:
         """`on_admit` fires once the request holds a window slot (through() releases its
         prepared-body bound there: from then on the body is in flight, not waiting)."""
         req = coerce_request(request, route)
@@ -411,5 +448,6 @@ class AdaptiveClient:
         async with self.limiter.slot():
             if on_admit is not None:
                 on_admit()
-            return await call_endpoint(self._client, self.base, req, self.breaker,
-                                       self.limiter.observe, self.retry_budget_s)
+            return await call_endpoint(
+                self._client, self.base, req, self.breaker, self.limiter.observe, self.retry_budget_s
+            )

@@ -39,8 +39,14 @@ log = logging.getLogger(__name__)
 # combine. "sum": a count, summed as an int. "last": a ratio gauge, where the last line wins
 # if several label sets publish it. "series": kept per label set under the metric's `key`, for
 # HttpScrape to difference series by series.
-FIELDS: dict[str, str] = {"waiting": "sum", "running": "sum", "preempts": "sum",
-                          "kv": "last", "hits": "last", "prefix_counts": "series"}
+FIELDS: dict[str, str] = {
+    "waiting": "sum",
+    "running": "sum",
+    "preempts": "sum",
+    "kv": "last",
+    "hits": "last",
+    "prefix_counts": "series",
+}
 
 
 class Metric(NamedTuple):
@@ -120,7 +126,7 @@ def _samples(text: str) -> Iterator[tuple[str, str, float]]:
             close = _label_end(line, end)
             if close == -1:
                 continue
-            labels, end = line[end:close + 1], close + 1
+            labels, end = line[end : close + 1], close + 1
         rest = line[end:]
         if not rest[:1].isspace():  # the value must follow whitespace
             continue
@@ -151,8 +157,10 @@ METRICS_FLAG = {
     "vllm": "vLLM publishes them unless started with --disable-log-stats",
     "sglang": "start SGLang with --enable-metrics",
     "llamacpp": "start llama-server with --metrics",
-    "trtllm": ("set return_perf_metrics: true and enable_iter_perf_stats: true in the "
-               "--extra_llm_api_options YAML (the queue gauges need TensorRT-LLM 1.3 or later)"),
+    "trtllm": (
+        "set return_perf_metrics: true and enable_iter_perf_stats: true in the "
+        "--extra_llm_api_options YAML (the queue gauges need TensorRT-LLM 1.3 or later)"
+    ),
     "tei": "TEI publishes them on its main port",
 }
 
@@ -192,7 +200,6 @@ class Null:
         return None
 
 
-
 SCRAPE_TIMEOUTS = Timeouts(read=5.0, connect=5.0, pool=5.0)
 
 
@@ -203,8 +210,7 @@ class HttpScrape:
     reads keeps the door open; the skipped reads cost no request. The blind-mode warning says
     why the last read missed and, for a known engine, the flag that turns its gauges on."""
 
-    def __init__(self, client: HttpClient, endpoint: str, max_fails: int = 5,
-                 retry_every: int = 30):
+    def __init__(self, client: HttpClient, endpoint: str, max_fails: int = 5, retry_every: int = 30):
         self.base = endpoint.rsplit("/v1", 1)[0]
         self.url = f"{self.base}/metrics"
         self.client = client
@@ -233,15 +239,19 @@ class HttpScrape:
         if self._off:
             if not self._blind:
                 self._blind = True
-                log.warning(f"{self.engine} reports its metrics endpoint off — running blind; "
-                            f"{self._hint().removesuffix('; ')}")
+                log.warning(
+                    f"{self.engine} reports its metrics endpoint off — running blind; "
+                    f"{self._hint().removesuffix('; ')}"
+                )
             return None
         if self._fails >= self.max_fails:
             if not self._blind:
                 self._blind = True
                 self._skipped = 0
-                log.warning(f"metrics scrape unavailable at {self.url} ({self.reason}) — "
-                            f"running blind; {self._hint()}will retry periodically")
+                log.warning(
+                    f"metrics scrape unavailable at {self.url} ({self.reason}) — "
+                    f"running blind; {self._hint()}will retry periodically"
+                )
             self._skipped += 1
             if self._skipped < self.retry_every:
                 return None
@@ -334,11 +344,13 @@ def _count(value) -> bool:
 def _top_level(key: str, *signature: str) -> Callable[[object], int | None]:
     """A count under `key` at the top level of a JSON object that also has every `signature` key:
     the shape that names the engine, so another server's /info or /props does not pass for it."""
+
     def read(body) -> int | None:
         if not isinstance(body, dict) or not all(k in body for k in signature):
             return None
         value = body.get(key)
         return value if _count(value) else None
+
     return read
 
 
@@ -409,8 +421,9 @@ async def probe(client: HttpClient, endpoint: str) -> Probe:
 
     base = endpoint.rsplit("/v1", 1)[0]
     paths = [path for path, _, _, _ in CAPACITY_SOURCES]
-    bodies = dict(zip(paths, await asyncio.gather(*(_get_json(client, f"{base}{p}") for p in paths)),
-                      strict=True))
+    bodies = dict(
+        zip(paths, await asyncio.gather(*(_get_json(client, f"{base}{p}") for p in paths)), strict=True)
+    )
     capacity = None
     for path, reader, engine, queues in CAPACITY_SOURCES:
         requests = reader(bodies[path])

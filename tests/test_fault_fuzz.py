@@ -77,10 +77,17 @@ def records(out: str) -> list[dict]:
 
 
 def run(stub, out, rows, retry_errors=False):
-    return pump(rows, lambda r: {"model": "stub", "messages": [{"role": "user", "content": r["text"]}]},
-                lambda r, b: {"reply": b["choices"][0]["message"]["content"]},
-                endpoint=stub.endpoint, output=out, window=Fixed(4), fail_fast=0,
-                retry_budget_s=30.0, retry_errors=retry_errors)  # generous: recovery, not timing
+    return pump(
+        rows,
+        lambda r: {"model": "stub", "messages": [{"role": "user", "content": r["text"]}]},
+        lambda r, b: {"reply": b["choices"][0]["message"]["content"]},
+        endpoint=stub.endpoint,
+        output=out,
+        window=Fixed(4),
+        fail_fast=0,
+        retry_budget_s=30.0,
+        retry_errors=retry_errors,
+    )  # generous: recovery, not timing
 
 
 @pytest.fixture

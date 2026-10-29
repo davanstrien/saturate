@@ -38,8 +38,12 @@ def probe_body(model: str | None) -> dict:
     the < 500 rule. It carries the caller's model so a multi-model server resolves the same
     backend. Never a caller's own body: a long generation cannot answer inside the probe
     timeout, and a poison body would hold the circuit open on a healthy server."""
-    return {"model": model or "readiness-probe", "messages": [{"role": "user", "content": "hi"}],
-            "input": "hi", "max_tokens": 1}
+    return {
+        "model": model or "readiness-probe",
+        "messages": [{"role": "user", "content": "hi"}],
+        "input": "hi",
+        "max_tokens": 1,
+    }
 
 
 class FatalTransportError(RuntimeError):
@@ -104,7 +108,8 @@ class Breaker:
         while True:
             if self.dead:
                 raise FatalTransportError(
-                    f"circuit breaker gave up after {self.max_open_s}s — server is not coming back")
+                    f"circuit breaker gave up after {self.max_open_s}s — server is not coming back"
+                )
             if self._open:
                 await self._closed.wait()
                 continue  # re-check: the breaker may have re-opened (or died)
@@ -114,8 +119,10 @@ class Breaker:
         self._open = True
         self._closed.clear()
         self.opens += 1
-        log.warning(f"circuit OPEN after {self.consecutive} consecutive 5xx/transport "
-                    "failures — pausing admission, probing")
+        log.warning(
+            f"circuit OPEN after {self.consecutive} consecutive 5xx/transport "
+            "failures — pausing admission, probing"
+        )
         deadline = time.monotonic() + self.max_open_s  # probes and sleeps never run past it
         try:
             while True:
@@ -123,7 +130,8 @@ class Breaker:
                 if left <= 0:
                     self.dead = True  # waiters released below; they raise on re-check
                     raise FatalTransportError(
-                        f"circuit breaker open for {self.max_open_s}s — server is not coming back")
+                        f"circuit breaker open for {self.max_open_s}s — server is not coming back"
+                    )
                 if await self._probe(client, probe_url, model, min(PROBE_TIMEOUT_S, left)):
                     break
                 await asyncio.sleep(min(self.probe_interval, max(0.0, deadline - time.monotonic())))
@@ -138,9 +146,12 @@ class Breaker:
         """Whether the inference server answered a probe within `limit` seconds. The capped phase
         timeouts keep each phase short; wait_for bounds their sum, which could reach 3x `limit`."""
         try:
-            r = await asyncio.wait_for(client.post(url, json=probe_body(model),
-                                                   timeouts=client.timeouts.capped(limit),
-                                                   headers=PROBE_HEADERS), limit)
+            r = await asyncio.wait_for(
+                client.post(
+                    url, json=probe_body(model), timeouts=client.timeouts.capped(limit), headers=PROBE_HEADERS
+                ),
+                limit,
+            )
         except (TransportError, asyncio.TimeoutError):
             return False
         return _server_answered(r)
@@ -163,6 +174,7 @@ class Attempt:
 class Outcome:
     """What one failed attempt means for its row. Pure data: `classify` decides it,
     `call_endpoint` acts on it."""
+
     retry: bool  # worth another attempt (budget, attempt count and request kind permitting)
     pressure: bool  # saturation-shaped: the controller should hear it (once per row)
     breaker_fail: bool  # evidence the server may be down: the breaker counts it
@@ -177,8 +189,13 @@ def classify(status: int, retry_after: str | None = None, text: str = "") -> Out
     if 300 <= status < 400:  # redirects are not followed: a config error, not pressure
         return Outcome(False, False, False, f"http {status}: endpoint redirects — use the final URL")
     if status == 429:  # any Retry-After header marks a paced quota, even one we cannot parse
-        return Outcome(True, retry_after is None, False, f"http 429 after retries: {text[:300]}",
-                       _parse_retry_after(retry_after))
+        return Outcome(
+            True,
+            retry_after is None,
+            False,
+            f"http 429 after retries: {text[:300]}",
+            _parse_retry_after(retry_after),
+        )
     if 400 <= status < 500:
         return Outcome(False, False, False, f"http {status}: {text[:300]}")
     return Outcome(True, True, True, f"http {status} after retries: {text[:300]}")
@@ -195,8 +212,7 @@ def transport_failure(exc: BaseException) -> Outcome:
     return Outcome(True, True, True, f"transport: {type(exc).__name__}: {exc}")
 
 
-def next_wait(delay: float, retry_after: float | None = None,
-              uniform=random.uniform) -> tuple[float, float]:
+def next_wait(delay: float, retry_after: float | None = None, uniform=random.uniform) -> tuple[float, float]:
     """(seconds to wait now, the next attempt's delay ceiling). Full jitter up to `delay`, which
     doubles per retry up to 60 s. A server-given Retry-After is jittered upwards too: rows told
     the same wait would otherwise all wake at the same instant and hit the server together."""
@@ -204,9 +220,14 @@ def next_wait(delay: float, retry_after: float | None = None,
     return wait, min(delay * 2, 60.0)
 
 
-async def call_endpoint(client: HttpClient, base: str, req: Request,
-                        breaker: Breaker, observe: Callable[[Attempt], None],
-                        budget_s: float | None = None) -> tuple[dict | None, str | None]:
+async def call_endpoint(
+    client: HttpClient,
+    base: str,
+    req: Request,
+    breaker: Breaker,
+    observe: Callable[[Attempt], None],
+    budget_s: float | None = None,
+) -> tuple[dict | None, str | None]:
     """Returns (response_json, error), and hands `observe` an Attempt as each attempt ends.
     `classify` decides what a failed attempt means and `next_wait` how long to back off; this
     loop owns the I/O and the budget. When a row's attempts fail in different ways, its error
@@ -269,8 +290,9 @@ async def _send(client: HttpClient, url: str, req: Request, retry: bool, left: f
     if req.kind == "multipart":
         return await client.post(url, form=multipart(req.data, req.files or {}))
     if retry and RETRY_ACTIVE:
-        return await asyncio.wait_for(client.post(url, json=req.json, timeouts=client.timeouts.capped(left)),
-                                      left)
+        return await asyncio.wait_for(
+            client.post(url, json=req.json, timeouts=client.timeouts.capped(left)), left
+        )
     return await client.post(url, json=req.json)
 
 

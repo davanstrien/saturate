@@ -30,7 +30,6 @@ log = logging.getLogger(__name__)
 READ_AHEAD = 64  # rows the reader may read before the feeder has taken them
 
 
-
 _END = object()  # put in the queue after the last finished row
 
 
@@ -143,16 +142,26 @@ class _Run:
             self.backlog.release()
         self.held.clear()
         self.discarding = True
-        self.fail(FatalTransportError(
-            f"the first {self.fail_fast} rows all failed, so the run stopped without storing "
-            f"them. First error: {first}. Fix the cause and re-run (these rows will be retried), "
-            "or pass fail_fast=0 to disable this check"))
+        self.fail(
+            FatalTransportError(
+                f"the first {self.fail_fast} rows all failed, so the run stopped without storing "
+                f"them. First error: {first}. Fix the cause and re-run (these rows will be retried), "
+                "or pass fail_fast=0 to disable this check"
+            )
+        )
 
 
 @contextlib.asynccontextmanager
-async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]], to_request: Callable,
-                  parse: Callable, route: str = "/chat/completions", prepare_workers: int = 0,
-                  fail_fast: int = 32, backlog: int | None = None) -> AsyncGenerator[Results, None]:
+async def through(
+    client: AdaptiveClient,
+    rows: Iterable[tuple[str, dict]],
+    to_request: Callable,
+    parse: Callable,
+    route: str = "/chat/completions",
+    prepare_workers: int = 0,
+    fail_fast: int = 32,
+    backlog: int | None = None,
+) -> AsyncGenerator[Results, None]:
     """Run every (id, row) through the endpoint; yields the finished rows as they finish.
 
         async with through(client, rows, to_request, parse) as results:
@@ -174,13 +183,22 @@ async def through(client: AdaptiveClient, rows: Iterable[tuple[str, dict]], to_r
     fail_fast = max(0, fail_fast)
     room = backlog or _default_backlog(limiter, fail_fast)
     if room < fail_fast:
-        raise ValueError(f"backlog={room} is smaller than fail_fast={fail_fast}: the failures held "
-                         "back would take every place and the run could never go on")
+        raise ValueError(
+            f"backlog={room} is smaller than fail_fast={fail_fast}: the failures held "
+            "back would take every place and the run could never go on"
+        )
     limiter.prep_workers = prepare_workers
-    run = _Run(client=client, limiter=limiter, to_request=to_request, parse=adapt_parse(parse),
-               route=route, fail_fast=fail_fast, prepare=anyio.Semaphore(max(2 * prepare_workers, 4)),
-               backlog=anyio.Semaphore(room),
-               prepare_threads=anyio.CapacityLimiter(prepare_workers) if prepare_workers else None)
+    run = _Run(
+        client=client,
+        limiter=limiter,
+        to_request=to_request,
+        parse=adapt_parse(parse),
+        route=route,
+        fail_fast=fail_fast,
+        prepare=anyio.Semaphore(max(2 * prepare_workers, 4)),
+        backlog=anyio.Semaphore(room),
+        prepare_threads=anyio.CapacityLimiter(prepare_workers) if prepare_workers else None,
+    )
     caller_error: BaseException | None = None
     async with anyio.create_task_group() as group:
         group.start_soon(_produce, run, rows)
@@ -356,6 +374,7 @@ async def _row(run: _Run, id_: str, row: dict) -> None:
 
 async def _build_request(run: _Run, row: dict):
     """`to_request(row)`, on the event loop or in a prepare thread; its time goes to telemetry."""
+
     def build():
         t = time.monotonic()
         return run.to_request(row), time.monotonic() - t
@@ -363,10 +382,12 @@ async def _build_request(run: _Run, row: dict):
     if run.prepare_threads is None:
         request, took = build()
     else:
-        request, took = await anyio.to_thread.run_sync(build, limiter=run.prepare_threads,
-                                                       abandon_on_cancel=True)
+        request, took = await anyio.to_thread.run_sync(
+            build, limiter=run.prepare_threads, abandon_on_cancel=True
+        )
     run.limiter.note_prep(took)
     return request
+
 
 def adapt_parse(parse: Callable) -> Callable[[dict, dict], dict]:
     """parse(row, resp) with row passthrough; a parse with one REQUIRED positional parameter
@@ -376,7 +397,9 @@ def adapt_parse(parse: Callable) -> Callable[[dict, dict], dict]:
         sig = inspect.signature(parse)
     except (TypeError, ValueError):  # a callable with no introspectable signature: the documented form
         return parse
-    params = [p for p in sig.parameters.values()
-              if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) and p.default is p.empty]
+    params = [
+        p
+        for p in sig.parameters.values()
+        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) and p.default is p.empty
+    ]
     return parse if len(params) >= 2 else (lambda row, resp: parse(resp))
-

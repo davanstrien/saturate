@@ -39,7 +39,6 @@ from .schema import (
 log = logging.getLogger(__name__)
 
 
-
 # Everything saturate writes beside the data parts lives under one directory whose name starts
 # with "__": datasets' loader and pyarrow's dataset reader both skip such paths, so
 # load_dataset(out) and pq.read_table(out) see the parts alone (CONTRACT §1).
@@ -70,8 +69,15 @@ def error_row(id_, exc: BaseException) -> dict:
 
 
 class ParquetSink:
-    def __init__(self, out_uri: str, flush_every: int | None = None, schema: pa.Schema | None = None,
-                 read_workers: int = 16, flush_interval_s: float | None = None, create: bool = True):
+    def __init__(
+        self,
+        out_uri: str,
+        flush_every: int | None = None,
+        schema: pa.Schema | None = None,
+        read_workers: int = 16,
+        flush_interval_s: float | None = None,
+        create: bool = True,
+    ):
         """`create=False` opens the output for reading only: no repo, bucket or directory is
         created, and a missing output reads as empty (resume checks, existing_ids())."""
         import fsspec
@@ -90,8 +96,11 @@ class ParquetSink:
         # Rows are counted, not bytes: if parse returns large payloads (images), pass a smaller
         # flush_every.
         self.flush_every = flush_every if flush_every is not None else 1000
-        self.flush_interval_s = flush_interval_s if flush_interval_s is not None else (
-            LOCAL_FLUSH_INTERVAL_S if local else REMOTE_FLUSH_INTERVAL_S)
+        self.flush_interval_s = (
+            flush_interval_s
+            if flush_interval_s is not None
+            else (LOCAL_FLUSH_INTERVAL_S if local else REMOTE_FLUSH_INTERVAL_S)
+        )
         self.read_workers = read_workers  # resume read concurrency; 1 = sequential
         self._buf: list[dict] = []
         self._buf_since: float | None = None  # monotonic time of the oldest buffered row
@@ -100,8 +109,11 @@ class ParquetSink:
         if schema is not None:
             if not {"id", "error"} <= set(schema.names):
                 raise ValueError("declared schema must include the id and error columns")
-            if (schema.field("id").type != pa.string() or schema.field("error").type != pa.string()
-                    or not schema.field("error").nullable):
+            if (
+                schema.field("id").type != pa.string()
+                or schema.field("error").type != pa.string()
+                or not schema.field("error").nullable
+            ):
                 raise ValueError("declared schema: id and error must be string, error nullable")
             bad = [f.name for f in schema if f.name != "id" and not f.nullable]
             if bad:  # error rows write user fields as null: a non-nullable field would crash the flush
@@ -200,19 +212,22 @@ class ParquetSink:
         scanned individually (kill-safe). retry_errors=True excludes ids whose
         only record is an error."""
         try:
-            manifests = sorted(self.fs.glob(f"{self.root}/{MANIFEST_DIR}/ids-*.parquet")
-                               + self.fs.glob(f"{self.root}/{OLD_MANIFEST_DIR}/ids-*.parquet"))
+            manifests = sorted(
+                self.fs.glob(f"{self.root}/{MANIFEST_DIR}/ids-*.parquet")
+                + self.fs.glob(f"{self.root}/{OLD_MANIFEST_DIR}/ids-*.parquet")
+            )
         except FileNotFoundError:  # an output that does not exist yet (a repo never created)
             self.error_only_ids = set()
             return set()
         if len(manifests) > 1000:
-            log.info(f"resume: reading {len(manifests)} manifest files "
-                     "(fewer, larger parts: a larger flush_every, or flush_interval_s on ParquetSink)")
+            log.info(
+                f"resume: reading {len(manifests)} manifest files "
+                "(fewer, larger parts: a larger flush_every, or flush_interval_s on ParquetSink)"
+            )
         read = self._read_many(manifests)
         covered = {path.rsplit("/", 1)[-1][4:] for path in read}
         self._parts = _list_parts(self.fs, self.root)  # one listing serves the seed too
-        read.update(self._read_many([p for p in self._parts
-                                     if p.rsplit("/", 1)[-1] not in covered]))
+        read.update(self._read_many([p for p in self._parts if p.rsplit("/", 1)[-1] not in covered]))
         done: set[str] = set()
         failed: set[str] = set()
         for d, f in read.values():
@@ -271,8 +286,14 @@ class ParquetSink:
             self._fits[key] = fit(value_type, pinned_type)
         stored_type = self._fits[key]
         if stored_type is None:
-            hint = ("; a nested field's type is fixed by its first typed value: declare it with "
-                    "schema=, or store this object as a JSON string") if is_nested(pinned_type) else ""
+            hint = (
+                (
+                    "; a nested field's type is fixed by its first typed value: declare it with "
+                    "schema=, or store this object as a JSON string"
+                )
+                if is_nested(pinned_type)
+                else ""
+            )
             raise TypeError(f"{name}: {value_type} does not fit the pinned type {pinned_type}{hint}")
         return stored_type  # the caller's safe cast refuses values that do not fit (0.5 -> int64, overflow)
 
@@ -341,8 +362,9 @@ class ParquetSink:
         if self._declared is None:  # track the buffer's types so probe() can see the whole batch
             cached = self._probe_cache
             try:
-                stored = (cached[1] if cached and cached[0] is record
-                       else self._stored_types(pa.array([record])))
+                stored = (
+                    cached[1] if cached and cached[0] is record else self._stored_types(pa.array([record]))
+                )
                 self._buf_schema = self._widen_buffer(stored)
             except UNSTORABLE:
                 pass  # a direct append of a row that does not fit: flush demotes it (the guarantee)
@@ -371,8 +393,9 @@ class ParquetSink:
                 extra.update(outside_declared(r, self._declared))
             if extra:
                 raise ValueError(f"rows carry fields outside the declared schema: {sorted(extra)}")
-            table = pa.Table.from_pylist([{n: r.get(n) for n in self._declared.names}
-                                          for r in self._buf], schema=self._declared)
+            table = pa.Table.from_pylist(
+                [{n: r.get(n) for n in self._declared.names} for r in self._buf], schema=self._declared
+            )
         else:
             if not self._seeded:
                 self._seed_schema()
@@ -383,13 +406,13 @@ class ParquetSink:
             table = self._drop_untyped(table)
             if pa.types.is_null(table.schema.field("error").type):  # error is required: pin to string
                 i = table.schema.get_field_index("error")
-                table = table.set_column(i, pa.field("error", pa.string()),
-                                         table["error"].cast(pa.string()))
+                table = table.set_column(i, pa.field("error", pa.string()), table["error"].cast(pa.string()))
             # pin seen columns at first sight; pinned columns already conform, so the unify
             # only ever appends new columns and new struct fields — a pinned type never moves,
             # since retyping only the NEW part would break multi-part reads
-            schema = self._pin(table.schema if self._schema is None else
-                               pa.unify_schemas([self._schema, table.schema]))
+            schema = self._pin(
+                table.schema if self._schema is None else pa.unify_schemas([self._schema, table.schema])
+            )
             # every part carries the FULL pinned schema — absent or all-null columns become
             # typed all-null arrays (#12): pyarrow.dataset takes the FIRST fragment's schema
             # by default, so any part missing a pinned column loses that column for the
@@ -481,8 +504,11 @@ class ParquetSink:
                 t = self._drop_untyped(self._conform(pa.Table.from_pylist([rec])))
                 # THE check for not-yet-pinned columns: the unify raises (ArrowTypeError, a
                 # TypeError) when this row's type clashes with an earlier row's in the batch
-                running = (t.schema if running is None else
-                           pa.unify_schemas([running, t.schema], promote_options="permissive"))
+                running = (
+                    t.schema
+                    if running is None
+                    else pa.unify_schemas([running, t.schema], promote_options="permissive")
+                )
             except UNSTORABLE as e:
                 self._buf[i] = error_row(rec.get("id"), e)
                 t = None
@@ -573,8 +599,10 @@ class FileSink:
         if not ext.startswith(".") or "/" in ext or ".." in ext:  # ext lands in filenames + globs
             raise ValueError(f"FileSink: unsafe ext {ext!r}")
         if "://" in str(outdir):  # Path() would quietly make a local "hf:/..." directory
-            raise ValueError(f"FileSink writes to a local directory, not {outdir!r}: pass the URI "
-                             "as pump(output=...) for a ParquetSink, or write locally and upload")
+            raise ValueError(
+                f"FileSink writes to a local directory, not {outdir!r}: pass the URI "
+                "as pump(output=...) for a ParquetSink, or write locally and upload"
+            )
         self.dir = Path(outdir)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.ext, self.key = ext, key
@@ -604,8 +632,10 @@ class FileSink:
         if self._rejected <= LOGGED_REJECTIONS:
             log.warning(f"FileSink: row {record['id']!r} not written: {reason}; it runs again next run")
         if not self._accepted and self._rejected >= FIRST_ROWS:
-            raise RuntimeError(f"FileSink: the first {FIRST_ROWS} rows could not be written "
-                               f"(the last: {reason}); check FileSink(key=...) and the row ids")
+            raise RuntimeError(
+                f"FileSink: the first {FIRST_ROWS} rows could not be written "
+                f"(the last: {reason}); check FileSink(key=...) and the row ids"
+            )
         raise ValueError(f"FileSink: {reason}")
 
     def _rejection(self, record: dict) -> str | None:

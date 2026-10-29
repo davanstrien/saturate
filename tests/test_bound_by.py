@@ -166,8 +166,23 @@ def test_stats_carry_ticks_per_verdict():
 
 @pytest.mark.internals
 def test_tick_record_carries_the_verdict_and_stage_times():
-    rec = tick_record(1.0, 8, 2, None, 0, 3, True, 10.0, "hold", bound_by="prep",
-                      source_s=0.0123456, prep_s=0.5, prep_n=7, prep_workers=2, loop_lag_s=0.25)
+    rec = tick_record(
+        1.0,
+        8,
+        2,
+        None,
+        0,
+        3,
+        True,
+        10.0,
+        "hold",
+        bound_by="prep",
+        source_s=0.0123456,
+        prep_s=0.5,
+        prep_n=7,
+        prep_workers=2,
+        loop_lag_s=0.25,
+    )
     assert (rec["bound_by"], rec["source_s"], rec["prep_s"]) == ("prep", 0.012, 0.5)
     assert (rec["prep_n"], rec["prep_workers"], rec["loop_lag_s"]) == (7, 2, 0.25)
     rec = tick_record(1.0, 8, 2, None, 0, 3, False, 10.0, "hold")
@@ -175,35 +190,52 @@ def test_tick_record_carries_the_verdict_and_stage_times():
 
 
 def ticks(verdict, n, stage_s=0.0, ok=0, bp=0, prep_n=0, t0=0.0, lag=0.0):
-    return [{"t": t0 + 2.0 * (i + 1), "bound_by": verdict, "ok": ok, "bp": bp, "prep_n": prep_n,
-             "prep_s": stage_s if verdict == "prep" else 0.0,
-             "source_s": stage_s if verdict == "source" else 0.0, "loop_lag_s": lag}
-            for i in range(n)]
+    return [
+        {
+            "t": t0 + 2.0 * (i + 1),
+            "bound_by": verdict,
+            "ok": ok,
+            "bp": bp,
+            "prep_n": prep_n,
+            "prep_s": stage_s if verdict == "prep" else 0.0,
+            "source_s": stage_s if verdict == "source" else 0.0,
+            "loop_lag_s": lag,
+        }
+        for i in range(n)
+    ]
 
 
 def test_advisor_quotes_prep_cost_per_measured_call_not_per_success():
     # 4 prep ticks of 1 s over 20 calls each (50 ms/call); the poison rows never count as ok
     run = ticks("prep", 4, 1.0, ok=2, bp=0, prep_n=20) + ticks("engine", 6, ok=20)
     (hint,) = advise_input(run)
-    assert hint == ("PREP-BOUND: to_request took 50 ms/row on average; if it releases the GIL (Pillow, "
-                    "ffmpeg, I/O) set pump(prepare_workers=4), otherwise prepare rows ahead of the pump "
-                    "with prepare_ahead(rows, fn, executor=ProcessPoolExecutor())")
+    assert hint == (
+        "PREP-BOUND: to_request took 50 ms/row on average; if it releases the GIL (Pillow, "
+        "ffmpeg, I/O) set pump(prepare_workers=4), otherwise prepare rows ahead of the pump "
+        "with prepare_ahead(rows, fn, executor=ProcessPoolExecutor())"
+    )
     (hint,) = advise_input(run, prepare_workers=4)
-    assert hint == ("PREP-BOUND: prep is still the bottleneck at 4 workers (50 ms/row): raise "
-                    "prepare_workers, or move the work to prepare_ahead with a process pool")
+    assert hint == (
+        "PREP-BOUND: prep is still the bottleneck at 4 workers (50 ms/row): raise "
+        "prepare_workers, or move the work to prepare_ahead with a process pool"
+    )
     assert advise_input(ticks("prep", 2, 1.0, prep_n=5) + ticks("engine", 8, ok=20)) == []  # 20% < 30%
     assert advise_input(ticks("prep", 2, 1.0, prep_n=5)) == []  # under three ticks: too short to diagnose
 
 
 def test_advisor_names_the_source_and_a_blocked_loop():
     (hint,) = advise_input(ticks("source", 3, 0.6, ok=2, bp=1) + ticks(None, 7))
-    assert hint == ("SOURCE-BOUND: the source took 200 ms/row; prefetch it (prepare_ahead / "
-                    "bucket_rows(prefetch=)), select fewer columns, or shard the input")
+    assert hint == (
+        "SOURCE-BOUND: the source took 200 ms/row; prefetch it (prepare_ahead / "
+        "bucket_rows(prefetch=)), select fewer columns, or shard the input"
+    )
     run = ticks("loop", 4, lag=1.5) + ticks("engine", 4, t0=8.0)  # 6 s of lag over a 16 s run
     (hint,) = advise_input(run)
-    assert hint == ("LOOP-BOUND: the event loop was blocked 38% of the run (parse, sink writes, and "
-                    "any to_request share under the prep threshold); keep parse cheap, raise "
-                    "flush_every, and move to_request work off the loop")
+    assert hint == (
+        "LOOP-BOUND: the event loop was blocked 38% of the run (parse, sink writes, and "
+        "any to_request share under the prep threshold); keep parse cheap, raise "
+        "flush_every, and move to_request work off the loop"
+    )
 
 
 class _EchoClient:
@@ -231,8 +263,9 @@ def test_prepare_workers_run_to_request_in_threads_and_errors_stay_row_errors():
         client = _EchoClient(StubLimiter())
         rows = iter([(str(i), {"n": i}) for i in range(8)])
         # _EchoClient stands in for AdaptiveClient with the `limiter` and `post` through() uses
-        async with through(cast(AdaptiveClient, client), rows, to_request, lambda r, b: b["req"],
-                           prepare_workers=2) as results:
+        async with through(
+            cast(AdaptiveClient, client), rows, to_request, lambda r, b: b["req"], prepare_workers=2
+        ) as results:
             done = [d async for d in results]
         return client, done
 

@@ -194,4 +194,3 @@ def test_a_limiter_entered_again_still_supervises_its_controller_loop():
 
     with pytest.raises(FatalTransportError, match="cancelled"):
         asyncio.run(go())
-

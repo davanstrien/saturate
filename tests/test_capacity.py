@@ -18,11 +18,14 @@ LLAMACPP = Capacity(8, True, "llamacpp")
 TEI = Capacity(300, False, "tei")
 
 
-@pytest.mark.parametrize("capacity, start, ceiling", [
-    (SGLANG, 256 + 16, 512),  # + 2 x target_waiting: a queue inside the band the queue cut allows
-    (LLAMACPP, 16, 512),      # + capacity when smaller: 16 beat 8 slots on a live server
-    (TEI, 300, 300),          # rejects past its limit: start there, never above
-])
+@pytest.mark.parametrize(
+    "capacity, start, ceiling",
+    [
+        (SGLANG, 256 + 16, 512),  # + 2 x target_waiting: a queue inside the band the queue cut allows
+        (LLAMACPP, 16, 512),  # + capacity when smaller: 16 beat 8 slots on a live server
+        (TEI, 300, 300),  # rejects past its limit: start there, never above
+    ],
+)
 def test_auto_starts_at_the_reported_capacity(capacity, start, ceiling):
     auto = Auto()
     auto.begin(capacity)
@@ -61,25 +64,38 @@ def test_one_auto_runs_again_against_another_engine_from_its_own_configuration()
     assert auto.state.clock == 0.0
 
 
-SGLANG_LOADS = {"loads": [{"dp_rank": 0, "num_running_reqs": 0, "max_running_requests": 128},
-                          {"dp_rank": 1, "num_running_reqs": 3, "max_running_requests": 128}]}
+SGLANG_LOADS = {
+    "loads": [
+        {"dp_rank": 0, "num_running_reqs": 0, "max_running_requests": 128},
+        {"dp_rank": 1, "num_running_reqs": 3, "max_running_requests": 128},
+    ]
+}
 
 
-@pytest.mark.parametrize("path, payload, expected", [
-    ("/v1/loads", SGLANG_LOADS, Capacity(256, True, "sglang")),  # summed over data-parallel ranks
-    ("/v1/loads", {"num_running_reqs": 0, "max_running_requests": 64}, Capacity(64, True, "sglang")),
-    ("/get_server_info", {"max_running_requests": 128, "max_prefill_tokens": 16384},
-     Capacity(128, True, "sglang")),
-    ("/get_server_info", {"max_running_requests": None, "max_prefill_tokens": 16384}, None),
-    ("/props", {"total_slots": 8, "default_generation_settings": {}}, Capacity(8, True, "llamacpp")),
-    ("/info", {"model_id": "m", "max_concurrent_requests": 300, "max_batch_tokens": 16384},
-     Capacity(300, False, "tei")),
-    ("/info", {"model_id": "x"}, None),  # a 200 without the field is no capacity
-    ("/info", {"gateway": {"max_concurrent_requests": 3}}, None),  # a nested field is not TEI's
-    ("/props", {"total_slots": True, "default_generation_settings": {}}, None),  # not a count
-    ("/server_info", {"disaggregated_params": None, "max_batch_size": 64}, Capacity(64, True, "trtllm")),
-    ("/server_info", {"max_batch_size": 64}, None),  # not TensorRT-LLM's shape
-])
+@pytest.mark.parametrize(
+    "path, payload, expected",
+    [
+        ("/v1/loads", SGLANG_LOADS, Capacity(256, True, "sglang")),  # summed over data-parallel ranks
+        ("/v1/loads", {"num_running_reqs": 0, "max_running_requests": 64}, Capacity(64, True, "sglang")),
+        (
+            "/get_server_info",
+            {"max_running_requests": 128, "max_prefill_tokens": 16384},
+            Capacity(128, True, "sglang"),
+        ),
+        ("/get_server_info", {"max_running_requests": None, "max_prefill_tokens": 16384}, None),
+        ("/props", {"total_slots": 8, "default_generation_settings": {}}, Capacity(8, True, "llamacpp")),
+        (
+            "/info",
+            {"model_id": "m", "max_concurrent_requests": 300, "max_batch_tokens": 16384},
+            Capacity(300, False, "tei"),
+        ),
+        ("/info", {"model_id": "x"}, None),  # a 200 without the field is no capacity
+        ("/info", {"gateway": {"max_concurrent_requests": 3}}, None),  # a nested field is not TEI's
+        ("/props", {"total_slots": True, "default_generation_settings": {}}, None),  # not a count
+        ("/server_info", {"disaggregated_params": None, "max_batch_size": 64}, Capacity(64, True, "trtllm")),
+        ("/server_info", {"max_batch_size": 64}, None),  # not TensorRT-LLM's shape
+    ],
+)
 def test_read_capacity_reads_each_engines_own_shape(path, payload, expected):
     with StubServer() as stub:
         stub.json_routes[path] = payload
@@ -113,8 +129,11 @@ def test_the_client_hands_the_probe_to_the_scrape_whatever_the_window():
             return client.limiter.signals
 
     with StubServer() as stub:
-        stub.json_routes["/props"] = {"total_slots": 8, "default_generation_settings": {},
-                                      "endpoint_metrics": False}
+        stub.json_routes["/props"] = {
+            "total_slots": 8,
+            "default_generation_settings": {},
+            "endpoint_metrics": False,
+        }
         signals = asyncio.run(enter(stub.endpoint))
         assert (signals.engine, signals.reason) == ("llamacpp", "the engine reports its metrics endpoint off")
 
@@ -122,6 +141,7 @@ def test_the_client_hands_the_probe_to_the_scrape_whatever_the_window():
 def test_a_reused_client_reads_the_capacity_again():
     """The second `async with` reads the engine afresh: a capacity that changed between runs
     takes effect."""
+
     async def twice(stub):
         client = AdaptiveClient(stub.endpoint)
         async with client:
@@ -138,6 +158,7 @@ def test_a_reused_client_reads_the_capacity_again():
 def test_cancelling_the_entry_during_the_capacity_read_closes_the_client():
     """The read happens inside `async with` before the run starts: a cancel there must not leave
     the HTTP session open, since __aexit__ never runs."""
+
     async def scenario():
         async def silent(reader, writer):  # accepts, never answers
             await asyncio.sleep(30)

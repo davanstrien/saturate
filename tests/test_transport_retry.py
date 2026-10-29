@@ -56,9 +56,15 @@ def test_retry_after_capped_by_budget(monkeypatch):
     monkeypatch.setattr(transport, "RETRY_BUDGET_S", 0.2)
     client = _Client(_Resp(429, {"retry-after": "3600"}))
     t0 = time.monotonic()
-    body, err = asyncio.run(call_endpoint(
-        cast(HttpClient, client), "http://x", make_json_request("/chat/completions", {}),
-        Breaker(), _Observed()))
+    body, err = asyncio.run(
+        call_endpoint(
+            cast(HttpClient, client),
+            "http://x",
+            make_json_request("/chat/completions", {}),
+            Breaker(),
+            _Observed(),
+        )
+    )
     assert body is None and err is not None and "429" in err
     assert time.monotonic() - t0 < 2.0  # not the header's 3600s
     assert client.posts == 1  # the budget-capped sleep does not buy another request
@@ -75,9 +81,15 @@ def test_retry_attempts_get_budget_capped_timeouts(monkeypatch):
     # 1 s budget and leave no retry to inspect (a slow runner can take that long)
     monkeypatch.setattr(transport, "BACKOFF_BASE_S", 0.01)
     client = _Client(_Resp(500))
-    body, err = asyncio.run(call_endpoint(
-        cast(HttpClient, client), "http://x", make_json_request("/chat/completions", {}),
-        Breaker(), _Observed()))
+    body, err = asyncio.run(
+        call_endpoint(
+            cast(HttpClient, client),
+            "http://x",
+            make_json_request("/chat/completions", {}),
+            Breaker(),
+            _Observed(),
+        )
+    )
     assert body is None and err is not None and "500" in err
     assert client.sent[0] == "absent"  # first attempt: client default window
     assert all(max(t.connect, t.read, t.write, t.pool) <= 1.0 for t in client.sent[1:])
@@ -91,9 +103,16 @@ def test_a_retry_keeps_the_configured_phase_timeouts_under_its_budget(monkeypatc
     monkeypatch.setattr(transport, "BACKOFF_BASE_S", 0.01)
     configured = Timeouts(read=1800.0, connect=1.5, pool=7.0, write=2.0)
     client = _Client(_Resp(500), timeouts=configured)
-    asyncio.run(call_endpoint(cast(HttpClient, client), "http://x",
-                              make_json_request("/chat/completions", {}), Breaker(), _Observed(),
-                              budget_s=1000.0))
+    asyncio.run(
+        call_endpoint(
+            cast(HttpClient, client),
+            "http://x",
+            make_json_request("/chat/completions", {}),
+            Breaker(),
+            _Observed(),
+            budget_s=1000.0,
+        )
+    )
     retry = client.sent[1]
     assert (retry.connect, retry.write, retry.pool) == (1.5, 2.0, 7.0)
     assert 990.0 < retry.read <= 1000.0  # the 1800 s read window, capped to what is left
@@ -106,9 +125,15 @@ def test_no_timeout_floor_below_budget(monkeypatch):
     milliseconds remain."""
     monkeypatch.setattr(transport, "RETRY_BUDGET_S", 0.05)
     client = _Client(_Resp(429, {"retry-after": "0"}))  # zero backoff: attempts spin freely
-    body, err = asyncio.run(call_endpoint(
-        cast(HttpClient, client), "http://x", make_json_request("/chat/completions", {}),
-        Breaker(), _Observed()))
+    body, err = asyncio.run(
+        call_endpoint(
+            cast(HttpClient, client),
+            "http://x",
+            make_json_request("/chat/completions", {}),
+            Breaker(),
+            _Observed(),
+        )
+    )
     assert body is None
     assert all(max(t.connect, t.read, t.write, t.pool) <= 0.05 for t in client.sent[1:])
 
@@ -136,18 +161,30 @@ def test_breaker_open_time_credited_back_to_budget(monkeypatch):
         async def post(self, url, form=None, json=None, timeouts="absent", headers=None):
             return self.resps.pop(0)
 
-    body, err = asyncio.run(call_endpoint(
-        cast(HttpClient, _SeqClient()), "http://x", make_json_request("/chat/completions", {}),
-        SlowGate(), _Observed()))
+    body, err = asyncio.run(
+        call_endpoint(
+            cast(HttpClient, _SeqClient()),
+            "http://x",
+            make_json_request("/chat/completions", {}),
+            SlowGate(),
+            _Observed(),
+        )
+    )
     assert err is None and body == {"ok": True}  # the retry survived two 0.1s breaker waits
 
 
 @pytest.mark.internals
 def test_multipart_never_retries():
     client = _Client(_Resp(500))
-    body, err = asyncio.run(call_endpoint(
-        cast(HttpClient, client), "http://x", make_multipart_request("/upload", {"a": "1"}, {"file": b"x"}),
-        Breaker(), _Observed()))
+    body, err = asyncio.run(
+        call_endpoint(
+            cast(HttpClient, client),
+            "http://x",
+            make_multipart_request("/upload", {"a": "1"}, {"file": b"x"}),
+            Breaker(),
+            _Observed(),
+        )
+    )
     assert body is None and err == "http 500 after retries: nope"  # the server message is kept
     assert client.posts == 1  # single attempt: the file stream is already consumed
 
@@ -176,9 +213,15 @@ def test_latency_is_the_successful_attempt_alone():
 
     observed = _Observed()
     t = time.monotonic()
-    body, err = asyncio.run(call_endpoint(
-        cast(HttpClient, _SlowThenFast()), "http://x", make_json_request("/chat/completions", {}),
-        Breaker(), observed))
+    body, err = asyncio.run(
+        call_endpoint(
+            cast(HttpClient, _SlowThenFast()),
+            "http://x",
+            make_json_request("/chat/completions", {}),
+            Breaker(),
+            observed,
+        )
+    )
     assert body == {"ok": True} and err is None
     assert time.monotonic() - t >= 0.1  # the row took the slow attempt plus the backoff...
     assert len(observed.latencies) == 1 and observed.latencies[0] < 0.05  # ...the sample did not
@@ -205,8 +248,15 @@ def test_redirect_is_poison_not_pressure():
     client = _Client(_Resp(302, {"location": "https://x/v1/chat/completions"}))
     observed = _Observed()
     breaker = Breaker()
-    body, err = asyncio.run(call_endpoint(
-        cast(HttpClient, client), "http://x", make_json_request("/chat/completions", {}), breaker, observed))
+    body, err = asyncio.run(
+        call_endpoint(
+            cast(HttpClient, client),
+            "http://x",
+            make_json_request("/chat/completions", {}),
+            breaker,
+            observed,
+        )
+    )
     assert body is None and err is not None and "302" in err and "redirect" in err
     assert client.posts == 1
     assert observed.pressure == 0
@@ -229,13 +279,19 @@ def test_a_row_that_always_fails_counts_as_backpressure_once(monkeypatch):
     monkeypatch.setattr(breaker, "fail", lambda: fails.append(1))
     observed = _Observed()
     client = _Client(_Resp(500))
-    body, err = asyncio.run(call_endpoint(
-        cast(HttpClient, client), "http://x", make_json_request("/chat/completions", {}), breaker, observed))
+    body, err = asyncio.run(
+        call_endpoint(
+            cast(HttpClient, client),
+            "http://x",
+            make_json_request("/chat/completions", {}),
+            breaker,
+            observed,
+        )
+    )
     assert body is None and err is not None and "500" in err
     assert client.posts == 5  # it retried...
     assert observed.pressure == 1  # ...but pressured the controller once
     assert len(fails) == 5  # a dead server still trips the breaker attempt by attempt
-
 
 
 @pytest.mark.internals
@@ -250,8 +306,15 @@ def test_retry_after_is_jittered_so_rows_do_not_wake_together(monkeypatch):
 
     monkeypatch.setattr(transport.asyncio, "sleep", record)
     client = _Client(_Resp(429, {"retry-after": "10"}))
-    asyncio.run(call_endpoint(cast(HttpClient, client), "http://x",
-                              make_json_request("/chat/completions", {}), Breaker(), _Observed()))
+    asyncio.run(
+        call_endpoint(
+            cast(HttpClient, client),
+            "http://x",
+            make_json_request("/chat/completions", {}),
+            Breaker(),
+            _Observed(),
+        )
+    )
     assert len(waits) == 4 and all(10.0 <= w <= 12.0 for w in waits), waits
     assert len(set(waits)) > 1  # jittered, not identical
 
@@ -261,10 +324,16 @@ def test_a_5xx_error_row_keeps_the_server_message(monkeypatch):
     client = _Client(_Resp(500))
     client.resp.text = "CUDA out of memory"
     monkeypatch.setattr(transport, "RETRY_ACTIVE", False)
-    body, err = asyncio.run(call_endpoint(cast(HttpClient, client), "http://x",
-                                          make_json_request("/chat/completions", {}), Breaker(), _Observed()))
+    body, err = asyncio.run(
+        call_endpoint(
+            cast(HttpClient, client),
+            "http://x",
+            make_json_request("/chat/completions", {}),
+            Breaker(),
+            _Observed(),
+        )
+    )
     assert body is None and err == "http 500 after retries: CUDA out of memory"
-
 
 
 # --- the pure units: what a failed attempt means, and how long to wait --------------------
@@ -282,15 +351,18 @@ def test_a_2xx_without_a_json_object_retries_and_tells_the_breaker_but_is_not_pr
     assert isinstance(outcome, Outcome)
 
 
-@pytest.mark.parametrize("status, retry_after, retry, pressure, breaker_fail", [
-    (301, None, False, False, False),  # redirect: a config error
-    (400, None, False, False, False),  # poison row
-    (404, None, False, False, False),  # e.g. unknown model: poison, fail_fast catches a run of them
-    (429, None, True, True, False),  # saturation-shaped
-    (429, "5", True, False, False),  # a paced quota: wait, don't cut
-    (500, None, True, True, True),
-    (503, "2", True, True, True),  # 5xx is pressure even with a Retry-After
-])
+@pytest.mark.parametrize(
+    "status, retry_after, retry, pressure, breaker_fail",
+    [
+        (301, None, False, False, False),  # redirect: a config error
+        (400, None, False, False, False),  # poison row
+        (404, None, False, False, False),  # e.g. unknown model: poison, fail_fast catches a run of them
+        (429, None, True, True, False),  # saturation-shaped
+        (429, "5", True, False, False),  # a paced quota: wait, don't cut
+        (500, None, True, True, True),
+        (503, "2", True, True, True),  # 5xx is pressure even with a Retry-After
+    ],
+)
 def test_classify(status, retry_after, retry, pressure, breaker_fail):
     out = classify(status, retry_after, "the server said why")
     assert (out.retry, out.pressure, out.breaker_fail) == (retry, pressure, breaker_fail)
@@ -354,8 +426,11 @@ def test_next_wait_never_undercuts_a_server_given_wait(delay, retry_after, fract
     assert retry_after <= wait <= retry_after * 1.2 + 1e-9
 
 
-@given(st.integers(min_value=300, max_value=599), st.one_of(st.none(), st.text(max_size=8)),
-       st.text(max_size=2000))
+@given(
+    st.integers(min_value=300, max_value=599),
+    st.one_of(st.none(), st.text(max_size=8)),
+    st.text(max_size=2000),
+)
 def test_classify_rules_hold_for_every_status(status, retry_after, text):
     out = classify(status, retry_after, text)
     poison = status < 500 and status != 429
@@ -389,8 +464,9 @@ def test_a_retry_cancelled_mid_flight_still_counts():
     async def go():
         client, observed = FailThenHang(), _Observed()
         request = make_json_request("/chat/completions", {})
-        task = asyncio.ensure_future(call_endpoint(cast(HttpClient, client), "http://x", request, Breaker(),
-                                                   observed, budget_s=30.0))
+        task = asyncio.ensure_future(
+            call_endpoint(cast(HttpClient, client), "http://x", request, Breaker(), observed, budget_s=30.0)
+        )
         await asyncio.wait_for(client.second_started.wait(), 5.0)
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -418,15 +494,34 @@ def test_a_success_with_malformed_usage_still_counts_and_resets_the_breaker():
     for _ in range(3):
         breaker.fail()
     observed = _Observed()
-    body, err = asyncio.run(call_endpoint(cast(HttpClient, _Client(MalformedUsage(200))), "http://x",
-                                          make_json_request("/chat/completions", {}), breaker, observed))
+    body, err = asyncio.run(
+        call_endpoint(
+            cast(HttpClient, _Client(MalformedUsage(200))),
+            "http://x",
+            make_json_request("/chat/completions", {}),
+            breaker,
+            observed,
+        )
+    )
     assert err is None and body is not None and body["usage"]["prompt_tokens"] is None
     assert breaker.consecutive == 0
     assert [(a.ok, a.tokens) for a in observed] == [(True, 1)]
 
 
 @pytest.mark.internals
-@pytest.mark.parametrize("value, expected", [(7, 7), (3.0, 3), (2.6, 2), (-5, 0), (None, 0), (True, 0),
-                                             ("7", 0), (float("nan"), 0), (float("inf"), 0)])
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (7, 7),
+        (3.0, 3),
+        (2.6, 2),
+        (-5, 0),
+        (None, 0),
+        (True, 0),
+        ("7", 0),
+        (float("nan"), 0),
+        (float("inf"), 0),
+    ],
+)
 def test_a_token_count_is_a_non_negative_int_or_zero(value, expected):
     assert transport.usage_tokens({"usage": {"prompt_tokens": value}}) == (expected, 0)

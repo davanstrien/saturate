@@ -34,6 +34,7 @@ import gc
 import random
 import threading
 import time
+from typing import ClassVar, cast
 
 import fsspec
 import pyarrow.parquet as pq
@@ -188,7 +189,7 @@ async def until(condition, what: str, timeout: float = 10.0) -> None:
         await asyncio.sleep(0.005)
 
 
-def _new_threads(before: set[int], include_runtime: bool) -> list[threading.Thread]:
+def _new_threads(before: set[int | None], include_runtime: bool) -> list[threading.Thread]:
     """Non-daemon threads started since `before`. The loop's own executor workers (asyncio_N)
     belong to the runtime until the loop shuts its executor down."""
     return [t for t in threading.enumerate()
@@ -196,7 +197,7 @@ def _new_threads(before: set[int], include_runtime: bool) -> list[threading.Thre
             and (include_runtime or not t.name.startswith("asyncio_"))]
 
 
-def _wait_for_threads(before: set[int], include_runtime: bool, timeout: float = 2.0) -> list:
+def _wait_for_threads(before: set[int | None], include_runtime: bool, timeout: float = 2.0) -> list:
     deadline = time.monotonic() + timeout
     while _new_threads(before, include_runtime) and time.monotonic() < deadline:
         time.sleep(0.02)
@@ -982,10 +983,10 @@ def test_an_output_whose_store_does_not_exist_reads_as_empty():
 
     class MissingStore(MemoryFileSystem):
         protocol = "missingstore"
-        store: dict = {}
+        store: ClassVar[dict] = {}
         pseudo_dirs = [""]
 
-        def glob(self, path, **kwargs):
+        def glob(self, path, maxdepth=None, **kwargs):
             raise FileNotFoundError(path)
 
     fsspec.register_implementation("missingstore", MissingStore, clobber=True)
@@ -995,7 +996,8 @@ def test_an_output_whose_store_does_not_exist_reads_as_empty():
 # --- concurrency primitives ------------------------------------------------------------------
 
 class ShrinkTo:
-    """A controller that starts at `initial` and asks for `n` from the first tick on."""
+    """A controller that starts at `initial` and asks for `n` from the first tick on. It has the
+    `initial`, `decide` and `last_reason` the limiter uses, so the tests cast it to Fixed."""
 
     last_reason = "test"
 
@@ -1021,7 +1023,7 @@ def test_shrinking_the_window_holds_admissions_until_inflight_drops_below_it():
                 await releases[i].wait()
                 holding.remove(i)
 
-        async with AdaptiveLimiter(ShrinkTo(4, 2), on_tick=ticks.append) as limiter:
+        async with AdaptiveLimiter(cast(Fixed, ShrinkTo(4, 2)), on_tick=ticks.append) as limiter:
             tasks = [asyncio.ensure_future(holder(limiter, i)) for i in range(6)]
             await until(lambda: len(holding) == 4, "four holders at once")
             first_four = list(holding)
@@ -1101,7 +1103,8 @@ def test_the_controller_hears_backpressure_while_the_row_is_still_retrying(stub)
 
 
 class Sequence:
-    """A controller that starts at `initial`, then asks for each limit in turn, then holds."""
+    """A controller that starts at `initial`, then asks for each limit in turn, then holds. A
+    stand-in like ShrinkTo, cast to Fixed where it is passed."""
 
     last_reason = "test"
 
@@ -1141,7 +1144,7 @@ def test_growing_after_a_shrink_admits_only_up_to_the_new_limit():
     ticks: list[dict] = []
 
     async def go():
-        async with AdaptiveLimiter(Sequence(4, [2, 3]), on_tick=ticks.append) as limiter:
+        async with AdaptiveLimiter(cast(Fixed, Sequence(4, [2, 3])), on_tick=ticks.append) as limiter:
             holders = [limiter.slot() for _ in range(4)]
             for slot in holders:
                 await slot.__aenter__()
@@ -1265,7 +1268,8 @@ def test_concurrent_callers_elect_one_prober_and_pass_only_when_it_closes(stub):
     async def go():
         breaker = Breaker(threshold=1, probe_interval=0.01)
         breaker.fail()
-        async with CountingClient() as client:
+        client = CountingClient()  # `async with ... as client` would type it as HttpClient, without `peak`
+        async with client:
             url = f"{stub.endpoint}/chat/completions"
             gates = [asyncio.ensure_future(breaker.gate(client, url, "stub")) for _ in range(10)]
             await until(lambda: stub.probes >= 3, "three failed probes")
@@ -1287,7 +1291,8 @@ def test_a_cancelled_prober_hands_over_and_the_waiters_pass_only_when_it_closes(
     async def go():
         breaker = Breaker(threshold=1, probe_interval=0.01)
         breaker.fail()
-        async with CountingClient() as client:
+        client = CountingClient()  # `async with ... as client` would type it as HttpClient, without `peak`
+        async with client:
             url = f"{stub.endpoint}/chat/completions"
             prober = asyncio.ensure_future(breaker.gate(client, url, "stub"))
             await until(lambda: stub.probes >= 1, "the first caller probing")

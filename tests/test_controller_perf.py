@@ -3,6 +3,7 @@ throughput it reaches, how fast it gets there, and how long it spends past the w
 can use. bench/controller_sim.py prints the same scenarios as a table."""
 
 import math
+from typing import Any
 
 import pytest
 from hypothesis import given, settings
@@ -20,7 +21,7 @@ from sim_engine import (
 
 from saturate.controller import Auto, _above
 
-ENGINES = {
+ENGINES: dict[str, dict[str, Any]] = {  # Engine keyword arguments by name
     "sglang-like": dict(curve=SGLANG_LIKE, cap=256),
     "linear-256": dict(curve=LINEAR, cap=256),
     "linear-100": dict(curve=[(100, 200.0)], cap=100),  # a cap off the doubling ladder

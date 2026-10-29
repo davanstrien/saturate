@@ -3,6 +3,8 @@
 All in-memory (Dataset.from_dict / to_iterable_dataset) — no network.
 """
 
+from typing import Any
+
 import pytest
 from datasets import Dataset
 
@@ -181,7 +183,8 @@ def test_fractional_or_bool_shards_raise():
     would quietly run a wrong shard."""
     from saturate import shard_select
 
-    for bad in [(0.9, 2), (1.5, 1.8), (True, 2), (0, "4")]:
+    bad_shards: list[tuple[Any, Any]] = [(0.9, 2), (1.5, 1.8), (True, 2), (0, "4")]  # wrong on purpose
+    for bad in bad_shards:
         with pytest.raises((ValueError, TypeError), match="shard"):
             shard_select(iter(()), *bad)
 
@@ -279,6 +282,7 @@ def test_a_sharded_empty_load_yields_nothing(monkeypatch):
 def test_a_shard_that_is_not_a_pair_raises_a_clear_error():
     from saturate.source import check_shard
 
-    for bad in [3, (1, 2, 3), None]:
+    bad_shards: list[Any] = [3, (1, 2, 3), None]  # wrong on purpose
+    for bad in bad_shards:
         with pytest.raises(TypeError, match="pair of ints"):
             check_shard(bad)

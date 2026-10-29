@@ -9,11 +9,12 @@ Ticks are driven directly (`limiter._tick()`) with the tick clock set by hand.""
 import asyncio
 import threading
 import time
+from typing import cast
 
 import pytest
 from stub_server import StubLimiter
 
-from saturate import AdaptiveLimiter, Auto, Fixed, Stats, through
+from saturate import AdaptiveClient, AdaptiveLimiter, Auto, Fixed, Stats, through
 from saturate.telemetry import advise_input, bound_by_counts, tick_record
 from saturate.transport import Attempt
 
@@ -229,7 +230,9 @@ def test_prepare_workers_run_to_request_in_threads_and_errors_stay_row_errors():
     async def go():
         client = _EchoClient(StubLimiter())
         rows = iter([(str(i), {"n": i}) for i in range(8)])
-        async with through(client, rows, to_request, lambda r, b: b["req"], prepare_workers=2) as results:
+        # _EchoClient stands in for AdaptiveClient with the `limiter` and `post` through() uses
+        async with through(cast(AdaptiveClient, client), rows, to_request, lambda r, b: b["req"],
+                           prepare_workers=2) as results:
             done = [d async for d in results]
         return client, done
 

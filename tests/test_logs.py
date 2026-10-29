@@ -109,11 +109,9 @@ def test_a_record_never_takes_the_logging_module_lock(monkeypatch, capsys):
         lookups.append(args)
         return get_logger(*args)
 
-    logging.getLogger = recording  # only around the record: pytest's own teardown looks loggers up
-    try:
+    with monkeypatch.context() as patch:  # only around the record: pytest's own teardown looks loggers up
+        patch.setattr(logging, "getLogger", recording)
         log.warning("circuit OPEN")
-    finally:
-        logging.getLogger = get_logger
     assert lookups == []
     assert capsys.readouterr().err == "[pump] circuit OPEN\n"
 

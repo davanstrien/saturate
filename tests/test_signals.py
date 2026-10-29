@@ -286,3 +286,90 @@ def test_a_trtllm_named_by_its_json_names_its_flag_when_prometheus_metrics_is_of
     scrape = HttpScrape(cast(HttpClient, _ScriptedClient({"/metrics": (200, "[]")})), "http://x/v1")
     _reads(scrape, 6)
     assert "/prometheus/metrics (HTTP 404)" in caplog.text and "return_perf_metrics" in caplog.text
+
+
+def _vllm_prefix(queries: float, hits: float, engine1: tuple[float, float] | None = None) -> str:
+    """vLLM's prefix-cache counters as it publishes them: one series per engine, with the
+    `_created` sample prometheus_client adds beside each `_total`. Engine 1 holds a quarter of
+    each count unless given its own (queries, hits)."""
+    q1, h1 = engine1 if engine1 is not None else (queries * 0.25, hits * 0.25)
+    return (f'vllm:prefix_cache_queries_total{{engine="0",model_name="x"}} {queries - q1}\n'
+            f'vllm:prefix_cache_queries_total{{engine="1",model_name="x"}} {q1}\n'
+            'vllm:prefix_cache_queries_created{engine="0",model_name="x"} 1.7e9\n'
+            f'vllm:prefix_cache_hits_total{{engine="0",model_name="x"}} {hits - h1}\n'
+            f'vllm:prefix_cache_hits_total{{engine="1",model_name="x"}} {h1}\n'
+            'vllm:prefix_cache_hits_created{engine="0",model_name="x"} 1.7e9\n'
+            'vllm:external_prefix_cache_queries_total{engine="0",model_name="x"} 99999\n'
+            'vllm:kv_cache_usage_perc{engine="0",model_name="x"} 0.97\n')
+
+
+def test_vllm_prefix_counters_are_kept_per_series_and_name_no_rate():
+    g = parse_gauges(_vllm_prefix(1000, 600))
+    assert g is not None and g["dialect"] == "vllm"
+    assert g["prefix_counts"] == {  # _created and the external cache's counter ignored
+        '{engine="0",model_name="x"}': {"queries": 750, "hits": 450},
+        '{engine="1",model_name="x"}': {"queries": 250, "hits": 150}}
+    assert g["hits"] is None  # a rate needs two readings: parse_gauges sees one
+    g = parse_gauges("vllm:gpu_prefix_cache_queries_total 10\nvllm:gpu_prefix_cache_hits_total 4\n")
+    assert g is not None and g["prefix_counts"] == {"": {"queries": 10, "hits": 4}}  # vLLM 0.8-0.9
+
+
+def _rates(texts: list[str | None]) -> list:
+    """The hit rate each reading gives, in order; None in `texts` is a missed read (a 404)."""
+    from saturate.signals import HttpScrape
+
+    client = _ScriptedClient({})
+    scrape = HttpScrape(cast(HttpClient, client), "http://x/v1")
+    rates = []
+    for text in texts:
+        client.routes["/metrics"] = (404, "") if text is None else (200, text)
+        g = _reads(scrape, 1)[0]
+        rates.append("miss" if g is None else g["hits"])
+    return rates
+
+
+def test_the_scrape_derives_vllms_hit_rate_from_two_readings_of_its_counters():
+    """New hits over new queries since the last read, summed over engines; no rate from the
+    first reading, from a tick with no new query, or across a counter reset."""
+    readings = [(1000, 600), (2000, 1500), (2000, 1500), (100, 10), (300, 50)]
+    assert _rates([_vllm_prefix(q, h) for q, h in readings]) == [None, 0.9, None, None, 0.2]
+
+
+def test_one_engines_reset_gives_no_rate_where_a_sum_would_fake_a_high_one():
+    """Engine 1 restarts (its counters drop) while engine 0 gains 120 queries and 24 hits: the
+    summed deltas would read 24 / 20 (clamped to 1.0); per series, no rate."""
+    before = _vllm_prefix(1100, 100, engine1=(100, 0))
+    after = _vllm_prefix(1120, 124, engine1=(0, 0))
+    assert _rates([before, after]) == [None, None]
+    # hits down while queries rise: a reset too
+    assert _rates([_vllm_prefix(1000, 500), _vllm_prefix(1200, 400)]) == [None, None]
+
+
+def test_a_counter_missing_from_a_reading_is_no_baseline():
+    """A reading without the hits series is not taken as zero hits: the next rate would credit
+    every earlier hit to the last tick."""
+    queries_only = 'vllm:prefix_cache_queries_total{engine="0"} 1000\nvllm:num_requests_running 1\n'
+    both = 'vllm:prefix_cache_queries_total{engine="0"} 1100\nvllm:prefix_cache_hits_total{engine="0"} 900\n'
+    assert _rates([queries_only, both]) == [None, None]
+
+
+def test_the_baseline_follows_every_read_and_restarts_after_a_miss():
+    """A reading that carries a hit-rate gauge (vLLM V0, SGLang) still moves the counter
+    baseline, and a missed read starts a new one, so no rate spans a reading it did not see."""
+    gauge = 'vllm:gpu_prefix_cache_hit_rate 0.5\n'
+    one, two, three = _vllm_prefix(1000, 900), _vllm_prefix(2000, 1900), _vllm_prefix(2100, 1900)
+    assert _rates([one, two + gauge, three]) == [None, 0.5, 0.0]
+    assert _rates([one, None, two, three]) == [None, "miss", None, 0.0]
+
+
+def test_a_healthy_vllm_prefix_cache_lets_a_full_kv_cache_with_a_preemption_stand():
+    """The point of #15: with the rate derived, vLLM's high KV is verified benign by a high hit
+    rate, as the two-condition cut intends; a low rate still counts as full."""
+    from saturate import Auto
+    from saturate.controller import Obs, State, kv_full
+
+    auto = Auto()
+    state = State(preempts=3, preempted=1)  # a preemption this tick: the KV check applies
+    assert not kv_full(auto, state, Obs(kv=0.97, hits=0.9, preempts=4), 64)
+    assert kv_full(auto, state, Obs(kv=0.97, hits=0.2, preempts=4), 64)
+    assert kv_full(auto, state, Obs(kv=0.97, hits=None, preempts=4), 64)

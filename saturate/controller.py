@@ -34,7 +34,7 @@ class Obs:
     successes: int = 0  # completed requests since last tick
     input_bound: bool = False  # admission starved by the source, not the engine
     kv: float | None = None  # kv-cache utilisation gauge (0-1)
-    hits: float | None = None  # prefix-cache hit rate gauge (0-1)
+    hits: float | None = None  # prefix-cache hit rate (0-1): SGLang's gauge, or derived from vLLM's counters
     tok_s: float | None = None  # delivered tokens/sec this tick; 0.0 = nothing delivered, None = unobservable
     preempts: int | None = None  # cumulative preemption count
     latency_s: float | None = None  # p50 duration of recent successful attempts (None = unknown)
@@ -472,10 +472,11 @@ def overloaded(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
 
 
 def kv_full(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
-    """KV high and prefix hits low; with no hits signal at all (prefix caching off), high KV
-    is unverifiably benign, so it counts as full. Where the engine counts preemptions (vLLM;
-    SGLang's retractions), only with a preemption this tick as well: a full cache without one
-    is a busy engine at its best, as a large model runs."""
+    """KV high and prefix hits low; with no hit rate this tick (prefix caching off, or on vLLM
+    no new query since the last scrape), high KV is unverifiably benign, so it counts as full.
+    Where the engine counts preemptions (vLLM; SGLang's retractions), only with a preemption
+    this tick as well: a full cache without one is a busy engine at its best, as a large model
+    runs."""
     if obs.preempts is not None and state.preempted == 0:
         return False
     return obs.kv is not None and obs.kv >= auto.kv_hi and (obs.hits is None or obs.hits < auto.hits_lo)

@@ -39,6 +39,7 @@ _PAT = re.compile(
     r"vllm[:_](?:num_requests_(?P<v>waiting|running)"
     r"|(?:gpu_cache|kv_cache)_usage_perc(?P<vkv>)"
     r"|gpu_prefix_cache_hit_rate(?P<vh>)"
+    r"|(?:gpu_)?prefix_cache_(?P<vpc>queries|hits)_total"
     r"|num_preemptions_total(?P<vp>))"
     r"|sglang[:_](?:num_(?P<s>queue|running)_reqs"
     r"|token_usage(?P<skv>)"
@@ -47,11 +48,11 @@ _PAT = re.compile(
     r"|llamacpp[:_]requests_(?P<l>deferred|processing)"
     r"|trtllm_num_requests_(?P<t>waiting|running)"
     r"|te[:_]queue_size(?P<eq>)"
-    r")(?:\{[^}]*\})?\s+(?P<val>[0-9.eE+-]+)",
+    r")(?P<labels>\{[^}]*\})?\s+(?P<val>[0-9.eE+-]+)",
     re.M,
 )
 
-_DIALECT = {"v": "vllm", "vkv": "vllm", "vh": "vllm", "vp": "vllm",
+_DIALECT = {"v": "vllm", "vkv": "vllm", "vh": "vllm", "vp": "vllm", "vpc": "vllm",
             "s": "sglang", "skv": "sglang", "sh": "sglang", "sp": "sglang", "l": "llamacpp", "t": "trtllm",
             "eq": "tei"}
 
@@ -82,13 +83,16 @@ METRICS_FLAG = {
 
 def parse_gauges(text: str) -> dict | None:
     """Extract waiting/running/kv/hits/preempts + dialect from a /metrics body. `preempts` is
-    the engine's cumulative preemption count (SGLang: retractions), summed over its series."""
+    the engine's cumulative preemption count (SGLang: retractions), summed over its series.
+    `prefix_counts` is vLLM's cumulative prefix-cache token counts per series (label set ->
+    {"queries": n, "hits": n}): vLLM publishes no hit-rate gauge, so HttpScrape derives `hits`
+    from two readings, series by series, so that one engine's reset is not hidden in a sum."""
     out: dict = {"waiting": None, "running": None, "kv": None, "hits": None,
-                 "preempts": None, "dialect": None}
+                 "preempts": None, "prefix_counts": None, "dialect": None}
     seen = False
     for m in _PAT.finditer(text):
         val = float(m.group("val"))
-        for g in ("v", "s", "l", "t", "vkv", "vh", "vp", "skv", "sh", "sp", "eq"):
+        for g in ("v", "s", "l", "t", "vkv", "vh", "vp", "vpc", "skv", "sh", "sp", "eq"):
             if m.group(g) is not None:
                 seen = True
                 out["dialect"] = _DIALECT[g]
@@ -104,6 +108,9 @@ def parse_gauges(text: str) -> dict | None:
                     out["hits"] = val
                 elif g in ("vp", "sp"):  # a counter per engine or label set: their sum
                     out["preempts"] = (out["preempts"] or 0) + int(val)
+                elif g == "vpc":  # kept per series: a rate is made from each series' own deltas
+                    counts = out["prefix_counts"] = out["prefix_counts"] or {}
+                    counts.setdefault(m.group("labels") or "", {})[m.group(g)] = val
                 break
     return out if seen else None
 
@@ -142,6 +149,7 @@ class HttpScrape:
         self.engine: str | None = None
         self.reason: str | None = None  # why the last read had no gauges
         self.dialect: str | None = None
+        self._prefix: dict | None = None  # vLLM's prefix-cache counters at the last good read
 
     def identify(self, probe: Probe) -> None:
         """Scrape the probed engine's own metrics path. An engine that reports its metrics
@@ -190,6 +198,9 @@ class HttpScrape:
             return self._miss("no engine gauges in the reply")
         self._fails = 0
         self.reason = None
+        rate = self._hit_rate(gauges["prefix_counts"])  # every read, so the baseline never goes stale
+        if gauges["hits"] is None:
+            gauges["hits"] = rate
         if gauges["dialect"]:
             self.dialect = gauges["dialect"]
         if self._blind:
@@ -197,8 +208,30 @@ class HttpScrape:
             log.info(f"metrics scrape recovered ({self.dialect})")
         return gauges
 
+    def _hit_rate(self, counts: dict | None) -> float | None:
+        """vLLM's prefix-cache hit rate since the last good read: new hit tokens over new query
+        tokens, over every series. None (counted as no evidence of reuse) on the first reading,
+        after a missed read, when no query arrived since the last one, and when the readings do
+        not pair up: a series appeared, vanished or lacks one of its two counters, or a counter
+        went down (an engine restarted). vLLM 0.12 or later: before it, the counters also count
+        the recompute of preempted requests, which reads as reuse."""
+        last, self._prefix = self._prefix, counts
+        if counts is None or last is None or counts.keys() != last.keys():
+            return None
+        queries = hits = 0.0
+        for labels, now in counts.items():
+            then = last[labels]
+            if len(now) != 2 or len(then) != 2:
+                return None
+            dq, dh = now["queries"] - then["queries"], now["hits"] - then["hits"]
+            if dq < 0 or dh < 0:
+                return None
+            queries, hits = queries + dq, hits + dh
+        return min(hits / queries, 1.0) if queries > 0 else None
+
     def _miss(self, reason: str) -> None:
         self._fails += 1
+        self._prefix = None  # no rate across a gap: the next good read is a new baseline
         self.reason = reason
 
     def _hint(self) -> str:

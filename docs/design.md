@@ -191,7 +191,8 @@ images live in host RAM.
   vLLM/SGLang transport is the planned second one (high-rate, short-output regime).
   Proven bring-your-own: a binary-audio TTS transport was written against the
   documented surface without modifying the package (RESULTS.md, TTS probe).
-- **SignalSource** — `/metrics` scrape or none; the controller only ever sees a plain
+- **SignalSource** — a scrape of the engine's metrics path (`/metrics`, or its own:
+  `signals.METRICS_PATH`) or none; the controller only ever sees a plain
   `Obs` dict. The dialect table matches both metric-name spellings per engine because
   the k8s Gateway API Inference Extension (GAIE) protocol fixes gauge *semantics* but
   not their names (see [why.md §7](why.md)). Dialects may be partial: TEI publishes

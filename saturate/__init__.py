@@ -260,7 +260,8 @@ def pump(
     retry_errors: re-run rows whose stored record carries an error instead of skipping them.
     id_key: row field to use as the row id (default: content hash of the row).
     id_fn: callable row -> id, an alternative to id_key.
-    signal_source: "auto" scrapes /metrics and falls back to blind mode; "none" never scrapes.
+    signal_source: "auto" probes the engine once at startup (a few GETs, 2 s at most), then
+        scrapes its metrics path and falls back to blind mode; "none" never probes or scrapes.
     schema: pa.Schema declaring an immutable output schema; None infers it per part.
     prepare_workers: threads running `to_request` ahead of admission (0 = on the event loop).
         Use it when `to_request` does real work per row (image decode, PDF render, tokenising):

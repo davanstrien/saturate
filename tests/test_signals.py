@@ -207,6 +207,7 @@ def test_a_llamacpp_that_reports_metrics_off_is_never_scraped_and_the_warning_na
     assert client.paths == []
     assert caplog.text.count("running blind") == 1
     assert "llamacpp reports its metrics endpoint off" in caplog.text and "--metrics" in caplog.text
+    assert not caplog.text.rstrip().endswith(";")
 
 
 def test_blind_mode_says_why_the_reads_missed_and_names_the_engines_flag(caplog):
@@ -251,3 +252,37 @@ def test_json_after_gauges_named_the_engine_is_a_miss_and_the_scrape_recovers(ca
     gauges = _reads(scrape, 1)[0]
     assert gauges is not None and gauges["dialect"] == "vllm"
     assert set(client.paths) == {"/metrics"}
+
+
+def test_json_that_is_not_trtllms_list_is_an_ordinary_miss():
+    """Only a 200 JSON list at /metrics, from a server nothing has named, is TensorRT-LLM's: a
+    JSON object (a gateway's error body), a non-200 JSON body (llama.cpp's 501 with --metrics
+    off) and any JSON from a probed engine each stay at /metrics."""
+    from saturate.signals import HttpScrape, Probe
+
+    for status, body, probed in [(200, '{"error": "upstream restarting"}', None),
+                                 (501, '[{"error": "metrics off"}]', None),
+                                 (200, "[]", "sglang")]:
+        client = _ScriptedClient({"/metrics": (status, body)})
+        scrape = HttpScrape(cast(HttpClient, client), "http://x/v1")
+        if probed:
+            scrape.identify(Probe(engine=probed))
+        _reads(scrape, 3)
+        assert client.paths == ["/metrics"] * 3 and scrape.dialect != "trtllm"
+
+
+def test_a_probe_names_the_engine_from_its_shape_without_a_capacity():
+    from saturate.signals import Probe
+
+    assert _probe(_ScriptedClient({"/get_server_info": (200, '{"max_prefill_tokens": 16384}')})) \
+        == Probe(engine="sglang")
+    assert _probe(_ScriptedClient({"/info": (200, '{"model_id": "m", "max_batch_tokens": 16384}')})) \
+        == Probe(engine="tei")
+
+
+def test_a_trtllm_named_by_its_json_names_its_flag_when_prometheus_metrics_is_off(caplog):
+    from saturate.signals import HttpScrape
+
+    scrape = HttpScrape(cast(HttpClient, _ScriptedClient({"/metrics": (200, "[]")})), "http://x/v1")
+    _reads(scrape, 6)
+    assert "/prometheus/metrics (HTTP 404)" in caplog.text and "return_perf_metrics" in caplog.text

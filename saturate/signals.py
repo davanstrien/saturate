@@ -158,7 +158,7 @@ class HttpScrape:
             if not self._blind:
                 self._blind = True
                 log.warning(f"{self.engine} reports its metrics endpoint off — running blind; "
-                            f"{self._hint()}")
+                            f"{self._hint().removesuffix('; ')}")
             return None
         if self._fails >= self.max_fails:
             if not self._blind:
@@ -176,10 +176,11 @@ class HttpScrape:
             return self._miss("unreachable")
         if r.status_code != 200:
             return self._miss(f"HTTP {r.status_code}")
-        if self.dialect is None and r.text.lstrip()[:1] in ("[", "{"):
-            # JSON at /metrics from a server not yet named: trtllm-serve's iteration stats (a
-            # release without /server_info for the probe), which each read clears. Never read
-            # them again. Once gauges have named the engine, JSON is an ordinary miss.
+        if self.dialect is None and r.text.lstrip()[:1] == "[":
+            # a JSON list at /metrics from a server not yet named: trtllm-serve's iteration
+            # stats (a release without /server_info for the probe), which each read clears.
+            # Never read them again. A JSON object (a gateway's error body) is an ordinary miss,
+            # and so is any JSON once the probe or the gauges have named the engine.
             self.engine = self.dialect = "trtllm"
             self.url = self.base + METRICS_PATH["trtllm"]
             log.info(f"JSON at {self.base}/metrics: TensorRT-LLM; scraping {self.url} instead")
@@ -280,13 +281,21 @@ async def _get_json(client: HttpClient, url: str) -> object:
         return None
 
 
+# the keys that name an engine in a probe body, whether or not it reports a capacity there
+ENGINE_SIGNATURES: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ("/get_server_info", ("max_prefill_tokens",), "sglang"),
+    ("/props", ("default_generation_settings",), "llamacpp"),
+    ("/info", ("model_id", "max_batch_tokens"), "tei"),
+    ("/server_info", ("disaggregated_params",), "trtllm"),
+)
+
+
 def _engine(bodies: dict[str, object]) -> str | None:
     """The engine a probe body's shape names, even when it reports no capacity."""
-    props, info = bodies["/props"], bodies["/server_info"]
-    if isinstance(props, dict) and "default_generation_settings" in props:
-        return "llamacpp"
-    if isinstance(info, dict) and "disaggregated_params" in info:
-        return "trtllm"
+    for path, keys, engine in ENGINE_SIGNATURES:
+        body = bodies[path]
+        if isinstance(body, dict) and all(k in body for k in keys):
+            return engine
     return None
 
 

@@ -5,7 +5,7 @@ exactly these (plus an `[hf]` import check):
 
 ```bash
 uv sync --locked
-uv run ruff check .
+uv run ruff check . && uv run ruff format .
 uv run ty check saturate                 # types, the whole package
 uv run pytest tests/ -q                  # unit + regression tests; -k name for one test
 uv run --with blacken-docs blacken-docs -l 100 README.md CONTRACT.md docs/*.md  # snippet formatting

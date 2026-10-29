@@ -6,6 +6,7 @@ import math
 import re
 from decimal import Decimal
 from fractions import Fraction
+from types import MappingProxyType
 
 import numpy as np
 import pytest
@@ -13,6 +14,7 @@ from stub_server import StubServer
 
 import saturate
 from saturate import Fixed, pump
+from saturate.http import Timeouts
 
 
 def call(output, endpoint="http://127.0.0.1:9/v1", rows=1, **settings):
@@ -28,20 +30,20 @@ def call(output, endpoint="http://127.0.0.1:9/v1", rows=1, **settings):
     (dict(flush_every=True), "flush_every"),
     (dict(read_timeout=-1.0), "0 <= read_timeout < inf, a number or None, not -1.0"),
     (dict(read_timeout=math.inf), "read_timeout"),
-    (dict(timeouts={"write": math.inf}), "0 <= write < inf"),
+    (dict(timeouts={"write": math.inf}), "0 <= timeouts['write'] < inf"),
     (dict(read_timeout=math.nan), "read_timeout"),
     (dict(read_timeout="30"), "read_timeout"),
     (dict(read_timeout=None), "retry_budget_s when read_timeout is None"),
     (dict(retry_budget_s=-0.5), "retry_budget_s"),
     (dict(prepare_workers=-1), "prepare_workers >= 0, a whole number, not -1"),
     (dict(prepare_workers=4.0), "prepare_workers"),
-    (dict(read_timeout=Fraction(1, 10**400)), "as a float: 0.0"),
-    (dict(read_timeout=Decimal("1e400")), "as a float: inf"),
+    (dict(read_timeout=Fraction(1, 10**400)), "rounds to 0.0 as a float"),
+    (dict(read_timeout=Decimal("1e400")), "becomes inf as a float"),
     (dict(read_timeout=Fraction(10**400)), "too large"),
     (dict(read_timeout=10**400), "too large"),
     (dict(timeouts={"read": 30}), "unknown phase"),
-    (dict(timeouts={"connect": -1}), "0 <= connect < inf"),
-    (dict(timeouts={"pool": "5"}), "pool"),
+    (dict(timeouts={"connect": -1}), "0 <= timeouts['connect'] < inf"),
+    (dict(timeouts={"pool": "5"}), "timeouts['pool']"),
     (dict(timeouts=[("connect", 5)]), "timeouts to be a dict or None"),
     (dict(signal_source="metrics"), "signal_source in ('auto', 'none'), not 'metrics'"),
 ])
@@ -61,10 +63,20 @@ def test_a_setting_outside_its_range_is_refused_before_the_run(tmp_path, monkeyp
     dict(retry_budget_s=0), dict(retry_budget_s=math.inf), dict(retry_budget_s=Decimal("60")),
     dict(prepare_workers=np.int64(2)), dict(prepare_workers=2000), dict(fail_fast=0), dict(fail_fast=-1),
     dict(timeouts={"connect": Decimal("5"), "write": Fraction(5), "pool": np.float64(5.0)}),
-    dict(timeouts={"connect": 0, "write": None}), dict(signal_source="none"),
+    dict(timeouts={"connect": 0, "write": None}), dict(timeouts=MappingProxyType({"connect": 5})),
+    dict(signal_source="none"),
 ])
 def test_a_setting_that_works_runs(tmp_path, settings):
     """Through the code that uses each setting: the run completes every row."""
     with StubServer() as stub:
         stats = call(tmp_path / "out", endpoint=stub.endpoint, rows=6, **settings)
     assert (stats.rows_processed, stats.rows_failed) == (6, 0)
+
+
+@pytest.mark.parametrize("phases", [dict(read=0), dict(read=None), dict(read=0, write=0), dict(pool=None)])
+def test_a_phase_of_0_or_none_leaves_no_total_limit(phases):
+    """aiohttp reads 0 as no limit for a phase; the request's total limit (pool + write + read)
+    must then be off too, or a long generation would still time out at the sum of the others."""
+    timeouts = Timeouts(**phases)
+    assert timeouts.for_aiohttp().total is None
+    assert timeouts.capped(5.0).for_aiohttp().total == 15.0  # a capped retry still has a total

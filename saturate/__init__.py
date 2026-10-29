@@ -16,7 +16,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 
 from saturate import _logs, settings
 from saturate.controller import Auto, Fixed, Obs
@@ -83,12 +83,13 @@ def _seconds(name: str, optional: bool = False, infinite: bool = False) -> Setti
 
 PUMP_SETTINGS = (
     Setting("flush_every", whole=True, low=0, optional=True),  # 0: a part per row
-    _seconds("read_timeout", optional=True),  # 0: no read timer; None needs retry_budget_s
+    _seconds("read_timeout", optional=True),  # 0 or None: no read limit; None needs retry_budget_s
     _seconds("retry_budget_s", optional=True, infinite=True),  # 0: the first attempt only
     Setting("prepare_workers", whole=True, low=0),  # threads; 0 runs to_request on the loop
     Setting("fail_fast", whole=True),  # 0 or less disables the check
 )
-TIMEOUT_PHASES = tuple(_seconds(phase, optional=True) for phase in ("connect", "write", "pool"))
+PHASES = ("connect", "write", "pool")
+TIMEOUT_PHASES = {phase: _seconds(f"timeouts[{phase!r}]", optional=True) for phase in PHASES}
 SIGNAL_SOURCES = ("auto", "none")
 
 
@@ -105,8 +106,12 @@ def _native(setting: Setting, value):
         seconds = float(value)
     except OverflowError:
         raise ValueError(f"pump() requires {setting.requirement()}, not {value!r} (too large)") from None
-    if (value > 0 and seconds == 0) or not setting.allows(seconds):
-        raise ValueError(f"pump() requires {setting.requirement()}, not {value!r} (as a float: {seconds!r})")
+    if value > 0 and seconds == 0:
+        raise ValueError(f"pump() requires {setting.requirement()}, not {value!r}: it rounds to 0.0 as a "
+                         "float, which would mean no limit")
+    if not setting.allows(seconds):
+        raise ValueError(f"pump() requires {setting.requirement()}, not {value!r}: it becomes {seconds!r} "
+                         "as a float")
     return seconds
 
 
@@ -122,16 +127,15 @@ def _check_pump_settings(flush_every, read_timeout, retry_budget_s, prepare_work
     if read_timeout is None and retry_budget_s is None:  # the default budget is 2 x read_timeout
         raise ValueError("pump() requires retry_budget_s when read_timeout is None")
     if timeouts is not None:
-        if not isinstance(timeouts, dict):
+        if not isinstance(timeouts, Mapping):
             raise ValueError(f"pump() requires timeouts to be a dict or None, not {timeouts!r}")
-        unknown = sorted(set(timeouts) - {phase.name for phase in TIMEOUT_PHASES})
+        unknown = sorted(set(timeouts) - set(PHASES))
         if unknown:
             raise ValueError(f"pump() timeouts: unknown phase(s) {unknown}; the read timeout is "
                              "read_timeout")
-        settings.check("pump() timeouts", TIMEOUT_PHASES,
-                       {phase.name: timeouts.get(phase.name) for phase in TIMEOUT_PHASES})
-        by_name = {phase.name: phase for phase in TIMEOUT_PHASES}
-        timeouts = {phase: _native(by_name[phase], value) for phase, value in timeouts.items()}
+        settings.check("pump()", tuple(TIMEOUT_PHASES.values()),
+                       {TIMEOUT_PHASES[phase].name: timeouts.get(phase) for phase in PHASES})
+        timeouts = {phase: _native(TIMEOUT_PHASES[phase], value) for phase, value in timeouts.items()}
     if signal_source not in SIGNAL_SOURCES:
         raise ValueError(f"pump() requires signal_source in {SIGNAL_SOURCES}, not {signal_source!r}")
     native = {setting.name: _native(setting, numbers_given[setting.name]) for setting in PUMP_SETTINGS}
@@ -188,7 +192,7 @@ def pump(
     window: Fixed | Auto | None = None,
     shard: tuple[int, int] = (0, 1),
     flush_every: int | None = None,
-    read_timeout: float = 1800.0,
+    read_timeout: float | None = 1800.0,
     route: str = "/chat/completions",
     headers: dict | None = None,
     retry_errors: bool = False,
@@ -225,7 +229,8 @@ def pump(
         s3://..., where each write is slow), whichever comes first: a row's output appears
         within that long, and a crash loses at most that long of rows, which a resume
         re-requests. Rows are counted, not bytes: lower it if parse returns large payloads.
-    read_timeout: seconds to wait for a single response (long generations are legitimate).
+    read_timeout: seconds to wait for the next part of a response (long generations are
+        legitimate). 0 or None: no read limit; None needs an explicit retry_budget_s.
     retry_budget_s: active-work budget for one row's attempts, retries and backoff included.
         Time paused on an open circuit breaker does not count, so it is not a deadline: a row
         can outlive it while the run waits for the server. None (default) = max(300, 2 *

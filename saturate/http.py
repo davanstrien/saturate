@@ -36,7 +36,7 @@ class TimedOut(TransportError):
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Timeouts:
-    """Per-phase limits in seconds; None means no limit.
+    """Per-phase limits in seconds; None or 0 means no limit (as in aiohttp).
 
     `read` is the longest wait for the next part of the reply, so a long generation is one long
     wait for its first byte. `connect` is opening a connection. `pool` is the whole wait for a
@@ -53,13 +53,13 @@ class Timeouts:
         """Each phase limited to `cap` seconds, a phase without a limit included."""
 
         def phase(limit: float | None) -> float:
-            return cap if limit is None else min(limit, cap)
+            return cap if limit is None or limit == 0 else min(limit, cap)
 
         return Timeouts(read=phase(self.read), connect=phase(self.connect), pool=phase(self.pool),
                         write=phase(self.write))
 
     def for_aiohttp(self) -> aiohttp.ClientTimeout:
-        limits = [limit for limit in (self.pool, self.write, self.read) if limit is not None]
+        limits = [limit for limit in (self.pool, self.write, self.read) if limit]  # None or 0: no limit
         total = sum(limits) if len(limits) == 3 else None  # a phase without a limit: no total
         # aiohttp's names differ: its `connect` is our pool wait, its `sock_connect` our connect
         return aiohttp.ClientTimeout(total=total, connect=self.pool, sock_connect=self.connect,

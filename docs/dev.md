@@ -6,7 +6,7 @@ check):
 
 ```bash
 uv sync --locked
-uv run ruff check .
+uv run ruff check . && uv run ruff format --check .   # `ruff format .` fixes the format
 uv run ty check saturate tests           # types: the package and the tests
 uv run pytest tests/ -q                  # unit + regression tests; -k name for one test
 uv run --with blacken-docs blacken-docs -l 100 README.md CONTRACT.md docs/*.md && git diff --exit-code

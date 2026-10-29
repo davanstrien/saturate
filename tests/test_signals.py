@@ -226,8 +226,28 @@ def test_blind_mode_says_why_the_reads_missed_and_names_the_engines_flag(caplog)
 
 
 def test_a_probe_of_vllm_or_a_hosted_api_names_no_engine():
-    from saturate.signals import Probe
+    """JSON answers on every probed path that match no engine's shape name none: a hosted API's
+    error bodies, and SGLang's own /server_info, which lacks disaggregated_params."""
+    from saturate.signals import CAPACITY_SOURCES, Probe
 
-    assert _probe(_ScriptedClient({"/version": (200, '{"version": "0.32.0"}')})) == Probe()
-    # SGLang has a /server_info too; without disaggregated_params it is not TensorRT-LLM's
+    error = (200, '{"error": {"message": "not found"}}')
+    assert _probe(_ScriptedClient({path: error for path, _, _, _ in CAPACITY_SOURCES})) == Probe()
     assert _probe(_ScriptedClient({"/server_info": (200, '{"max_running_requests": 8}')})) == Probe()
+
+
+def test_json_after_gauges_named_the_engine_is_a_miss_and_the_scrape_recovers(caplog):
+    """A JSON error body from a vLLM whose gauges were read does not turn it into TensorRT-LLM;
+    its blind-mode warning names vLLM's flag."""
+    from saturate.signals import HttpScrape
+
+    client = _ScriptedClient({"/metrics": (200, VLLM_METRICS)})
+    scrape = HttpScrape(cast(HttpClient, client), "http://x/v1")
+    assert _reads(scrape, 1)[0] is not None
+    client.routes["/metrics"] = (200, '{"error": "temporarily unavailable"}')
+    assert _reads(scrape, 6) == [None] * 6
+    assert "--disable-log-stats" in caplog.text and "TensorRT-LLM" not in caplog.text
+    client.routes["/metrics"] = (200, VLLM_METRICS)
+    scrape._skipped = scrape.retry_every - 1  # the next read is the periodic probe
+    gauges = _reads(scrape, 1)[0]
+    assert gauges is not None and gauges["dialect"] == "vllm"
+    assert set(client.paths) == {"/metrics"}

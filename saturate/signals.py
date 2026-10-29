@@ -176,9 +176,10 @@ class HttpScrape:
             return self._miss("unreachable")
         if r.status_code != 200:
             return self._miss(f"HTTP {r.status_code}")
-        if self.engine is None and r.text.lstrip()[:1] in ("[", "{"):
-            # JSON at /metrics: trtllm-serve's iteration stats (a release without /server_info
-            # for the probe), which each read clears. Never read them again.
+        if self.dialect is None and r.text.lstrip()[:1] in ("[", "{"):
+            # JSON at /metrics from a server not yet named: trtllm-serve's iteration stats (a
+            # release without /server_info for the probe), which each read clears. Never read
+            # them again. Once gauges have named the engine, JSON is an ordinary miss.
             self.engine = self.dialect = "trtllm"
             self.url = self.base + METRICS_PATH["trtllm"]
             log.info(f"JSON at {self.base}/metrics: TensorRT-LLM; scraping {self.url} instead")
@@ -200,7 +201,7 @@ class HttpScrape:
         self.reason = reason
 
     def _hint(self) -> str:
-        flag = METRICS_FLAG.get(self.engine or "")
+        flag = METRICS_FLAG.get(self.engine or self.dialect or "")  # probed, else named by gauges
         return f"{flag}; " if flag else ""
 
 

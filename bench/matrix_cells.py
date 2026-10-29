@@ -69,9 +69,11 @@ CELLS: tuple[Cell, ...] = (
     Cell("steady-long-vllm", "small", "a10g-small", VLLM_IMAGE, SMALL, vllm(SMALL),
          ["--kind", "chat", "--max-tokens", "512", "--prompt", STORY, "--rows", "6000",
           "--fixed", "128,256,512,1024"]),
+    # --max-running-requests 256: at SGLang's default cap, 1024 requests in flight run the
+    # repetition-penalty buffers out of memory on a 24 GB GPU (engine-side OOM, 2026-10-29)
     Cell("steady-short-sglang", "small", "a10g-small", SGLANG_IMAGE, SMALL,
          f"python3 -m sglang.launch_server --model-path {SMALL} --port 8000 --host 127.0.0.1 "
-         "--mem-fraction-static 0.7 --enable-metrics",
+         "--mem-fraction-static 0.7 --max-running-requests 256 --enable-metrics",
          ["--kind", "chat", "--rows", "30000", "--fixed", "128,256,512,1024"]),
     # embeddings
     Cell("embed-tei", "small", "a10g-small", TEI_IMAGE, "BAAI/bge-small-en-v1.5",

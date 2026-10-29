@@ -61,6 +61,17 @@ CELLS: tuple[Cell, ...] = (
          "--hf-file qwen2.5-0.5b-instruct-q8_0.gguf --port 8000 --host 127.0.0.1 -ngl 99 "
          "--parallel 8 -c 32768 --metrics",
          ["--kind", "chat", "--rows", "1500", "--fixed", "4,8,16,32,64"]),
+    # the same engines in steady state: about 2 minutes per run at the best window, so the
+    # ramp from Auto's start is a small share (the cells above measure short runs)
+    Cell("steady-short-vllm", "small", "a10g-small", VLLM_IMAGE, SMALL, vllm(SMALL),
+         ["--kind", "chat", "--rows", "35000", "--auto-reps", "2", "--fixed", "128,256,512,1024"]),
+    Cell("steady-long-vllm", "small", "a10g-small", VLLM_IMAGE, SMALL, vllm(SMALL),
+         ["--kind", "chat", "--max-tokens", "512", "--rows", "30000", "--auto-reps", "2",
+          "--fixed", "128,256,512,1024"]),
+    Cell("steady-short-sglang", "small", "a10g-small", SGLANG_IMAGE, SMALL,
+         f"python3 -m sglang.launch_server --model-path {SMALL} --port 8000 --host 127.0.0.1 "
+         "--mem-fraction-static 0.7 --enable-metrics",
+         ["--kind", "chat", "--rows", "30000", "--auto-reps", "2", "--fixed", "128,256,512,1024"]),
     # embeddings
     Cell("embed-tei", "small", "a10g-small", TEI_IMAGE, "BAAI/bge-small-en-v1.5",
          "text-embeddings-router --model-id BAAI/bge-small-en-v1.5 --port 8000 --hostname 127.0.0.1",

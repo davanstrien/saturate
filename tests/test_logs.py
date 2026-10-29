@@ -97,3 +97,31 @@ def test_a_script_that_configures_logging_at_warning_hides_progress():
                       "logging.getLogger('saturate.sink').info('resume: reading 1001 manifest files')\n"
                       "logging.getLogger('saturate.transport').warning('circuit OPEN')")
     assert (done.stdout, done.stderr) == ("", "saturate.transport circuit OPEN\n")
+
+
+def test_a_record_never_takes_the_logging_module_lock(monkeypatch, capsys):
+    """emit runs under the handler's lock; dictConfig holds logging's module lock while it takes
+    handler locks. A logging.getLogger call in emit would take them in the other order."""
+    unconfigured(monkeypatch)
+    lookups, get_logger = [], logging.getLogger
+
+    def recording(*args):
+        lookups.append(args)
+        return get_logger(*args)
+
+    logging.getLogger = recording  # only around the record: pytest's own teardown looks loggers up
+    try:
+        log.warning("circuit OPEN")
+    finally:
+        logging.getLogger = get_logger
+    assert lookups == []
+    assert capsys.readouterr().err == "[pump] circuit OPEN\n"
+
+
+def test_root_at_warning_alone_still_shows_saturate_progress():
+    """A deliberate choice: `saturate` is at INFO, so a root level does not hide its progress
+    lines; setLevel on `saturate` does (the README says so)."""
+    done = run_script("import logging, saturate\n"
+                      "logging.basicConfig(level=logging.WARNING, format='%(message)s')\n"
+                      "logging.getLogger('saturate.core').info('done: 5 ok')")
+    assert (done.stdout, done.stderr) == ("", "done: 5 ok\n")

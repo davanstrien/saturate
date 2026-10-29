@@ -219,7 +219,8 @@ interval is a quarter of the run so far) and finalised at exit; readers may see 
 
 In agent mode (env `CLAUDECODE`, `CODEX_SANDBOX`, or `AI_AGENT` — set `AI_AGENT=1` to force it;
 detection is truthiness of any of the three, so there is no off-switch once one is set),
-**stdout carries exactly one line**: the run's Stats JSON. Everything human-facing
+**stdout carries exactly one line**: the run's Stats JSON (unless the caller points a logging
+handler at stdout). Everything human-facing
 (progress, advisor hints, the resume hint) is logged under the `saturate` logger and, while the
 caller has configured no logging handler, printed to stderr; a handler the caller points at
 stdout is the caller's choice. Stats keys (frozen, same additive

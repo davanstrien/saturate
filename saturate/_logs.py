@@ -22,12 +22,15 @@ class _Fallback(logging.Handler):
     """Prints to stderr only while nobody has configured logging. Writes to sys.stderr as it is
     at each record: pytest, notebooks and agents replace sys.stderr after import."""
 
-    def __init__(self) -> None:
+    def __init__(self, package: logging.Logger) -> None:
         super().__init__()
+        # held here, not looked up per record: logging.getLogger takes logging's module lock,
+        # and emit runs under this handler's lock, while dictConfig takes them the other way
+        self.package = package
         self.setFormatter(logging.Formatter("[pump] %(message)s"))
 
     def emit(self, record: logging.LogRecord) -> None:
-        if _configured():
+        if self.configured():
             return
         try:
             sys.stderr.write(self.format(record) + "\n")
@@ -35,12 +38,10 @@ class _Fallback(logging.Handler):
         except Exception:
             self.handleError(record)
 
-
-def _configured() -> bool:
-    """True once the caller has put a handler on the root logger or on `saturate`."""
-    package = logging.getLogger(PACKAGE)
-    theirs = [handler for handler in package.handlers if not isinstance(handler, _Fallback)]
-    return bool(theirs or logging.getLogger().handlers)
+    def configured(self) -> bool:
+        """True once the caller has put a handler on the root logger or on `saturate`."""
+        theirs = [handler for handler in self.package.handlers if handler is not self]
+        return bool(theirs or logging.root.handlers)
 
 
 def install() -> None:
@@ -48,6 +49,6 @@ def install() -> None:
     package = logging.getLogger(PACKAGE)
     if any(isinstance(handler, _Fallback) for handler in package.handlers):
         return
-    package.addHandler(_Fallback())
+    package.addHandler(_Fallback(package))
     if package.level == logging.NOTSET:  # progress lines are INFO; a caller's own level wins
         package.setLevel(logging.INFO)

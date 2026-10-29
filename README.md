@@ -353,7 +353,7 @@ stats = pump(
 ## Running under an agent
 
 In agent mode (detected via env) stdout carries exactly one line — the run's stats as JSON —
-and everything human goes to stderr, including the run-end advisor ("server ceiling: running
+and everything human goes to stderr (unless you point a logging handler at stdout), including the run-end advisor ("server ceiling: running
 pinned at N — relaunch with --max-num-seqs 2N") and the standing hint that re-running the
 same command is always safe.
 

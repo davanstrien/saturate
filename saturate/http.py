@@ -55,15 +55,17 @@ class Timeouts:
         def phase(limit: float | None) -> float:
             return cap if limit is None or limit == 0 else min(limit, cap)
 
-        return Timeouts(read=phase(self.read), connect=phase(self.connect), pool=phase(self.pool),
-                        write=phase(self.write))
+        return Timeouts(
+            read=phase(self.read), connect=phase(self.connect), pool=phase(self.pool), write=phase(self.write)
+        )
 
     def for_aiohttp(self) -> aiohttp.ClientTimeout:
         limits = [limit for limit in (self.pool, self.write, self.read) if limit]  # None or 0: no limit
         total = sum(limits) if len(limits) == 3 else None  # a phase without a limit: no total
         # aiohttp's names differ: its `connect` is our pool wait, its `sock_connect` our connect
-        return aiohttp.ClientTimeout(total=total, connect=self.pool, sock_connect=self.connect,
-                                     sock_read=self.read)
+        return aiohttp.ClientTimeout(
+            total=total, connect=self.pool, sock_connect=self.connect, sock_read=self.read
+        )
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -90,8 +92,13 @@ class HttpClient:
     the like, looked up once per host; localhost is never proxied); False uses none; a URL is
     used for every request. The session opens on the first request, inside the running loop."""
 
-    def __init__(self, headers: Mapping[str, str] | None = None, timeouts: Timeouts | None = None,
-                 proxy: str | bool | None = None, max_connections: int = MAX_CONNECTIONS):
+    def __init__(
+        self,
+        headers: Mapping[str, str] | None = None,
+        timeouts: Timeouts | None = None,
+        proxy: str | bool | None = None,
+        max_connections: int = MAX_CONNECTIONS,
+    ):
         self.timeouts = timeouts or Timeouts()
         self._headers = dict(headers or {})
         self._proxy = proxy
@@ -114,23 +121,39 @@ class HttpClient:
     async def __aexit__(self, *exc) -> None:
         await self.aclose()
 
-    async def post(self, url: str, *, json=None, form: aiohttp.FormData | None = None,
-                   timeouts: Timeouts | None = None, headers: Mapping[str, str] | None = None) -> Reply:
+    async def post(
+        self,
+        url: str,
+        *,
+        json=None,
+        form: aiohttp.FormData | None = None,
+        timeouts: Timeouts | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> Reply:
         """POST a JSON body or a multipart form."""
         return await self._request("POST", url, timeouts, headers, json=json, data=form)
 
-    async def get(self, url: str, *, timeouts: Timeouts | None = None,
-                  headers: Mapping[str, str] | None = None) -> Reply:
+    async def get(
+        self, url: str, *, timeouts: Timeouts | None = None, headers: Mapping[str, str] | None = None
+    ) -> Reply:
         return await self._request("GET", url, timeouts, headers)
 
-    async def _request(self, method: str, url: str, timeouts: Timeouts | None,
-                       headers: Mapping[str, str] | None, **body) -> Reply:
+    async def _request(
+        self, method: str, url: str, timeouts: Timeouts | None, headers: Mapping[str, str] | None, **body
+    ) -> Reply:
         session = self._open()
         limits = (timeouts or self.timeouts).for_aiohttp()
         try:
             # no redirects: a 3xx is the server's answer, which the retry ladder rejects as poison
-            async with session.request(method, url, timeout=limits, headers=headers,
-                                       proxy=self._proxy_for(url), allow_redirects=False, **body) as r:
+            async with session.request(
+                method,
+                url,
+                timeout=limits,
+                headers=headers,
+                proxy=self._proxy_for(url),
+                allow_redirects=False,
+                **body,
+            ) as r:
                 return Reply(r.status, r.headers, await r.read())
         except aiohttp.InvalidURL:
             raise  # a caller's mistake, not the server's
@@ -143,8 +166,9 @@ class HttpClient:
         if self._closed:
             raise RuntimeError("the HTTP client is closed")
         if self._session is None:
-            connector = aiohttp.TCPConnector(limit=self._max_connections, limit_per_host=0,
-                                             keepalive_timeout=KEEPALIVE_S)
+            connector = aiohttp.TCPConnector(
+                limit=self._max_connections, limit_per_host=0, keepalive_timeout=KEEPALIVE_S
+            )
             # no trust_env: it reads the proxy settings and ~/.netrc on every request, which cost
             # more CPU than the rest of a request; _proxy_for looks the proxy up once per host
             self._session = aiohttp.ClientSession(connector=connector, headers=self._headers)

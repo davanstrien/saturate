@@ -16,13 +16,48 @@ from saturate import Auto, FatalTransportError, Fixed, existing_ids, pump, read_
 from saturate.source import content_id
 from saturate.transport import Breaker
 
-TELEMETRY_KEYS = {"t", "limit", "inflight", "waiting", "running", "bp", "ok", "retries", "input_bound",
-                  "tok_s", "kv", "hits", "preempts", "reason", "latency_s", "bound_by", "source_s",
-                  "prep_s", "prep_n", "prep_workers", "loop_lag_s"}  # CONTRACT §6
-STATS_KEYS = {"rows_total", "rows_done_prior", "rows_errored_prior", "rows_processed", "rows_failed",
-              "rows_deduped", "retries",
-              "prompt_tokens", "completion_tokens", "elapsed_s", "final_limit", "input_bound",
-              "breaker_opens", "hints", "tokens_per_sec", "cut_reasons", "bound_by"}  # CONTRACT §7
+TELEMETRY_KEYS = {
+    "t",
+    "limit",
+    "inflight",
+    "waiting",
+    "running",
+    "bp",
+    "ok",
+    "retries",
+    "input_bound",
+    "tok_s",
+    "kv",
+    "hits",
+    "preempts",
+    "reason",
+    "latency_s",
+    "bound_by",
+    "source_s",
+    "prep_s",
+    "prep_n",
+    "prep_workers",
+    "loop_lag_s",
+}  # CONTRACT §6
+STATS_KEYS = {
+    "rows_total",
+    "rows_done_prior",
+    "rows_errored_prior",
+    "rows_processed",
+    "rows_failed",
+    "rows_deduped",
+    "retries",
+    "prompt_tokens",
+    "completion_tokens",
+    "elapsed_s",
+    "final_limit",
+    "input_bound",
+    "breaker_opens",
+    "hints",
+    "tokens_per_sec",
+    "cut_reasons",
+    "bound_by",
+}  # CONTRACT §7
 
 
 def to_request(row):
@@ -30,8 +65,7 @@ def to_request(row):
 
 
 def parse(row, resp):
-    return {"text": resp["choices"][0]["message"]["content"],
-            "prompt_tokens": resp["usage"]["prompt_tokens"]}
+    return {"text": resp["choices"][0]["message"]["content"], "prompt_tokens": resp["usage"]["prompt_tokens"]}
 
 
 def rows(n, start=0):
@@ -57,8 +91,14 @@ def fast_ticks(monkeypatch):
 
 def test_pump_happy_path(stub, tmp_path):
     stub.latency_s = 0.02  # long enough for several controller ticks
-    stats = pump(rows(200), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path),
-                 window=Auto(initial=4, max_limit=32))
+    stats = pump(
+        rows(200),
+        to_request,
+        parse,
+        endpoint=stub.endpoint,
+        output=str(tmp_path),
+        window=Auto(initial=4, max_limit=32),
+    )
 
     assert (stats.rows_total, stats.rows_done_prior) == (200, 0)
     assert (stats.rows_processed, stats.rows_failed) == (200, 0)
@@ -86,12 +126,10 @@ def test_pump_happy_path(stub, tmp_path):
 
 
 def test_pump_resume_is_exact(stub, tmp_path):
-    first = pump(rows(100), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path),
-                 window=Fixed(8))
+    first = pump(rows(100), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path), window=Fixed(8))
     assert (first.rows_processed, stub.requests) == (100, 100)
 
-    second = pump(rows(150), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path),
-                  window=Fixed(8))
+    second = pump(rows(150), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path), window=Fixed(8))
     assert second.rows_total == 150
     assert second.rows_done_prior == 100
     assert (second.rows_processed, second.rows_failed) == (50, 0)
@@ -114,14 +152,25 @@ def test_error_rows_and_heal(stub, tmp_path):
     assert (stats.rows_processed, stats.rows_failed) == (25, 5)
     assert existing_ids(str(tmp_path)) == poisoned | healthy  # error rows are durable...
     assert existing_ids(str(tmp_path), retry_errors=True) == healthy  # ...and healable
-    errors = [e for p in tmp_path.glob("part-*.parquet")
-              for e in pq.read_table(p, columns=["error"])["error"].to_pylist() if e]
+    errors = [
+        e
+        for p in tmp_path.glob("part-*.parquet")
+        for e in pq.read_table(p, columns=["error"])["error"].to_pylist()
+        if e
+    ]
     assert len(errors) == 5 and all(e.startswith("http 400") for e in errors)
     assert set(dict(read_output(str(tmp_path)))) == healthy
 
     stub.status_for = lambda request: 200
-    healed = pump(data, to_request, parse, endpoint=stub.endpoint, output=str(tmp_path), window=Fixed(4),
-                  retry_errors=True)
+    healed = pump(
+        data,
+        to_request,
+        parse,
+        endpoint=stub.endpoint,
+        output=str(tmp_path),
+        window=Fixed(4),
+        retry_errors=True,
+    )
     assert healed.rows_done_prior == 25
     assert (healed.rows_processed, healed.rows_failed) == (5, 0)
     assert stub.requests == 35
@@ -194,19 +243,28 @@ def test_breaker_probes_the_request_route_with_a_tiny_body(stub, tmp_path, quick
     the run uses (/embeddings) with the tiny generic body carrying the run's model — never
     /chat/completions, never the caller's own body."""
     stub.status_for = down_then_up(6)
-    stats = pump(rows(12), lambda r: {"model": "stub", "input": [r["text"]]},
-                 lambda r, resp: {"dim": len(resp["data"][0]["embedding"])},
-                 endpoint=stub.endpoint, output=str(tmp_path), window=Fixed(4), route="/embeddings")
+    stats = pump(
+        rows(12),
+        lambda r: {"model": "stub", "input": [r["text"]]},
+        lambda r, resp: {"dim": len(resp["data"][0]["embedding"])},
+        endpoint=stub.endpoint,
+        output=str(tmp_path),
+        window=Fixed(4),
+        route="/embeddings",
+    )
 
     assert stats.breaker_opens >= 1 and stub.probes >= 1
     assert {path for path, _ in stub.probe_log} == {"/v1/embeddings"}
-    assert all(body["model"] == "stub" and body["max_tokens"] == 1 and body["input"] == "hi"
-               for _, body in stub.probe_log)
+    assert all(
+        body["model"] == "stub" and body["max_tokens"] == 1 and body["input"] == "hi"
+        for _, body in stub.probe_log
+    )
     assert (stats.rows_processed, stats.rows_failed) == (12, 0)  # the run recovered
 
 
-def test_breaker_probe_answers_inside_its_timeout_when_generations_are_long(stub, tmp_path,
-                                                                             quick_breaker, monkeypatch):
+def test_breaker_probe_answers_inside_its_timeout_when_generations_are_long(
+    stub, tmp_path, quick_breaker, monkeypatch
+):
     """Rows ask for long generations the server takes longer than the probe timeout to answer;
     the probe (max_tokens=1) answers at once, so a healthy server closes the circuit."""
     monkeypatch.setattr(saturate.transport, "PROBE_TIMEOUT_S", 0.3)
@@ -214,8 +272,7 @@ def test_breaker_probe_answers_inside_its_timeout_when_generations_are_long(stub
     stub.status_for = down_then_up(4)
     long_request = lambda r: {**to_request(r), "max_tokens": 4096}  # noqa: E731
     t = time.monotonic()
-    stats = pump(rows(6), long_request, parse, endpoint=stub.endpoint, output=str(tmp_path),
-                 window=Fixed(4))
+    stats = pump(rows(6), long_request, parse, endpoint=stub.endpoint, output=str(tmp_path), window=Fixed(4))
     elapsed = time.monotonic() - t
 
     assert stats.breaker_opens >= 1 and stub.probes >= 1
@@ -249,16 +306,30 @@ def test_a_slow_parse_reads_loop_bound(stub, tmp_path):
 
     # no scrape: a blocked parse that lands inside the scrape's await counts as scrape time, not
     # loop lag — negligible against a real 2 s tick, but it made this 0.1 s-tick test flaky
-    stats = pump(rows(60), to_request, slow_parse, endpoint=stub.endpoint, output=str(tmp_path / "slow"),
-                 window=Fixed(6), signal_source="none")
+    stats = pump(
+        rows(60),
+        to_request,
+        slow_parse,
+        endpoint=stub.endpoint,
+        output=str(tmp_path / "slow"),
+        window=Fixed(6),
+        signal_source="none",
+    )
     assert stats.rows_processed == 60
     assert stats.bound_by.get("loop", 0) > sum(stats.bound_by.values()) / 2, stats.bound_by
     assert any(h.startswith("LOOP-BOUND: the event loop was blocked") for h in stats.hints), stats.hints
     assert not stats.input_bound  # the window was full: not starved
 
     # the control runs ~10 ticks, so one tick delayed by a busy scheduler stays a minority
-    stats = pump(rows(300), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path / "fast"),
-                 window=Fixed(6), signal_source="none")
+    stats = pump(
+        rows(300),
+        to_request,
+        parse,
+        endpoint=stub.endpoint,
+        output=str(tmp_path / "fast"),
+        window=Fixed(6),
+        signal_source="none",
+    )
     assert stats.bound_by.get("loop", 0) < sum(stats.bound_by.values()) / 2, stats.bound_by
     assert not any(h.startswith("LOOP-BOUND") for h in stats.hints), stats.hints
     assert stats.bound_by, stats.bound_by  # the control run did tick
@@ -283,8 +354,15 @@ def test_prepared_bodies_are_bounded_independently_of_the_feeder(stub, tmp_path,
             at_first_response.append(prepared)
         return parse(row, resp)
 
-    stats = pump(rows(24), counting_to_request, first_parse, endpoint=stub.endpoint,
-                 output=str(tmp_path), window=Fixed(2), prepare_workers=workers)
+    stats = pump(
+        rows(24),
+        counting_to_request,
+        first_parse,
+        endpoint=stub.endpoint,
+        output=str(tmp_path),
+        window=Fixed(2),
+        prepare_workers=workers,
+    )
     assert stats.rows_processed == 24
     assert at_first_response[0] <= 6, at_first_response
 
@@ -306,8 +384,15 @@ def test_prepare_stage_offloads_to_request_and_the_verdict_names_it(stub, tmp_pa
         monkeypatch.setattr(saturate.core, "TICK_S", 0.25 if workers == 0 else 0.1)
         out = tmp_path / f"w{workers}"
         t = time.monotonic()
-        stats = pump(rows(60), slow_to_request, parse, endpoint=stub.endpoint, output=str(out),
-                     window=Fixed(14), prepare_workers=workers)
+        stats = pump(
+            rows(60),
+            slow_to_request,
+            parse,
+            endpoint=stub.endpoint,
+            output=str(out),
+            window=Fixed(14),
+            prepare_workers=workers,
+        )
         timings[workers] = time.monotonic() - t
         assert (stats.rows_processed, stats.rows_failed) == (60, 0)
         ticks = read_ticks(out)
@@ -322,15 +407,24 @@ def test_prepare_stage_offloads_to_request_and_the_verdict_names_it(stub, tmp_pa
         else:
             assert prep_ticks <= len(ticks) / 2, [t["bound_by"] for t in ticks]
             assert not any(h.startswith("PREP-BOUND") for h in stats.hints), stats.hints
-    print(f"prepare_workers=0: {timings[0]:.2f}s  prepare_workers=4: {timings[4]:.2f}s  "
-          f"speedup {timings[0] / timings[4]:.1f}x")
+    print(
+        f"prepare_workers=0: {timings[0]:.2f}s  prepare_workers=4: {timings[4]:.2f}s  "
+        f"speedup {timings[0] / timings[4]:.1f}x"
+    )
     assert timings[0] >= 2 * timings[4], timings
 
 
 def test_window_ramps_and_endpoint_sees_concurrency(stub, tmp_path):
     stub.latency_s = 0.1
-    stats = pump(rows(300), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path),
-                 window=Auto(initial=4, max_limit=64), flush_every=50)
+    stats = pump(
+        rows(300),
+        to_request,
+        parse,
+        endpoint=stub.endpoint,
+        output=str(tmp_path),
+        window=Auto(initial=4, max_limit=64),
+        flush_every=50,
+    )
     assert (stats.rows_processed, stats.rows_failed) == (300, 0)
     assert stub.peak_inflight > 4  # the window widened and the endpoint actually saw it
     assert stats.final_limit > 4
@@ -367,8 +461,15 @@ def test_failures_after_a_success_are_ordinary_error_rows(stub, tmp_path):
 
 
 def test_fail_fast_zero_restores_storing_every_failure(stub, tmp_path):
-    stats = pump(rows(100), to_request, bad_parse, endpoint=stub.endpoint, output=str(tmp_path),
-                 window=Fixed(4), fail_fast=0)
+    stats = pump(
+        rows(100),
+        to_request,
+        bad_parse,
+        endpoint=stub.endpoint,
+        output=str(tmp_path),
+        window=Fixed(4),
+        fail_fast=0,
+    )
     assert (stats.rows_processed, stats.rows_failed) == (0, 100)
 
 
@@ -382,8 +483,9 @@ def test_resume_says_how_many_skipped_rows_are_errors(stub, tmp_path):
     stats = pump(rows(20), to_request, parse, endpoint=stub.endpoint, output=out, window=Fixed(2))
     assert (stats.rows_done_prior, stats.rows_errored_prior, stats.rows_processed) == (20, 2, 0)
     assert any(h.startswith("RETRY-ERRORS: 2 rows") and "retry_errors=True" in h for h in stats.hints)
-    stats = pump(rows(20), to_request, parse, endpoint=stub.endpoint, output=out, window=Fixed(2),
-                 retry_errors=True)
+    stats = pump(
+        rows(20), to_request, parse, endpoint=stub.endpoint, output=out, window=Fixed(2), retry_errors=True
+    )
     assert (stats.rows_errored_prior, stats.rows_processed) == (0, 2)
     assert not any(h.startswith("RETRY-ERRORS") for h in stats.hints)
 
@@ -391,6 +493,7 @@ def test_resume_says_how_many_skipped_rows_are_errors(stub, tmp_path):
 def test_a_parse_with_a_defaulted_second_parameter_takes_the_response(stub, tmp_path):
     """`lambda body, model="m": ...` has two parameters but one required: it is parse(resp).
     Calling it as parse(row, body) would fail every row with KeyError 'choices'."""
+
     def one_arg(body, model="m"):
         return {"text": body["choices"][0]["message"]["content"], "model": model}
 
@@ -403,8 +506,15 @@ def test_retry_errors_over_rows_that_still_fail_completes(stub, tmp_path):
     image). The run must finish and re-store their errors, not stop on fail_fast."""
     out = str(tmp_path)
     pump(rows(50), to_request, bad_parse, endpoint=stub.endpoint, output=out, window=Fixed(4), fail_fast=0)
-    stats = pump(rows(50), to_request, bad_parse, endpoint=stub.endpoint, output=out, window=Fixed(4),
-                 retry_errors=True)
+    stats = pump(
+        rows(50),
+        to_request,
+        bad_parse,
+        endpoint=stub.endpoint,
+        output=out,
+        window=Fixed(4),
+        retry_errors=True,
+    )
     assert (stats.rows_processed, stats.rows_failed) == (0, 50)
 
 
@@ -430,13 +540,20 @@ def test_retries_are_counted_per_attempt_in_stats_and_telemetry(stub, tmp_path, 
 def test_duplicate_rows_are_named_in_the_log(stub, tmp_path, caplog):
     """Identical rows share the default content-hash id, so a synth run repeating a prompt N
     times gets one sample. The log names the duplicate count; it is not only in the JSON stats."""
-    stats = pump([{"text": "same"}] * 5, to_request, parse, endpoint=stub.endpoint,
-                 output=str(tmp_path), window=Fixed(2))
+    stats = pump(
+        [{"text": "same"}] * 5,
+        to_request,
+        parse,
+        endpoint=stub.endpoint,
+        output=str(tmp_path),
+        window=Fixed(2),
+    )
     assert (stats.rows_processed, stats.rows_deduped) == (1, 4)
     assert "dedup: 4 rows had the id of an earlier row" in caplog.text
 
 
 # --- fan-out: shard= selects input (CONTRACT §2) ---------------------------------------------
+
 
 def test_shard_processes_only_its_own_rows(stub, tmp_path):
     """Each shard processes a disjoint slice, and the slices together cover the input exactly
@@ -444,8 +561,15 @@ def test_shard_processes_only_its_own_rows(stub, tmp_path):
     8-Job fan-out pay for the whole input 8 times."""
     per_shard = []
     for rank in range(3):  # one output per shard, so a resume cannot hide an overlap
-        stats = pump(rows(60), to_request, parse, endpoint=stub.endpoint, output=str(tmp_path / str(rank)),
-                     window=Fixed(4), shard=(rank, 3))
+        stats = pump(
+            rows(60),
+            to_request,
+            parse,
+            endpoint=stub.endpoint,
+            output=str(tmp_path / str(rank)),
+            window=Fixed(4),
+            shard=(rank, 3),
+        )
         per_shard.append(existing_ids(str(tmp_path / str(rank))))
         assert stats.rows_total == stats.rows_processed == len(per_shard[-1])
     assert stub.requests == 60  # no row paid twice
@@ -459,8 +583,7 @@ def test_shard_processes_only_its_own_rows(stub, tmp_path):
 def test_invalid_shard_raises(tmp_path):
     for bad in [(4, 4), (-1, 2), (0, 0)]:
         with pytest.raises(ValueError, match="shard"):
-            pump(rows(1), to_request, parse, endpoint="http://127.0.0.1:9", output=str(tmp_path),
-                 shard=bad)
+            pump(rows(1), to_request, parse, endpoint="http://127.0.0.1:9", output=str(tmp_path), shard=bad)
 
 
 def test_input_split_by_shard_select_runs_every_row_of_the_shard(stub, tmp_path):
@@ -469,7 +592,14 @@ def test_input_split_by_shard_select_runs_every_row_of_the_shard(stub, tmp_path)
     from saturate import shard_select, stream
 
     mine = list(shard_select(stream(rows(40)), 1, 4))
-    stats = pump(iter(mine), to_request, parse, endpoint=stub.endpoint,
-                 output=str(tmp_path), window=Fixed(4), shard=(1, 4))
+    stats = pump(
+        iter(mine),
+        to_request,
+        parse,
+        endpoint=stub.endpoint,
+        output=str(tmp_path),
+        window=Fixed(4),
+        shard=(1, 4),
+    )
     assert mine and stats.rows_processed == len(mine)
     assert (tmp_path / "__saturate" / "completions" / "shard-1.done").exists()

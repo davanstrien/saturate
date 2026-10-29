@@ -17,6 +17,7 @@ async def no_rows():
     return
     yield
 
+
 def test_write_telemetry_rewrites_one_file_per_run(tmp_path):
     """Repeated writes from one sink instance land in ONE file; the latest write wins.
     A second sink instance (another run) gets its own file."""
@@ -100,8 +101,25 @@ def test_pump_writes_telemetry_periodically_and_at_exit(tmp_path, monkeypatch):
     monkeypatch.setattr(saturate, "AdaptiveClient", FakeClient)
     monkeypatch.setattr(saturate, "through", fake_through)
     sink = CountingSink(str(tmp_path))
-    asyncio.run(saturate._pump([], lambda r: r, lambda r: r, "http://x", sink, None, (0, 1),
-                               10, 1.0, "/chat/completions", None, False, None, None, "none"))
+    asyncio.run(
+        saturate._pump(
+            [],
+            lambda r: r,
+            lambda r: r,
+            "http://x",
+            sink,
+            None,
+            (0, 1),
+            10,
+            1.0,
+            "/chat/completions",
+            None,
+            False,
+            None,
+            None,
+            "none",
+        )
+    )
     assert captured["on_tick"] is not None
     assert writes == [30, 60, 60]  # tick 30, tick 60, final
     files = list(tmp_path.glob("__saturate/telemetry/telemetry-shard0-*.jsonl"))
@@ -140,8 +158,24 @@ def test_pump_periodic_telemetry_failure_is_not_fatal(tmp_path, monkeypatch, cap
 
     monkeypatch.setattr(saturate, "AdaptiveClient", FakeClient)
     monkeypatch.setattr(saturate, "through", fake_through)
-    stats = asyncio.run(saturate._pump([], lambda r: r, lambda r: r, "http://x", BrokenSink(str(tmp_path)),
-                                       None, (0, 1), 10, 1.0, "/chat/completions", None, False, None,
-                                       None, "none"))
+    stats = asyncio.run(
+        saturate._pump(
+            [],
+            lambda r: r,
+            lambda r: r,
+            "http://x",
+            BrokenSink(str(tmp_path)),
+            None,
+            (0, 1),
+            10,
+            1.0,
+            "/chat/completions",
+            None,
+            False,
+            None,
+            None,
+            "none",
+        )
+    )
     assert stats.rows_processed == 0 and (tmp_path / "__saturate" / "completions" / "shard-0.done").exists()
     assert caplog.text.count("telemetry write failed (non-fatal)") == 2  # periodic + final

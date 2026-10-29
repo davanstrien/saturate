@@ -67,6 +67,7 @@ class Fixed:
 
 # --- Auto: phases and state, all frozen ----------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class Sample:
     """One tick's throughput: tokens/s when the engine reports them, and completions/s."""
@@ -170,9 +171,22 @@ class State:
 
 # every reason a decision can give: the tick's `reason` in telemetry (CONTRACT §6)
 Reason = Literal[
-    "hold", "hold:ack", "hold:cooldown", "hold:input_bound", "hold:kept", "hold:plateau",
-    "hold:jitter", "hold:ceiling", "hold:floor", "cut:bp", "cut:kv", "cut:stall", "cut:queue",
-    "revert", "trial:up", "trial:down",
+    "hold",
+    "hold:ack",
+    "hold:cooldown",
+    "hold:input_bound",
+    "hold:kept",
+    "hold:plateau",
+    "hold:jitter",
+    "hold:ceiling",
+    "hold:floor",
+    "cut:bp",
+    "cut:kv",
+    "cut:stall",
+    "cut:queue",
+    "revert",
+    "trial:up",
+    "trial:down",
 ]
 Decision = tuple[int, Reason, State]
 
@@ -278,14 +292,37 @@ class Auto:
 
     DEFAULT_INITIAL = 64  # the start when neither the caller nor the engine says otherwise
 
-    def __init__(self, target_waiting: int = 8, initial: int | None = None, min_limit: int = 2,
-                 max_limit: int = 512, step: int = 8, kv_hi: float = 0.9,
-                 hits_lo: float = 0.5, improve: float = 1.05, stall_ticks: int = 3,
-                 bp_frac: float = 0.05, seed: int | None = None):
-        settings.check("Auto", AUTO_SETTINGS, dict(
-            target_waiting=target_waiting, initial=initial, min_limit=min_limit, max_limit=max_limit,
-            step=step, kv_hi=kv_hi, hits_lo=hits_lo, improve=improve, stall_ticks=stall_ticks,
-            bp_frac=bp_frac, seed=seed))
+    def __init__(
+        self,
+        target_waiting: int = 8,
+        initial: int | None = None,
+        min_limit: int = 2,
+        max_limit: int = 512,
+        step: int = 8,
+        kv_hi: float = 0.9,
+        hits_lo: float = 0.5,
+        improve: float = 1.05,
+        stall_ticks: int = 3,
+        bp_frac: float = 0.05,
+        seed: int | None = None,
+    ):
+        settings.check(
+            "Auto",
+            AUTO_SETTINGS,
+            dict(
+                target_waiting=target_waiting,
+                initial=initial,
+                min_limit=min_limit,
+                max_limit=max_limit,
+                step=step,
+                kv_hi=kv_hi,
+                hits_lo=hits_lo,
+                improve=improve,
+                stall_ticks=stall_ticks,
+                bp_frac=bp_frac,
+                seed=seed,
+            ),
+        )
         if max_limit < min_limit:
             raise ValueError(f"Auto requires min_limit <= max_limit, not {min_limit} > {max_limit}")
         self.lo, self.hi = max(1, target_waiting // 4), target_waiting * 2
@@ -351,11 +388,17 @@ class Auto:
         tick = _tick(obs)
         latency = obs.latency_s if obs.latency_s is not None else state.latency_s
         hold = 3 * tick if latency is None else max(2 * tick, latency)
-        return replace(state, phase=Settling(state.clock, state.clock + hold, then), samples=(),
-                       silent_s=0.0, stall_armed=False)
+        return replace(
+            state,
+            phase=Settling(state.clock, state.clock + hold, then),
+            samples=(),
+            silent_s=0.0,
+            stall_armed=False,
+        )
 
-    def cut(self, state: State, obs: Obs, limit: int, new: int, reason: Reason,
-            keep_target: bool = False) -> Decision:
+    def cut(
+        self, state: State, obs: Obs, limit: int, new: int, reason: Reason, keep_target: bool = False
+    ) -> Decision:
         """The one way down that is not a trial. A trial that meets a cut failed: the next trial
         tries the next move, and the window goes no higher than where the trial began, unless
         `keep_target` (a queue gauge says exactly how far to step down)."""
@@ -385,10 +428,15 @@ class Auto:
 
 # --- per-tick bookkeeping ----------------------------------------------------------------------------
 
+
 def _observe(auto: Auto, state: State, obs: Obs, limit: int) -> State:
     tick = _tick(obs)
-    state = replace(state, clock=state.clock + tick, acked_ever=state.acked_ever or obs.successes > 0,
-                    latency_s=obs.latency_s if obs.latency_s is not None else state.latency_s)
+    state = replace(
+        state,
+        clock=state.clock + tick,
+        acked_ever=state.acked_ever or obs.successes > 0,
+        latency_s=obs.latency_s if obs.latency_s is not None else state.latency_s,
+    )
     # the engine's preemption counter, every tick (in a cooldown too, so the next window is not
     # charged with the last one's): preemptions since the previous reading. A missing reading
     # starts over, so a later one is not charged with what happened in the gap. A counter that
@@ -413,13 +461,15 @@ def _observe(auto: Auto, state: State, obs: Obs, limit: int) -> State:
             return replace(state, silent_s=0.0, samples=())  # the old window is not evidence
         state = replace(state, phase=state.phase.then)  # drained
     silent = obs.inflight >= limit and obs.successes == 0
-    state = replace(state, stall_armed=state.stall_armed or obs.successes > 0,
-                    silent_s=state.silent_s + tick if silent else 0.0)
+    state = replace(
+        state,
+        stall_armed=state.stall_armed or obs.successes > 0,
+        silent_s=state.silent_s + tick if silent else 0.0,
+    )
     if not obs.input_bound and obs.inflight >= int(limit * 0.8):  # only a used window is evidence
         sample = Sample(state.clock, obs.tok_s, obs.successes / tick, obs.successes)
         state = replace(state, samples=(state.samples + (sample,))[-MAX_SAMPLES:])
     return state
-
 
 
 Rule = Callable[[Auto, State, Obs, int], "Decision | None"]
@@ -429,8 +479,10 @@ Action = Callable[[Auto, State, Obs, int], Decision]
 
 # --- primitives: a rule is a condition and the action taken when it holds ---------------------
 
+
 def when(condition: Condition, action: Action) -> Rule:
     """The rule that takes `action` when `condition` holds, and otherwise makes no decision."""
+
     def rule(auto: Auto, state: State, obs: Obs, limit: int) -> Decision | None:
         if condition(auto, state, obs, limit):
             return action(auto, state, obs, limit)
@@ -444,6 +496,7 @@ def when(condition: Condition, action: Action) -> Rule:
 
 def hold(reason: Reason) -> Action:
     """Keep the window and the state."""
+
     def action(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
         return limit, reason, state
 
@@ -453,6 +506,7 @@ def hold(reason: Reason) -> Action:
 
 def halve(reason: Reason) -> Action:
     """Cut to half the window, through Auto.cut (bounds, and a failed trial's handling)."""
+
     def action(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
         return auto.cut(state, obs, limit, limit // 2, reason)
 
@@ -461,6 +515,7 @@ def halve(reason: Reason) -> Action:
 
 
 # --- conditions -------------------------------------------------------------------------------
+
 
 def settling(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
     return isinstance(state.phase, Settling)
@@ -513,6 +568,7 @@ def always(auto: Auto, state: State, obs: Obs, limit: int) -> bool:
 
 
 # --- actions that need more than a primitive --------------------------------------------------
+
 
 def cut_for_backpressure(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
     """Remember the window as a ceiling. At a ceiling met before, step just under it; on fresh
@@ -570,13 +626,19 @@ def open_trial(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
         new = min(new, _above(seen.limit))  # a released ceiling: probe past it by an eighth
     at_ceiling = state.ceiling is not None and limit >= _below(state.ceiling.limit)
     if new == limit or (factor < 1 and at_ceiling):  # nothing to try this way: the next move
-        skipped = replace(state, phase=replace(phase, waits=0, move=phase.move + 1, jitter=None),
-                          samples=())
+        skipped = replace(state, phase=replace(phase, waits=0, move=phase.move + 1, jitter=None), samples=())
         at_floor = factor < 1 and not at_ceiling
         return limit, "hold:floor" if at_floor else "hold:ceiling", skipped
     ref = phase.anchor if new < limit and phase.anchor is not None else reading
-    trial = Trial(origin=limit, ref=ref, opened=state.clock, widen=new / limit, move=phase.move,
-                  backoff=phase.backoff, latency_s=state.latency_s or 0.0)
+    trial = Trial(
+        origin=limit,
+        ref=ref,
+        opened=state.clock,
+        widen=new / limit,
+        move=phase.move,
+        backoff=phase.backoff,
+        latency_s=state.latency_s or 0.0,
+    )
     return new, "trial:up" if new > limit else "trial:down", replace(state, phase=trial, samples=())
 
 

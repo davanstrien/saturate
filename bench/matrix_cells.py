@@ -41,6 +41,7 @@ class Cell:
     model: str
     engine_cmd: str
     args: list[str] = field(default_factory=list)
+    timeout: str = "90m"  # hf jobs --timeout: the Job stops here, finished or not
 
 
 def vllm(model: str, *flags: str) -> str:
@@ -180,6 +181,7 @@ CELLS: tuple[Cell, ...] = (
         "Qwen/Qwen3.8-27B",
         vllm("Qwen/Qwen3.8-27B", "--max-model-len 8192"),
         ["--kind", "chat", "--no-think", "--max-tokens", "512", "--prompt", STORY, "--rows", "1500"],
+        timeout="4h",  # about 10 min an arm at 2.6 rows/s: 90 min ran one round (2026-10-30)
     ),
     Cell(
         "large-tp2-vllm",
@@ -204,7 +206,7 @@ def launch(cells: list[Cell], ref: str, branch: str, dry_run: bool) -> None:
             "--flavor",
             cell.flavor,
             "--timeout",
-            "90m",
+            cell.timeout,
             "--secrets",
             "HF_TOKEN",
             "-e",

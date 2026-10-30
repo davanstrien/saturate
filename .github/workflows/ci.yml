@@ -4,6 +4,10 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
   workflow_call:
+    inputs:
+      slow:  # release.yml sets it: a release runs the slow tier too
+        type: boolean
+        default: false
   workflow_dispatch:
 jobs:
   test:
@@ -44,8 +48,9 @@ jobs:
       - run: uv run --extra hf python -c "from huggingface_hub import HfFileSystem; HfFileSystem()"
   slow:
     # the slow tier: many seeds, several clients on one engine, deep Hypothesis runs. On demand
-    # (Actions > ci > Run workflow) or on a PR labelled `slow`; not on every push
+    # (Actions > ci > Run workflow), on a PR labelled `slow`, or before a release; not on every push
     if: >-
+      inputs.slow == true ||
       github.event_name == 'workflow_dispatch' ||
       (contains(github.event.pull_request.labels.*.name, 'slow') &&
        (github.event.action != 'labeled' || github.event.label.name == 'slow'))

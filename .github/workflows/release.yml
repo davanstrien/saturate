@@ -1,13 +1,16 @@
 name: release
 # A release is one merged PR: bump `version` in pyproject.toml and date its CHANGELOG section.
 # When that reaches main, this workflow runs the full suite, publishes to PyPI, then tags the
-# commit and creates the GitHub release from the CHANGELOG section. A push to main that leaves
-# the version unchanged (its tag already exists) does nothing.
+# commit and creates the GitHub release from the CHANGELOG section. A push to main whose version
+# already has a GitHub release does nothing; a run that stopped part-way can be re-run.
 on:
   push:
     branches: [main]
     paths: [pyproject.toml]
   workflow_dispatch:
+concurrency:
+  group: release  # one release at a time; never cancel a run that may be publishing
+  cancel-in-progress: false
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -16,14 +19,15 @@ jobs:
       release: ${{ steps.version.outputs.release }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # all tags, to see whether this version is already released
       - id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
-            echo "v$version is already tagged: nothing to release"
+          # the GitHub release is the last step, so it marks a finished release
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo "v$version is already released: nothing to do"
             echo "release=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -37,6 +41,8 @@ jobs:
     needs: check
     if: needs.check.outputs.release == 'true'
     uses: ./.github/workflows/ci.yml  # publishes only a commit that passes the full suite
+    with:
+      slow: true
   publish:
     needs: [check, test]
     runs-on: ubuntu-latest

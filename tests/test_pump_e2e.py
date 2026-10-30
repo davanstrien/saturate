@@ -4,6 +4,7 @@ metrics scrape, adaptive window) -> drain -> the storage CONTRACT on disk."""
 
 import json
 import os
+import threading
 import time
 
 import pyarrow.parquet as pq
@@ -372,21 +373,46 @@ def slow_to_request(row):
     return to_request(row)
 
 
+class CountingOverlap:
+    """Wraps a to_request and records the most calls that ran at the same time."""
+
+    def __init__(self, fn):
+        self.fn = fn
+        self.running = 0
+        self.peak = 0
+        self._lock = threading.Lock()
+
+    def __call__(self, row):
+        with self._lock:
+            self.running += 1
+            self.peak = max(self.peak, self.running)
+        try:
+            return self.fn(row)
+        finally:
+            with self._lock:
+                self.running -= 1
+
+
 @pytest.mark.internals
 def test_prepare_stage_offloads_to_request_and_the_verdict_names_it(stub, tmp_path, monkeypatch):
     """to_request at 50 ms/row on the loop serialises the pump: the endpoint idles and the
     ticks say `prep`. prepare_workers=4 runs it ahead in threads, the window fills, the run is
-    at least 2x faster, and the ticks stop blaming prep."""
+    at least 1.5x faster, and the ticks stop blaming prep. The calls themselves overlap in the
+    threads and never on the loop: a direct check that does not depend on the clock. The bar is
+    1.5x: a working offload measures about 3x (about 3.8 s against 1.2 s, run to run), an
+    offload that does nothing about 1x; the gap absorbs a loaded machine."""
     stub.latency_s = 0.2
-    timings = {}
+    timings, peak_calls = {}, {}
     for workers in (0, 4):
+        prepare = CountingOverlap(slow_to_request)
+
         # on the loop a tick must span many 50 ms calls; threaded, the run is short: tick often
         monkeypatch.setattr(saturate.core, "TICK_S", 0.25 if workers == 0 else 0.1)
         out = tmp_path / f"w{workers}"
         t = time.monotonic()
         stats = pump(
             rows(60),
-            slow_to_request,
+            prepare,
             parse,
             endpoint=stub.endpoint,
             output=str(out),
@@ -394,6 +420,7 @@ def test_prepare_stage_offloads_to_request_and_the_verdict_names_it(stub, tmp_pa
             prepare_workers=workers,
         )
         timings[workers] = time.monotonic() - t
+        peak_calls[workers] = prepare.peak
         assert (stats.rows_processed, stats.rows_failed) == (60, 0)
         ticks = read_ticks(out)
         prep_ticks = sum(t["bound_by"] == "prep" for t in ticks)
@@ -409,9 +436,10 @@ def test_prepare_stage_offloads_to_request_and_the_verdict_names_it(stub, tmp_pa
             assert not any(h.startswith("PREP-BOUND") for h in stats.hints), stats.hints
     print(
         f"prepare_workers=0: {timings[0]:.2f}s  prepare_workers=4: {timings[4]:.2f}s  "
-        f"speedup {timings[0] / timings[4]:.1f}x"
+        f"speedup {timings[0] / timings[4]:.1f}x  peak calls {peak_calls}"
     )
-    assert timings[0] >= 2 * timings[4], timings
+    assert peak_calls[0] == 1 and peak_calls[4] >= 2, peak_calls
+    assert timings[0] >= 1.5 * timings[4], timings
 
 
 def test_window_ramps_and_endpoint_sees_concurrency(stub, tmp_path):

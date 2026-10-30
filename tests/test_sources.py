@@ -58,6 +58,9 @@ def test_content_id_hashes_raw_bytes_by_content():
     assert content_id({"audio": memoryview(audio), "lang": "en"}) == first
     assert content_id({"audio": audio + b"!", "lang": "en"}) != first
     assert content_id({"text": "row 7"}) == "0e88386f40ff2287"
+    # ids from main for a nested row with a tuple, an int key and non-ASCII text
+    nested = {"text": "café", "counts": {1: "v"}, "parts": ("a", ["b", {"z": 2.5, "n": None}])}
+    assert content_id(nested) == "88ce69600839bfa0"
 
 
 def test_content_id_hashes_nested_and_strided_bytes():
@@ -85,6 +88,15 @@ def test_content_id_refuses_views_whose_items_are_not_single_bytes():
 
     with pytest.raises(TypeError, match="non-JSON"):
         content_id({"a": memoryview(array("i", [1, 2]))})
+    with pytest.raises(TypeError, match="non-JSON"):
+        content_id({"a": memoryview(b"abcdef").cast("B", (2, 3))})
+
+
+def test_content_ids_from_an_undecoded_column_hash_the_bytes():
+    files = Dataset.from_dict({"file": [{"bytes": b"x", "path": "a.wav"}, {"bytes": b"x", "path": "a.wav"}]})
+    ids = [i for i, _ in dataset_rows(files, ids="content")]
+    assert ids[0] == ids[1]
+    assert ids[0] == content_id({"file": {"bytes": b"x", "path": "a.wav"}})
 
 
 def test_column_ids():

@@ -55,3 +55,11 @@ design comments are the most useful contribution right now; small PRs are welcom
 ones deserve an issue first. New public surface needs a recorded decision in
 [history/decisions.md](history/decisions.md) (the scope rule; there is no numeric LOC
 ceiling). Real-workload claims go in `spikes/RESULTS.md` with job ids.
+
+**Releasing**: one PR. Bump `version` in `pyproject.toml` (and the `saturate` entry in
+`uv.lock`), and change the CHANGELOG heading from `## [X.Y.Z] - unreleased` to the release
+date. When the PR merges, `.github/workflows/release.yml` runs the full suite, publishes to
+PyPI by trusted publishing, then creates the `vX.Y.Z` tag and the GitHub release, with the
+CHANGELOG section as its notes and the built files attached. It fails before the tests if
+the CHANGELOG section is missing or undated. A merge that leaves the version unchanged does
+nothing. To retry a failed release, run the workflow by hand (`workflow_dispatch`).

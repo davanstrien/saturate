@@ -18,23 +18,82 @@ from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Executor, ThreadPoolExecutor
 from functools import partial
+from typing import NoReturn
+
+BYTE_FORMATS = ("B", "b", "c")  # memoryview formats whose items are single bytes
+BYTES_PREFIX = "bytes-v1:"  # starts the hashed text of a row that holds bytes
 
 
-def _reject_non_json(o):
+def _raw_bytes(o) -> bytes | None:
+    """The bytes of a raw-bytes value, or None for any other object. A memoryview counts only
+    when it is one-dimensional and its items are single bytes: a view of an int or object array
+    has a byte layout that depends on the platform (an object array's holds pointers), and a
+    2x3 view and a 3x2 view of the same buffer have the same bytes."""
+    if isinstance(o, (bytes, bytearray)):
+        return bytes(o)
+    if isinstance(o, memoryview) and o.format in BYTE_FORMATS and o.ndim == 1:
+        return o.tobytes()  # also copies a strided view, which hashlib cannot read directly
+    return None
+
+
+def _reject(o) -> NoReturn:
     raise TypeError(
         f"row contains a non-JSON value ({type(o).__name__}) — its str() is not stable "
         "across runs, so a content id would break resume. Pass (id, row) tuples, "
-        "id_key=, or id_fn= for rows carrying objects (images, audio, tensors); "
+        "id_key=, or id_fn= for rows carrying objects (decoded images, audio arrays, tensors); "
         "from dataset_rows use ids=<key column>, a callable, or the index default."
     )
 
 
+class _HoldsBytes(Exception):
+    """Raised while dumping a row that holds raw bytes, to switch to the bytes encoding."""
+
+
+def _json_default(o) -> NoReturn:
+    if _raw_bytes(o) is not None:
+        raise _HoldsBytes
+    _reject(o)
+
+
+def _hash_bytes(value, path: list, byte_paths: list):
+    """A copy of `value` with each raw-bytes value replaced by the SHA-1 of its content. Appends
+    the path (keys and list indexes) of each one to `byte_paths`."""
+    if isinstance(value, dict):
+        copy = {}
+        for key, item in value.items():
+            copy[key] = _hash_bytes(item, [*path, key], byte_paths)
+        return copy
+    if isinstance(value, (list, tuple)):
+        items = []
+        for index, item in enumerate(value):
+            items.append(_hash_bytes(item, [*path, index], byte_paths))
+        return items
+    data = _raw_bytes(value)
+    if data is None:
+        return value  # JSON, or an object json.dumps refuses below
+    byte_paths.append(path)
+    return hashlib.sha1(data).hexdigest()
+
+
 def content_id(row: dict, keys: list[str] | None = None) -> str:
     """Stable 16-hex content hash of the row (or of `keys` fields only).
-    Strict by design: refuses non-JSON values rather than hashing an unstable
-    repr (a PIL image's str() embeds its memory address)."""
+
+    A JSON-only row hashes as its sorted JSON. In a row with raw bytes (bytes, bytearray, or a
+    one-dimensional memoryview of single bytes, at any depth), each one enters the JSON as the SHA-1 of its
+    content, and the hashed text also names where the bytes were (BYTES_PREFIX, then their
+    paths). So identical bytes give the same id, and a string that spells out a bytes hash
+    never gives the id of the bytes. Any other object raises TypeError: its str() can change
+    between runs (a PIL image's str() embeds its memory address), and a changed id breaks
+    resume."""
     src = {k: row[k] for k in keys} if keys else row
-    blob = json.dumps(src, sort_keys=True, default=_reject_non_json, ensure_ascii=False)
+    try:
+        # a JSON-only row: one dump, no copy of the row
+        blob = json.dumps(src, sort_keys=True, default=_json_default, ensure_ascii=False)
+    except _HoldsBytes:
+        byte_paths: list = []
+        hashed = _hash_bytes(src, [], byte_paths)
+        body = json.dumps(hashed, sort_keys=True, default=_reject, ensure_ascii=False)
+        blob = BYTES_PREFIX + json.dumps(sorted(byte_paths, key=json.dumps)) + "\n" + body
     return hashlib.sha1(blob.encode()).hexdigest()[:16]
 
 

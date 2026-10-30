@@ -89,15 +89,17 @@ def dataset_rows(
     without `config`); feed several loaded objects into one output with a
     column or callable id instead. Cheap and safe for any column type (images, audio).
     "content" — order-independent content hash via `content_id` over the
-    *yielded* row (after `columns` filtering — that is the lever for keeping
-    the hash JSON-safe; strict, refuses images. Dedups identical rows).
+    *yielded* row (after `columns` filtering). Raw bytes hash by content: an
+    Image or Audio column loaded with `decode=False` yields {"bytes", "path"}
+    and works. A decoded value (PIL image, audio array) is refused; drop it
+    with `columns` or load the column undecoded. Dedups identical rows.
     A column name — a natural key, looked up on the FULL example, so the id
     column does not need to be in `columns`.
     A callable `example -> id` — your own scheme, also given the full
     example, trusted as-is (must return something non-empty).
 
     `columns` selects a subset into the yielded row (slims what flows
-    downstream; also the JSON-safety lever for ids="content").
+    downstream; also how ids="content" leaves out a decoded column).
     `limit` stops after the first `limit` rows of the dataset (before sharding,
     so K shards with one limit cover those rows between them).
 

@@ -580,6 +580,25 @@ def test_duplicate_rows_are_named_in_the_log(stub, tmp_path, caplog):
     assert "dedup: 4 rows had the id of an earlier row" in caplog.text
 
 
+def test_rows_with_raw_bytes_get_content_ids_and_identical_files_dedupe(stub, tmp_path):
+    """A row carrying raw bytes (an audio file as read) needs no id option: the bytes hash by
+    content. Two copies of the same file are one row; a re-run finds every row done."""
+    # 3 distinct files, each twice, all with the same text: only the bytes tell them apart
+    rows = [{"text": "transcribe", "audio": f"wav-{i % 3}".encode()} for i in range(6)]
+
+    def text_only(row: dict) -> dict:
+        return to_request({"text": row["text"]})
+
+    def run():
+        return pump(rows, text_only, parse, endpoint=stub.endpoint, output=str(tmp_path), window=Fixed(2))
+
+    first = run()
+    assert (first.rows_processed, first.rows_deduped, first.rows_failed) == (3, 3, 0)
+    assert len(dict(read_output(str(tmp_path)))) == 3
+    again = run()
+    assert (again.rows_done_prior, again.rows_processed) == (6, 0)  # every input row: its id is done
+
+
 # --- fan-out: shard= selects input (CONTRACT §2) ---------------------------------------------
 
 

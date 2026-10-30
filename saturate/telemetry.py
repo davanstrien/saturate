@@ -116,7 +116,7 @@ def advise(telemetry: list[dict], dialect: str | None, final_limit: int, ceiling
         return []  # no standing queue -> engine wasn't the ceiling
     mode, freq = Counter(t["running"] for t in queued).most_common(1)[0]
     if mode == 0:
-        return []  # rows completed, so `running` does not count this work (vLLM pooling routes)
+        return []  # running reads 0 under a queue: the gauge does not count this work (vLLM pooling routes)
     if freq / len(queued) >= 0.7 and mode < final_limit:
         flag = ceiling_flags.get(dialect or "", "raise the server's max concurrent requests")
         return [

@@ -11,7 +11,7 @@ under your account. Kill it anytime; re-running resumes exactly.
 
 On HF Jobs (vllm comes from the image; a few minutes on an A10G):
 
-    hf jobs uv run --image vllm/vllm-openai:latest --flavor a10g-small \\
+    hf jobs uv run --image vllm/vllm-openai:v0.22.1 --flavor a10g-small \\
         --secrets HF_TOKEN examples/quickstart.py
 
 Locally: `uv run examples/quickstart.py` on any machine with a GPU and

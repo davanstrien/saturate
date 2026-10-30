@@ -15,9 +15,10 @@ command is always safe.
 
 ```bash
 uv pip install 'saturate[hf]'   # or: pip install 'saturate[hf]'
-# the [hf] extra pulls huggingface_hub + datasets: hf:// output paths and Hub dataset
-# input (dataset_rows); plain saturate works with your own iterables + local output
 ```
+
+The `[hf]` extra adds `huggingface_hub` and `datasets`, for `hf://` outputs and `dataset_rows`.
+Plain `saturate` works with your own iterables and local output.
 
 > **Experimental.** The API and behaviour can change in any 0.x release, often with no
 > deprecation period. Pin an exact version (`saturate==0.3.0`) if you rely on how it
@@ -47,9 +48,74 @@ The runnable version is [examples/quickstart.py](examples/quickstart.py) — a
 self-contained uv script (PEP 723) that works the same on your machine and on HF Jobs:
 
 ```bash
-hf jobs uv run --image vllm/vllm-openai:latest --flavor a10g-small \
+hf jobs uv run --image vllm/vllm-openai:v0.22.1 --flavor a10g-small \
     --secrets HF_TOKEN examples/quickstart.py
 ```
+
+Output is append-only parquet, read back with `read_output` (or `load_dataset`, given a
+`schema=`); a failed row is a durable error row (see [What you get](#what-you-get)).
+
+For complete recipes, see the `-saturate` scripts in
+[uv-scripts/ocr](https://huggingface.co/datasets/uv-scripts/ocr) (for example
+`lighton-ocr2-saturate.py`), which run saturate on HF Jobs end to end.
+
+Where do `rows` come from? Any iterable works. For Hub datasets there is a built-in. It
+streams by default: for one sequential pass, `load_dataset(streaming=True)` reads at about
+local-SSD speed (see hf.co/blog/streaming-datasets):
+
+```python
+from saturate import dataset_rows
+
+rows = dataset_rows(
+    "HuggingFaceFW/fineweb-edu", split="train", columns=["text"], limit=100_000
+)  # (id, row) stream; ids="index"|"content"|column (see "Ids that survive fan-out")
+```
+
+Already have an endpoint (a colleague's server, an exposed Job, a hosted API)? Skip
+`Engine` and pass its URL as `endpoint=` — everything else is identical. One caveat for a
+shared hosted API: after sustained 5xx the circuit breaker pauses the run and probes the real
+route about once a second (a one-token request) for up to `max_open_s`; those probes may
+count toward a requests-per-minute quota.
+
+Notes on what you didn't have to do:
+
+- **No concurrency number.** The in-flight window tunes itself. It backs off when the server
+  shows pressure (errors, timeouts, a growing queue). Otherwise it tries a wider or narrower
+  window: it keeps a wider one when delivered throughput improves, and a narrower one when
+  throughput holds ([docs/design.md](docs/design.md), "The controller"). When the engine's
+  metrics gauges are reachable (vLLM, SGLang, llama.cpp, TensorRT-LLM, and TEI's queue depth),
+  they sharpen the decisions. Against opaque endpoints (a hosted API, a proxy that drops
+  `/metrics`), it works from errors, timeouts and delivered throughput alone. It grows only
+  after the first completion arrives, and it freezes (and tells you) when your *source* is
+  the bottleneck rather than the server.
+- **Want control anyway?** `window=Fixed(64)` pins it. `window=Auto(initial=32, max_limit=128)`
+  sets the starting point and the ceiling — do cap it for vision workloads, because in-flight
+  images live in RAM. Without `initial`, `Auto` starts at the engine's capacity when the engine
+  reports one (SGLang's running-request limit, llama.cpp's slots, TEI's concurrency limit,
+  TensorRT-LLM's batch size from 1.3), a little above it so a waiting request refills a free
+  slot. TEI rejects requests past its limit, so on TEI it starts at the limit and never goes
+  above. Elsewhere (vLLM, a hosted API) it starts at 64. For the next batch against the same
+  endpoint, start near where the last one ended: `window=Auto(initial=stats.final_limit)`.
+  Auto corrects from there (the run may have ended during a trial). Only the window carries
+  over; a hosted API's 429 limit is met again.
+- **Ids are yours if you want them.** Pass `(id, row)` tuples, or `id_key="my_column"`, or
+  an `id_fn=` callable. Default: a stable content-hash of the row — identical input rows
+  then dedupe for free. Raw bytes (an audio or image file as read, at any depth) hash by
+  content, so identical rows with identical bytes are one row; the same bytes at a
+  different place in the row make a different id. A decoded object (PIL image, array) needs
+  one of the id options above, or load the column undecoded (`datasets` `decode=False`).
+- **`kill -9` it, re-run the same command.** Output is append-only parquet with a manifest
+  sidecar; resume is an exact anti-join on id — it re-pays at most one flush buffer, never
+  duplicates a row. This holds across separate Jobs writing at different times.
+- **Choosing the output path.** Parts stream incrementally to `hf://datasets/…` and
+  `hf://buckets/…` alike, but dataset repos are git-backed — every flush is a commit,
+  so several shards flushing concurrently means commit contention — while buckets are
+  object storage with no commit path. Rule of thumb: buckets while a multi-shard run
+  is hot, dataset repos for single-writer runs and as the final publish target.
+  (Sharding vocabulary: a fan-out run is `world` shards, each identified by its
+  `rank` — see "Scaling" below.)
+
+## What you get
 
 What lands on disk (real rows from a live run):
 
@@ -71,7 +137,7 @@ appear in a later part, and those loaders fail or drop it (CONTRACT §1). satura
 dataset card; the Hub finds the parts.
 
 ```python
-# a success row and an error row from the same output (your parse() columns + id/error):
+# a success row and an error row from one live run (its parse() kept token counts and the category):
 {
     "id": "c5c71ae175e872ab",
     "error": None,
@@ -97,70 +163,6 @@ the done ids exactly, and `retry_errors=True` retries the errored ones. When a r
 succeeds, the output holds both records for that id and readers let the success win
 (we call that **healing**).
 
-Already have an endpoint (a colleague's server, an exposed Job, a hosted API)? Skip
-`Engine` and pass its URL as `endpoint=` — everything else is identical. One caveat for a
-shared hosted API: after sustained 5xx the circuit breaker pauses the run and probes the real
-route about once a second (a one-token request) for up to `max_open_s`; those probes may
-count toward a requests-per-minute quota.
-
-Where do `rows` come from? Any iterable works. For Hub datasets there is a built-in. It
-streams by default: for one sequential pass, `load_dataset(streaming=True)` reads at about
-local-SSD speed (see hf.co/blog/streaming-datasets):
-
-```python
-from saturate import dataset_rows
-
-rows = dataset_rows(
-    "HuggingFaceFW/fineweb-edu", split="train", columns=["text"], limit=100_000
-)  # (id, row) stream; ids="index"|"content"|column (see "Ids that survive fan-out")
-```
-
-Notes on what you didn't have to do:
-
-- **No concurrency number.** The in-flight window tunes itself: it backs off when the
-  server shows pressure (errors, timeouts, a growing queue). Otherwise it tries a wider or
-  narrower window: it keeps a wider one when delivered throughput improves, and a narrower
-  one when throughput holds
-  (docs/design.md, "The controller"). When the
-  engine's metrics gauges are reachable (vLLM, SGLang, llama.cpp, TensorRT-LLM, and TEI's
-  queue depth) they sharpen the decisions; against opaque endpoints (a hosted API, a
-  proxy that drops `/metrics`) it works from errors, timeouts
-  and delivered throughput alone. It grows only
-  after the first completion arrives, and it freezes (and tells you) when your *source* is
-  the bottleneck rather than the server.
-  Want control anyway? `window=Fixed(64)` pins it; `window=Auto(initial=32, max_limit=128)`
-  sets the starting point and ceiling (do cap it for vision workloads — in-flight images
-  live in RAM). `Auto` starts at the engine's capacity when the engine reports one
-  (SGLang's running-request limit, llama.cpp's slots, TEI's concurrency limit,
-  TensorRT-LLM's batch size from 1.3), a little
-  above it so a waiting request refills a free slot (TEI rejects past its limit, so it starts
-  there and never goes above); otherwise (vLLM, a hosted API) at 64. For a next batch
-  against the same endpoint, start near where the last one ended,
-  `window=Auto(initial=stats.final_limit)`: Auto corrects from there (the run may have ended
-  during a trial). Only the window carries over; a hosted API's 429 limit is met again.
-- **Ids are yours if you want them.** Pass `(id, row)` tuples, or `id_key="my_column"`, or
-  an `id_fn=` callable. Default: a stable content-hash of the row — identical input rows
-  then dedupe for free. Raw bytes (an audio or image file as read, at any depth) hash by
-  content, so identical rows with identical bytes are one row; the same bytes at a
-  different place in the row make a different id. A decoded object (PIL image, array) needs
-  one of the id options above, or load the column undecoded (`datasets` `decode=False`).
-- **`kill -9` it, re-run the same command.** Output is append-only parquet with a manifest
-  sidecar; resume is an exact anti-join on id — it re-pays at most one flush buffer, never
-  duplicates a row. This holds across separate Jobs writing at different times.
-- **Choosing the output path.** Parts stream incrementally to `hf://datasets/…` and
-  `hf://buckets/…` alike, but dataset repos are git-backed — every flush is a commit,
-  so several shards flushing concurrently means commit contention — while buckets are
-  object storage with no commit path. Rule of thumb: buckets while a multi-shard run
-  is hot, dataset repos for single-writer runs and as the final publish target.
-  (Sharding vocabulary: a fan-out run is `world` shards, each identified by its
-  `rank` — see "Scaling" below.)
-
-## Task wrappers live above this library
-
-`pump()` is deliberately the highest level here: two lambdas, no task opinions. Nicer
-task-shaped wrappers ("OCR this dataset with model X") belong a layer up — recipe scripts
-and product surfaces build them out of `pump()`; this library stays small underneath them.
-
 ## About `Engine` (an optional helper)
 
 You never need `Engine`. Any server that speaks the OpenAI HTTP API — vLLM, SGLang,
@@ -182,7 +184,7 @@ stream lands.
 ```python
 from datasets import load_dataset
 
-from saturate import AdaptiveClient, Auto, stream, skip_done, through, drain
+from saturate import AdaptiveClient, Auto, drain, read_output, skip_done, stream, through
 
 rows = stream(load_dataset("...", split="train", streaming=True))  # (id, row) pairs, lazy
 rows = skip_done(rows, sink)  # exact resume filter
@@ -348,9 +350,12 @@ Each tick of the telemetry names the bottleneck as `bound_by`: `engine`, `source
 `sink` (the output fell behind), or `loop` (`parse` or other work blocked the event loop).
 Read it to find which side to scale before you change anything.
 
-## Embeddings
+## Other routes
 
-Same client, different route — a "row" can be a pre-grouped batch:
+`route=` sets the path; everything else stays the same. `to_request` returns a dict (sent as
+JSON) or a `Request`.
+
+Embeddings — a "row" can be a pre-grouped batch:
 
 ```python
 stats = pump(
@@ -362,6 +367,39 @@ stats = pump(
     route="/embeddings",
 )
 ```
+
+Rerank and classify on vLLM are plain JSON too, but vLLM serves them at the server root, so
+the endpoint has no `/v1`:
+
+```python
+stats = pump(
+    pairs,
+    to_request=lambda r: {"model": "m", "query": r["query"], "documents": r["docs"]},
+    parse=lambda r, resp: {"scores": [d["relevance_score"] for d in resp["results"]]},
+    endpoint="http://localhost:8000",  # no /v1
+    output=output,
+    route="/rerank",  # or "/classify"
+)
+```
+
+Transcription (Whisper on vLLM) is a multipart upload. Build it with
+`make_multipart_request`; the endpoint keeps `/v1`:
+
+```python
+from saturate import make_multipart_request
+
+
+def to_request(row):
+    return make_multipart_request(
+        "/audio/transcriptions",
+        data={"model": "openai/whisper-large-v3-turbo"},
+        files={"file": ("clip.flac", row["audio"]["bytes"], "audio/flac")},
+    )
+```
+
+A row that holds the raw audio bytes gets a content id by default, so identical clips dedupe:
+load the column undecoded (`decode=False`). A multipart request is sent once: a failure
+becomes an error row, and `retry_errors=True` retries it on the next run.
 
 ## Running under an agent
 
@@ -401,24 +439,26 @@ One request per row (rollouts/agent loops are a different tool). No DAG authorin
 provider price tables — it records measured tokens and latency and leaves dollars to you.
 No live clusters: scaling is shards writing to storage.
 
+`pump()` is deliberately the highest level here: two lambdas, no task opinions. Nicer
+task-shaped wrappers ("OCR this dataset with model X") belong a layer up — recipe scripts
+and product surfaces build them out of `pump()`; this library stays small underneath them.
+
 ## Status
 
-> Status: experimental — shared for feedback, not yet a supported library. Any 0.x release
-> can change the API, the defaults or the output layout, often with no deprecation period.
-> Pin an exact version if you depend on current behaviour.
-
-Everything in this table has a live receipt — numbers plus job/endpoint ids — in
-[spikes/RESULTS.md](spikes/RESULTS.md):
+Experimental (see the note at the top). Every row has a live receipt — numbers plus
+job/endpoint ids — in [spikes/RESULTS.md](spikes/RESULTS.md) or [bench/](bench/README.md):
 
 | surface | live receipt |
 |---|---|
 | engines | vLLM, SGLang, llama.cpp boot templates + gauge scrapes; TEI queue-depth gauge only (`te_queue_size` — no KV, no running gauge) |
 | serving arrangements | in-process `Engine` · exposed-Job proxy · laptop→Job · Inference Endpoints **including scale-to-zero cold start** (retry ladder + breaker ride the managed-wake 503s; 100/100 after one healing re-run) |
-| routes | `/chat/completions` · `/completions` · `/embeddings` (micro-batch rows) · `/audio/transcriptions` (multipart) |
+| routes | `/chat/completions` · `/completions` · `/embeddings` (micro-batch rows) · `/audio/transcriptions` (multipart) · `/rerank` · `/classify` (Whisper, a reranker and a classifier on vLLM: every row ok, [bench/results/routes-*](bench/results)) |
 | adaptivity | window self-ranged 8→376 with zero config; 1.209× the delivered tok/s of a hand-tuned fixed-64 bare-httpx client, same 10k rows (it discovered 272 was better than 64) |
 | resume | cross-job kill/resume ×4, one an unplanned platform SIGTERM at 4,450/5,000; 0 duplicates at 22k pages across 4 concurrent writers |
 | fan-out | 4 Jobs → one output dir, 4,000/4,000/0 dupes, per-shard equilibria, no coordinator |
 | sinks | `hf://datasets`, `hf://buckets` (both directions), local, `FileSink` |
+| defaults | Auto against the best Fixed window, 14 engine/workload cells on HF Jobs: Auto got 83–100% of its rows/s, 97% median ([bench/results](bench/results)) |
+| real-engine checks | complete, 2048 in flight, kill+resume, engine restart: all pass on vLLM and SGLang ([bench/live_checks.py](bench/live_checks.py)) |
 
 Not yet tested / known bounds: hosted-API **rate-limit pacing** (deliberately deferred —
 discovering a published quota by backoff is the wrong tool; a Pacer seam is reserved),
@@ -428,4 +468,9 @@ docs/design.md — pending more workload traces), and resume id-sets beyond ~10M
 
 ## More
 
-[docs/design.md](docs/design.md) is the architecture; [docs/pipeline.md](docs/pipeline.md) is how a row moves through `through()` and `drain()`; [docs/why.md](docs/why.md) answers "why not just use X" with receipts; [CONTRACT.md](CONTRACT.md) is the storage protocol; [spikes/RESULTS.md](spikes/RESULTS.md) holds every benchmark number with job ids; [docs/history/decisions.md](docs/history/decisions.md) is the decision log.
+- [docs/design.md](docs/design.md) — the architecture
+- [docs/pipeline.md](docs/pipeline.md) — how a row moves through `through()` and `drain()`
+- [docs/why.md](docs/why.md) — "why not just use X", with receipts
+- [CONTRACT.md](CONTRACT.md) — the storage protocol
+- [spikes/RESULTS.md](spikes/RESULTS.md) and [bench/README.md](bench/README.md) — benchmark numbers with job ids
+- [docs/history/decisions.md](docs/history/decisions.md) — the decision log

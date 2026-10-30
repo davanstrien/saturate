@@ -4,6 +4,10 @@ All notable changes to saturate are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+saturate is experimental. Before 1.0, any minor release (0.x) can change the API, the
+defaults or the output layout, often with no deprecation period. Pin an exact version
+(for example `saturate==0.3.0`) if you depend on current behaviour.
+
 ## [0.3.0] - unreleased
 
 ### Breaking changes and migration

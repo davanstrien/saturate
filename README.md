@@ -19,6 +19,10 @@ uv pip install 'saturate[hf]'   # or: pip install 'saturate[hf]'
 # input (dataset_rows); plain saturate works with your own iterables + local output
 ```
 
+> **Experimental.** The API and behaviour can change in any 0.x release, often with no
+> deprecation period. Pin an exact version (`saturate==0.3.0`) if you rely on how it
+> behaves now, and read [CHANGELOG.md](CHANGELOG.md) before you upgrade. See [Status](#status).
+
 ## Quickstart: one model, one Job, one dataset
 
 The most common shape — boot the model and pump a dataset through it, all in one process
@@ -399,7 +403,9 @@ No live clusters: scaling is shards writing to storage.
 
 ## Status
 
-> Status: proof of concept — shared for feedback, not yet a supported library.
+> Status: experimental — shared for feedback, not yet a supported library. Any 0.x release
+> can change the API, the defaults or the output layout, often with no deprecation period.
+> Pin an exact version if you depend on current behaviour.
 
 Everything in this table has a live receipt — numbers plus job/endpoint ids — in
 [spikes/RESULTS.md](spikes/RESULTS.md):

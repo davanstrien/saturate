@@ -48,7 +48,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv build
-      - run: uv publish --trusted-publishing always
+      # --check-url skips files PyPI already has, so a re-run after a failed release step works
+      - run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/
       - name: GitHub release from the CHANGELOG section
         env:
           GH_TOKEN: ${{ github.token }}

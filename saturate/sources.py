@@ -232,7 +232,7 @@ def bucket_rows(
     (which is what the tests use).
 
     Chosen over datasets/imagefolder deliberately: measured 1.6x faster on a
-    real bucket and — decisively — streaming imagefolder drops the file path,
+    real bucket, and streaming imagefolder drops the file path,
     leaving no stable id to hang resume on. Here the id IS the path ("path",
     default; or any callable path -> id): the path fsspec lists, without the
     scheme ("buckets/org/b/scans/vol1/p1.png" for

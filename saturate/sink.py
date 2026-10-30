@@ -683,8 +683,9 @@ def __getattr__(name: str):
 
 def read_output(out_uri: str) -> Iterator[tuple[str, dict]]:
     """Read a saturate output dir back as an (id, row) source, applying the
-    CONTRACT §4.2 reader rule: the error-IS-NULL record wins; error-only ids
-    are skipped. Materializes the successful id->record map (fine to ~1M rows; document)."""
+    CONTRACT §4 reader rule: the error-IS-NULL record wins; error-only ids
+    are skipped. Holds every successful id -> record in memory before it yields
+    (comfortable to about 1M rows)."""
     import fsspec
 
     fs, root = fsspec.url_to_fs(out_uri)

@@ -20,21 +20,27 @@ from concurrent.futures import Executor, ThreadPoolExecutor
 from functools import partial
 
 
-def _reject_non_json(o):
+def _bytes_or_reject(o):
+    """json.dumps fallback for content ids. Raw bytes hash by their content, which is stable
+    across runs. Any other object is refused: its str() can change between runs (a PIL image's
+    embeds its memory address), and a changed id breaks resume."""
+    if isinstance(o, (bytes, bytearray, memoryview)):
+        return {"__bytes_sha1__": hashlib.sha1(o).hexdigest()}
     raise TypeError(
         f"row contains a non-JSON value ({type(o).__name__}) — its str() is not stable "
         "across runs, so a content id would break resume. Pass (id, row) tuples, "
-        "id_key=, or id_fn= for rows carrying objects (images, audio, tensors); "
+        "id_key=, or id_fn= for rows carrying objects (decoded images, audio arrays, tensors); "
         "from dataset_rows use ids=<key column>, a callable, or the index default."
     )
 
 
 def content_id(row: dict, keys: list[str] | None = None) -> str:
     """Stable 16-hex content hash of the row (or of `keys` fields only).
-    Strict by design: refuses non-JSON values rather than hashing an unstable
-    repr (a PIL image's str() embeds its memory address)."""
+    JSON values hash as JSON; raw bytes (bytes, bytearray, memoryview) hash by their content,
+    so identical files get the same id. Any other object raises TypeError rather than
+    hashing an unstable repr."""
     src = {k: row[k] for k in keys} if keys else row
-    blob = json.dumps(src, sort_keys=True, default=_reject_non_json, ensure_ascii=False)
+    blob = json.dumps(src, sort_keys=True, default=_bytes_or_reject, ensure_ascii=False)
     return hashlib.sha1(blob.encode()).hexdigest()[:16]
 
 

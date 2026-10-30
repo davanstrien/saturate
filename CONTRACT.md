@@ -100,9 +100,11 @@ measurement, blank never guessed.
 `id` must be globally unique across all shards writing to one output and stable across
 re-runs. The default is a content hash of the row via `saturate.source.content_id` —
 order-independent and re-shard-safe; a caller-designated key column or a global-index id is
-equally conformant. The hash covers JSON values and raw bytes (each `bytes`, `bytearray` or
-`memoryview` value by its SHA-1); any other object is refused, because its text form is not
-stable across runs. Width caveat: the default hash is 16 hex chars (~64 bits) — collision
+equally conformant. The hash covers JSON values and raw bytes: each `bytes`, `bytearray`
+or single-byte `memoryview` value, at any depth, enters as the SHA-1 of its content, and the
+hashed text of such a row starts with `bytes-v1:` and the paths of its bytes values, so a
+string that spells out a bytes hash never gives the id of the bytes. Any
+other object is refused, because its text form is not stable across runs. Width caveat: the default hash is 16 hex chars (~64 bits) — collision
 odds are negligible at the ~10M-row scale v1 targets but reach coin-flip around 5×10⁹
 rows; beyond that, widen the hash or supply your own ids.
 

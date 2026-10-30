@@ -1589,17 +1589,3 @@ def test_a_remote_style_output_round_trips(tmp_path):
     assert fs.glob(f"{root}/__saturate/manifest/ids-*.parquet")
     assert fs.glob(f"{root}/__saturate/telemetry/telemetry-*.jsonl")
     assert ParquetSink(out).existing_ids() == {"r0"}
-
-
-def test_content_id_hashes_raw_bytes_by_content():
-    """Raw bytes have a stable content id: the same bytes give the same id in any buffer
-    type, different bytes a different id, and a JSON-only row keeps the id it had before."""
-    from saturate.source import content_id
-
-    audio = b"RIFF\x00\x01fake-wav"
-    first = content_id({"audio": audio, "lang": "en"})
-    assert content_id({"lang": "en", "audio": bytes(audio)}) == first
-    assert content_id({"audio": bytearray(audio), "lang": "en"}) == first
-    assert content_id({"audio": memoryview(audio), "lang": "en"}) == first
-    assert content_id({"audio": audio + b"!", "lang": "en"}) != first
-    assert content_id({"text": "row 7"}) == "0e88386f40ff2287"  # the id main gives: resume holds

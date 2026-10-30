@@ -48,6 +48,45 @@ def test_content_ids_dedup_identical_rows():
     assert len({i for i, _ in rows}) == 3
 
 
+def test_content_id_hashes_raw_bytes_by_content():
+    """The same bytes give the same id in any buffer type and key order; different bytes give a
+    different id; a JSON-only row keeps the id main gives, so resume holds."""
+    audio = b"RIFF\x00\x01fake-wav"
+    first = content_id({"audio": audio, "lang": "en"})
+    assert content_id({"lang": "en", "audio": bytes(audio)}) == first
+    assert content_id({"audio": bytearray(audio), "lang": "en"}) == first
+    assert content_id({"audio": memoryview(audio), "lang": "en"}) == first
+    assert content_id({"audio": audio + b"!", "lang": "en"}) != first
+    assert content_id({"text": "row 7"}) == "0e88386f40ff2287"
+
+
+def test_content_id_hashes_nested_and_strided_bytes():
+    nested = {"file": {"bytes": b"abc", "path": "a.wav"}, "parts": [b"x", b"y"]}
+    assert content_id(nested) == content_id(
+        {"parts": [b"x", b"y"], "file": {"path": "a.wav", "bytes": b"abc"}}
+    )
+    assert content_id({"b": memoryview(b"aXbXcX")[::2]}) == content_id({"b": b"abc"})
+
+
+def test_a_row_with_bytes_never_shares_an_id_with_a_json_row():
+    """A string that spells out a bytes hash is not the bytes: the hashed text names where the
+    bytes are, so the two rows never share an id."""
+    import hashlib
+
+    spelled_out = {"x": hashlib.sha1(b"abc").hexdigest()}
+    assert content_id({"x": b"abc"}) != content_id(spelled_out)
+    # both rows hold bytes; only where the bytes are tells them apart
+    abc, def_ = hashlib.sha1(b"abc").hexdigest(), hashlib.sha1(b"def").hexdigest()
+    assert content_id({"x": b"abc", "y": def_}) != content_id({"x": abc, "y": b"def"})
+
+
+def test_content_id_refuses_views_whose_items_are_not_single_bytes():
+    from array import array
+
+    with pytest.raises(TypeError, match="non-JSON"):
+        content_id({"a": memoryview(array("i", [1, 2]))})
+
+
 def test_column_ids():
     assert [i for i, _ in dataset_rows(ds(), ids="key")] == ["a1", "b2", "c3", "a4"]
 

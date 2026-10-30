@@ -18,14 +18,24 @@ from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Executor, ThreadPoolExecutor
 from functools import partial
+from typing import NoReturn
+
+BYTE_FORMATS = ("B", "b", "c")  # memoryview formats whose items are single bytes
+BYTES_PREFIX = "bytes-v1:"  # starts the hashed text of a row that holds bytes
 
 
-def _bytes_or_reject(o):
-    """json.dumps fallback for content ids. Raw bytes hash by their content, which is stable
-    across runs. Any other object is refused: its str() can change between runs (a PIL image's
-    embeds its memory address), and a changed id breaks resume."""
-    if isinstance(o, (bytes, bytearray, memoryview)):
-        return {"__bytes_sha1__": hashlib.sha1(o).hexdigest()}
+def _raw_bytes(o) -> bytes | None:
+    """The bytes of a raw-bytes value, or None for any other object. A memoryview counts only
+    when its items are single bytes: a view of an int or object array has a byte layout that
+    depends on the platform (an object array's holds pointers)."""
+    if isinstance(o, (bytes, bytearray)):
+        return bytes(o)
+    if isinstance(o, memoryview) and o.format in BYTE_FORMATS:
+        return o.tobytes()  # also copies a strided view, which hashlib cannot read directly
+    return None
+
+
+def _reject(o) -> NoReturn:
     raise TypeError(
         f"row contains a non-JSON value ({type(o).__name__}) — its str() is not stable "
         "across runs, so a content id would break resume. Pass (id, row) tuples, "
@@ -34,13 +44,44 @@ def _bytes_or_reject(o):
     )
 
 
+def _hash_bytes(value, path: list, byte_paths: list):
+    """A copy of `value` with each raw-bytes value replaced by the SHA-1 of its content. Appends
+    the path (keys and list indexes) of each one to `byte_paths`."""
+    if isinstance(value, dict):
+        copy = {}
+        for key, item in value.items():
+            copy[key] = _hash_bytes(item, [*path, key], byte_paths)
+        return copy
+    if isinstance(value, (list, tuple)):
+        items = []
+        for index, item in enumerate(value):
+            items.append(_hash_bytes(item, [*path, index], byte_paths))
+        return items
+    data = _raw_bytes(value)
+    if data is None:
+        return value  # JSON, or an object json.dumps refuses below
+    byte_paths.append(path)
+    return hashlib.sha1(data).hexdigest()
+
+
 def content_id(row: dict, keys: list[str] | None = None) -> str:
     """Stable 16-hex content hash of the row (or of `keys` fields only).
-    JSON values hash as JSON; raw bytes (bytes, bytearray, memoryview) hash by their content,
-    so identical files get the same id. Any other object raises TypeError rather than
-    hashing an unstable repr."""
+
+    A JSON-only row hashes as its sorted JSON. In a row with raw bytes (bytes, bytearray, or a
+    memoryview of single bytes, at any depth), each one enters the JSON as the SHA-1 of its
+    content, and the hashed text also names where the bytes were (BYTES_PREFIX, then their
+    paths). So identical bytes give the same id, and a string that spells out a bytes hash
+    never gives the id of the bytes. Any other object raises TypeError: its str() can change
+    between runs (a PIL image's str() embeds its memory address), and a changed id breaks
+    resume."""
     src = {k: row[k] for k in keys} if keys else row
-    blob = json.dumps(src, sort_keys=True, default=_bytes_or_reject, ensure_ascii=False)
+    byte_paths: list = []
+    hashed = _hash_bytes(src, [], byte_paths)
+    if byte_paths:
+        body = json.dumps(hashed, sort_keys=True, default=_reject, ensure_ascii=False)
+        blob = BYTES_PREFIX + json.dumps(sorted(byte_paths, key=json.dumps)) + "\n" + body
+    else:
+        blob = json.dumps(src, sort_keys=True, default=_reject, ensure_ascii=False)
     return hashlib.sha1(blob.encode()).hexdigest()[:16]
 
 

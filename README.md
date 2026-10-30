@@ -132,9 +132,10 @@ Notes on what you didn't have to do:
   during a trial). Only the window carries over; a hosted API's 429 limit is met again.
 - **Ids are yours if you want them.** Pass `(id, row)` tuples, or `id_key="my_column"`, or
   an `id_fn=` callable. Default: a stable content-hash of the row — identical input rows
-  then dedupe for free. Raw bytes (an audio or image file as read) hash by content, so
-  identical files are one row; a decoded object (PIL image, array) needs one of the id
-  options above.
+  then dedupe for free. Raw bytes (an audio or image file as read, at any depth) hash by
+  content, so identical rows with identical bytes are one row; a different path or field
+  makes a different id. A decoded object (PIL image, array) needs one of the id options
+  above, or load the column undecoded (`datasets` `decode=False`).
 - **`kill -9` it, re-run the same command.** Output is append-only parquet with a manifest
   sidecar; resume is an exact anti-join on id — it re-pays at most one flush buffer, never
   duplicates a row. This holds across separate Jobs writing at different times.

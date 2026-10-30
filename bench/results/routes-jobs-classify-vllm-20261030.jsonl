@@ -1,0 +1,3 @@
+{"kind": "classify", "model": "jason9693/Qwen2.5-1.5B-apeach", "arm": "auto", "rows": 3000, "ok": 3000, "failed": 0, "rows_per_s": 383.8, "final_limit": 104, "cut_reasons": {"cut:queue": 1}, "bound_by": {"engine": 3}, "hints": []}
+{"kind": "classify", "model": "jason9693/Qwen2.5-1.5B-apeach", "arm": "fixed-64", "rows": 3000, "ok": 3000, "failed": 0, "rows_per_s": 672.8, "final_limit": 64, "cut_reasons": {}, "bound_by": {"engine": 2}, "hints": []}
+{"kind": "classify", "model": "jason9693/Qwen2.5-1.5B-apeach", "arm": "auto-2", "rows": 3000, "ok": 3000, "failed": 0, "rows_per_s": 674.57, "final_limit": 128, "cut_reasons": {}, "bound_by": {"engine": 2}, "hints": []}

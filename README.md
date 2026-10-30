@@ -15,13 +15,16 @@ command is always safe.
 
 ```bash
 uv pip install 'saturate[hf]'   # or: pip install 'saturate[hf]'
-# the [hf] extra pulls huggingface_hub + datasets: hf:// output paths and Hub dataset
-# input (dataset_rows); plain saturate works with your own iterables + local output
 ```
 
+The `[hf]` extra adds `huggingface_hub` and `datasets`, for `hf://` outputs and `dataset_rows`.
+Plain `saturate` works with your own iterables and local output.
+
 > **Experimental.** The API and behaviour can change in any 0.x release, often with no
-> deprecation period. Pin an exact version (`saturate==0.3.0`) if you rely on how it
-> behaves now, and read [CHANGELOG.md](CHANGELOG.md) before you upgrade. See [Status](#status).
+> deprecation period. Pin an exact version (`saturate==0.3.0`) if you rely on how it behaves
+> now, and read
+> [CHANGELOG.md](https://github.com/davanstrien/saturate/blob/main/CHANGELOG.md) before you
+> upgrade. See [Status](#status).
 
 ## Quickstart: one model, one Job, one dataset
 
@@ -29,27 +32,98 @@ The most common shape — boot the model and pump a dataset through it, all in o
 (e.g. a single GPU Job on HF Jobs):
 
 ```python
-from saturate import Auto, Engine, pump
+from saturate import Engine, dataset_rows, pump
 
-with Engine("lightonai/LightOnOCR-2-1B", engine="vllm") as endpoint:  # vllm | sglang | llamacpp
+MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+
+rows = dataset_rows("databricks/databricks-dolly-15k", columns=["instruction"], limit=100)
+
+with Engine(MODEL, engine="vllm") as endpoint:  # needs a GPU and `vllm` on PATH
     stats = pump(
         rows,  # any iterable of dicts — streams, never materializes
-        to_request=lambda row: {...},  # row -> OpenAI-style request body
-        parse=lambda row, resp: {...},  # response -> your output columns
+        to_request=lambda row: {  # row -> OpenAI-style request body
+            "model": MODEL,
+            "messages": [{"role": "user", "content": row["instruction"]}],
+            "max_tokens": 150,
+        },
+        parse=lambda row, body: {  # response JSON -> your output columns
+            "instruction": row["instruction"],
+            "response": body["choices"][0]["message"]["content"],
+        },
         endpoint=endpoint,
-        output="hf://datasets/you/results/data",  # or a local path, or hf://buckets/...
-        window=Auto(max_limit=48),  # image rows: cap the window (see "Want control anyway?")
+        output="out",  # a local dir, hf://datasets/you/repo/data, or hf://buckets/...
     )
 print(stats.rows_processed, stats.tokens_per_sec)
 ```
 
-The runnable version is [examples/quickstart.py](examples/quickstart.py) — a
-self-contained uv script (PEP 723) that works the same on your machine and on HF Jobs:
+`pump()` is a plain blocking call. Already have a server running? Skip `Engine` and pass its URL:
+`endpoint="http://localhost:8000/v1"`.
+
+The runnable version is
+[examples/quickstart.py](https://github.com/davanstrien/saturate/blob/main/examples/quickstart.py)
+— a self-contained uv script (PEP 723) that works the same on your machine and on HF Jobs:
 
 ```bash
-hf jobs uv run --image vllm/vllm-openai:latest --flavor a10g-small \
+hf jobs uv run --image vllm/vllm-openai:v0.22.1 --flavor a10g-small \
     --secrets HF_TOKEN examples/quickstart.py
 ```
+
+What a run prints (a 10-page OCR smoke run on HF Jobs, LightOnOCR-2-1B on an A10G):
+
+```
+[pump] engine: vllm serve lightonai/LightOnOCR-2-1B --port 8000 --max-model-len 8192 …
+[pump] engine ready (health x3 + trial 404)
+[pump] done: 10 ok, 0 failed, 1461.0 tok/s, window settled at 8
+```
+
+The *window* is the limit on requests in flight. At the end of a run saturate can also print
+an *advisor* line when it measured that something other than the model limited throughput — slow input, slow
+request preparation, or a server cap — with what to change.
+
+Output is append-only parquet, read back with `read_output` (or `load_dataset`, given a
+`schema=`); a failed row is a durable *error row*, not a gap (see [What you get](#what-you-get)).
+Re-running the same command skips the rows already done; `retry_errors=True` retries the
+failed ones. An id names the input row, not the prompt or model: to re-run with a new prompt
+or model, write to a new output.
+
+For complete recipes, see the `-saturate` scripts in
+[uv-scripts/ocr](https://huggingface.co/datasets/uv-scripts/ocr) (for example
+`lighton-ocr2-saturate.py`), which run saturate on HF Jobs end to end.
+
+Notes on what you didn't have to do:
+
+- **No concurrency number.** The window tunes itself to the endpoint (see
+  [Tuning the window](#tuning-the-window)). Cap it for image workloads, because in-flight
+  images live in RAM: `window=Auto(max_limit=48)`.
+- **`kill -9` it, re-run the same command.** Resume skips the ids already written; rows that were
+  not yet written run again, and no row is duplicated. This holds across separate Jobs.
+- **No id column.** A plain dict row's default id is a stable hash of its content, so
+  identical rows dedupe (`dataset_rows` uses the row's position instead); or bring your own
+  (see [Ids](#ids-yours-or-a-content-hash)).
+- **Buckets or dataset repos.** Both work as `output=`. Use a bucket while several Jobs
+  write at once (a dataset repo makes every flush a commit), and a dataset repo for a
+  single writer or the final publish.
+
+## Why not just…
+
+- **a semaphore loop?** You pick the number, a crash loses the work, and failed rows leave gaps.
+  saturate picks the number, resumes exactly, and records each failure as an error row.
+- **vLLM's offline `LLM.generate`?** That is one engine library inside one process. saturate
+  talks HTTP to any OpenAI-compatible server, including one that is shared or already running,
+  and resumes across separate Jobs.
+- **a provider's Batch API?** Their models, their queue, results within a day. This is your
+  endpoint, now.
+- **datatrove?** It orchestrates pipelines. saturate is the inference step; it can sit inside a
+  datatrove stage.
+
+Not for: agent loops or multi-turn rollouts (one request per row), DAG authoring, or pacing to a
+hosted API's published rate limit — it backs off on 429s and errors, but it does not schedule
+requests against a quota. It records measured tokens and latency and leaves dollars to you.
+Scaling is shards writing to storage, not a live cluster. `pump()` is deliberately the highest
+level here: task-shaped wrappers ("OCR this dataset with model X") belong a layer up, in recipe
+scripts built out of `pump()`.
+
+## What you get
 
 What lands on disk (real rows from a live run):
 
@@ -67,11 +141,11 @@ out/
 With a declared `schema=`, every part has the same columns and `load_dataset("out")` and
 `pq.read_table("out")` load the output too. They read the parts raw: error rows included,
 and a row that failed and later succeeded appears twice. Without `schema=`, a column can first
-appear in a later part, and those loaders fail or drop it (CONTRACT §1). saturate writes no
+appear in a later part, and those loaders fail or drop it (see CONTRACT.md). saturate writes no
 dataset card; the Hub finds the parts.
 
 ```python
-# a success row and an error row from the same output (your parse() columns + id/error):
+# a success row and an error row from one live run (its parse() kept token counts and the category):
 {
     "id": "c5c71ae175e872ab",
     "error": None,
@@ -97,69 +171,50 @@ the done ids exactly, and `retry_errors=True` retries the errored ones. When a r
 succeeds, the output holds both records for that id and readers let the success win
 (we call that **healing**).
 
-Already have an endpoint (a colleague's server, an exposed Job, a hosted API)? Skip
-`Engine` and pass its URL as `endpoint=` — everything else is identical. One caveat for a
-shared hosted API: after sustained 5xx the circuit breaker pauses the run and probes the real
-route about once a second (a one-token request) for up to `max_open_s`; those probes may
-count toward a requests-per-minute quota.
+## Tuning the window
 
-Where do `rows` come from? Any iterable works. For Hub datasets there is a built-in. It
-streams by default: for one sequential pass, `load_dataset(streaming=True)` reads at about
-local-SSD speed (see hf.co/blog/streaming-datasets):
+The in-flight window tunes itself. It backs off when the server shows pressure (errors,
+timeouts, a growing queue). Otherwise it tries a wider or narrower window: it keeps a wider
+one when delivered throughput improves, and a narrower one when throughput holds
+([docs/design.md](https://github.com/davanstrien/saturate/blob/main/docs/design.md), "The
+controller"). When the engine's metrics gauges are reachable (vLLM, SGLang, llama.cpp,
+TensorRT-LLM, and TEI's queue depth), they sharpen the decisions. Against opaque endpoints (a
+hosted API, a proxy that drops `/metrics`), it works from errors, timeouts and delivered
+throughput alone. It grows only after the first completion arrives, and it freezes (and tells
+you) when your *source* is the bottleneck rather than the server.
 
-```python
-from saturate import dataset_rows
+**Want control anyway?** `window=Fixed(64)` pins it. `window=Auto(initial=32, max_limit=128)`
+sets the starting point and the ceiling — do cap it for vision workloads, because in-flight
+images live in RAM. Without `initial`, `Auto` starts at the engine's capacity when the engine
+reports one (SGLang's running-request limit, llama.cpp's slots, TEI's concurrency limit,
+TensorRT-LLM's batch size from 1.3), a little above it so a waiting request refills a free
+slot. TEI rejects requests past its limit, so on TEI it starts at the limit and never goes
+above. Elsewhere (vLLM, a hosted API) it starts at 64. For the next batch against the same
+endpoint, start near where the last one ended: `window=Auto(initial=stats.final_limit)`. Auto
+corrects from there (the run may have ended during a trial). Only the window carries over; a
+hosted API's 429 limit is met again.
 
-rows = dataset_rows(
-    "HuggingFaceFW/fineweb-edu", split="train", columns=["text"], limit=100_000
-)  # (id, row) stream; ids="index"|"content"|column (see "Ids that survive fan-out")
-```
+With a shared hosted API: after sustained 5xx the circuit breaker pauses the run and probes
+the real route about once a second (a one-token request) for up to `max_open_s`; those probes
+may count toward a requests-per-minute quota.
 
-Notes on what you didn't have to do:
+### Ids: yours, or a content hash
 
-- **No concurrency number.** The in-flight window tunes itself: it backs off when the
-  server shows pressure (errors, timeouts, a growing queue). Otherwise it tries a wider or
-  narrower window: it keeps a wider one when delivered throughput improves, and a narrower
-  one when throughput holds
-  (docs/design.md, "The controller"). When the
-  engine's metrics gauges are reachable (vLLM, SGLang, llama.cpp, TensorRT-LLM, and TEI's
-  queue depth) they sharpen the decisions; against opaque endpoints (a hosted API, a
-  proxy that drops `/metrics`) it works from errors, timeouts
-  and delivered throughput alone. It grows only
-  after the first completion arrives, and it freezes (and tells you) when your *source* is
-  the bottleneck rather than the server.
-  Want control anyway? `window=Fixed(64)` pins it; `window=Auto(initial=32, max_limit=128)`
-  sets the starting point and ceiling (do cap it for vision workloads — in-flight images
-  live in RAM). `Auto` starts at the engine's capacity when the engine reports one
-  (SGLang's running-request limit, llama.cpp's slots, TEI's concurrency limit,
-  TensorRT-LLM's batch size from 1.3), a little
-  above it so a waiting request refills a free slot (TEI rejects past its limit, so it starts
-  there and never goes above); otherwise (vLLM, a hosted API) at 64. For a next batch
-  against the same endpoint, start near where the last one ended,
-  `window=Auto(initial=stats.final_limit)`: Auto corrects from there (the run may have ended
-  during a trial). Only the window carries over; a hosted API's 429 limit is met again.
-- **Ids are yours if you want them.** Pass `(id, row)` tuples, or `id_key="my_column"`, or
-  an `id_fn=` callable. Default: a stable content-hash of the row — identical input rows
-  then dedupe for free. Raw bytes (an audio or image file as read, at any depth) hash by
-  content, so identical rows with identical bytes are one row; the same bytes at a
-  different place in the row make a different id. A decoded object (PIL image, array) needs
-  one of the id options above, or load the column undecoded (`datasets` `decode=False`).
-- **`kill -9` it, re-run the same command.** Output is append-only parquet with a manifest
-  sidecar; resume is an exact anti-join on id — it re-pays at most one flush buffer, never
-  duplicates a row. This holds across separate Jobs writing at different times.
-- **Choosing the output path.** Parts stream incrementally to `hf://datasets/…` and
-  `hf://buckets/…` alike, but dataset repos are git-backed — every flush is a commit,
-  so several shards flushing concurrently means commit contention — while buckets are
-  object storage with no commit path. Rule of thumb: buckets while a multi-shard run
-  is hot, dataset repos for single-writer runs and as the final publish target.
-  (Sharding vocabulary: a fan-out run is `world` shards, each identified by its
-  `rank` — see "Scaling" below.)
+Pass `(id, row)` tuples, or `id_key="my_column"`, or an `id_fn=` callable. Default for a plain
+dict row: a stable content-hash of the row — identical input rows then dedupe for free
+(`dataset_rows` defaults to the row's position; see below). Raw bytes (an audio or image file
+as read, at any depth) hash by content, so identical rows with identical bytes are one row;
+the same bytes at a different place in the row make a different id. A decoded object (PIL
+image, array) needs one of the id options above, or load the column undecoded (`datasets`
+`decode=False`).
 
-## Task wrappers live above this library
+### Choosing the output path
 
-`pump()` is deliberately the highest level here: two lambdas, no task opinions. Nicer
-task-shaped wrappers ("OCR this dataset with model X") belong a layer up — recipe scripts
-and product surfaces build them out of `pump()`; this library stays small underneath them.
+Parts stream incrementally to `hf://datasets/…` and `hf://buckets/…` alike, but dataset repos
+are git-backed — every flush is a commit, so several shards flushing concurrently means commit
+contention — while buckets are object storage with no commit path. Rule of thumb: buckets
+while a multi-shard run is hot, dataset repos for single-writer runs and as the final publish
+target.
 
 ## About `Engine` (an optional helper)
 
@@ -173,16 +228,15 @@ acceptance is **alive-only**: any response below 500, including 404, counts, bec
 proves the API path parses requests. To gate readiness on your actual workload, pass
 `ready_route=`/`ready_payload=` and `ready_accept=lambda r: r.status_code == 200`.
 
-## The composable layer (for building on top — datatrove-shaped stacks, power users)
+## The composable layer (for building on top)
 
-`pump()` is a composition of four small stages, and the middle one — `through()` — is the
-real product: **a stream of completed results**. Parquet is just the default place that
-stream lands.
+`pump()` is a composition of four small stages. The middle one, `through()`, is **a stream of
+completed results**; parquet is just the default place that stream lands.
 
 ```python
 from datasets import load_dataset
 
-from saturate import AdaptiveClient, Auto, stream, skip_done, through, drain
+from saturate import AdaptiveClient, Auto, drain, read_output, skip_done, stream, through
 
 rows = stream(load_dataset("...", split="train", streaming=True))  # (id, row) pairs, lazy
 rows = skip_done(rows, sink)  # exact resume filter
@@ -240,7 +294,7 @@ async with through(client, rows, to_request, parse) as results:
 ```
 
 Embedding just the adaptive part in your own stack (your IO, your loop, your transport —
-this is the datatrove-shaped seam):
+the seam a framework like datatrove would use):
 
 ```python
 from saturate import AdaptiveLimiter, Attempt, Auto
@@ -263,7 +317,7 @@ stats = pump(rows, to_request, parse, endpoint, output, shard=(RANK, 4))
 ```
 
 `shard=(rank, world)` selects the input: the Job processes only the rows whose id hashes to
-its rank (`shard_of(id, world) == rank`, CONTRACT §2). The shards are disjoint, and together
+its rank (`shard_of(id, world) == rank`). The shards are disjoint, and together
 they cover the input once. The assignment depends on the id alone, so it does not change
 with input order, with resume, or when the input grows.
 
@@ -317,6 +371,10 @@ query:
 
 ## Preparing input
 
+Any iterable of dicts works as `rows`. For Hub datasets, `dataset_rows` streams by default: for
+one sequential pass, `load_dataset(streaming=True)` reads at about local-SSD speed (see
+hf.co/blog/streaming-datasets). For files in a bucket, `bucket_rows("hf://buckets/org/b/**/*.png")`.
+
 `to_request` runs on the event loop. Cheap work (a dict, a template) belongs there. Real work
 per row (decoding and re-encoding an image for OCR, rendering a PDF page) serialises the whole
 pump: the GPU idles and the run-end advisor says `PREP-BOUND` with the measured ms/row. Three
@@ -348,9 +406,12 @@ Each tick of the telemetry names the bottleneck as `bound_by`: `engine`, `source
 `sink` (the output fell behind), or `loop` (`parse` or other work blocked the event loop).
 Read it to find which side to scale before you change anything.
 
-## Embeddings
+## Other routes
 
-Same client, different route — a "row" can be a pre-grouped batch:
+`route=` sets the path; everything else stays the same. `to_request` returns a dict (sent as
+JSON) or a `Request`.
+
+Embeddings — a "row" can be a pre-grouped batch:
 
 ```python
 stats = pump(
@@ -362,6 +423,39 @@ stats = pump(
     route="/embeddings",
 )
 ```
+
+Rerank and classify on vLLM are plain JSON too, but vLLM serves them at the server root, so
+the endpoint has no `/v1`:
+
+```python
+stats = pump(
+    pairs,
+    to_request=lambda r: {"model": "m", "query": r["query"], "documents": r["docs"]},
+    parse=lambda r, resp: {"scores": [d["relevance_score"] for d in resp["results"]]},
+    endpoint="http://localhost:8000",  # no /v1
+    output=output,
+    route="/rerank",  # or "/classify"
+)
+```
+
+Transcription (Whisper on vLLM) is a multipart upload. Build it with
+`make_multipart_request`; the endpoint keeps `/v1`:
+
+```python
+from saturate import make_multipart_request
+
+
+def to_request(row):
+    return make_multipart_request(
+        "/audio/transcriptions",
+        data={"model": "openai/whisper-large-v3-turbo"},
+        files={"file": ("clip.flac", row["audio"]["bytes"], "audio/flac")},
+    )
+```
+
+A row that holds the raw audio bytes gets a content id by default, so identical clips dedupe:
+load the column undecoded (`decode=False`). A multipart request is sent once: a failure
+becomes an error row, and `retry_errors=True` retries it on the next run.
 
 ## Running under an agent
 
@@ -390,42 +484,38 @@ In agent mode, a handler you point at stdout puts its lines next to the stats JS
 
 ## The output contract
 
-Everything on disk is specified in [CONTRACT.md](CONTRACT.md): append-only parts, the
+Everything on disk is specified in [CONTRACT.md](https://github.com/davanstrien/saturate/blob/main/CONTRACT.md): append-only parts, the
 manifest sidecar, error rows (a failed row is a durable record, never a gap), the healing
 reader rule, telemetry. Any process that can read parquet and glob a directory can consume
 or resume saturate output without importing saturate.
 
-## What it deliberately isn't
-
-One request per row (rollouts/agent loops are a different tool). No DAG authoring. No
-provider price tables — it records measured tokens and latency and leaves dollars to you.
-No live clusters: scaling is shards writing to storage.
-
 ## Status
 
-> Status: experimental — shared for feedback, not yet a supported library. Any 0.x release
-> can change the API, the defaults or the output layout, often with no deprecation period.
-> Pin an exact version if you depend on current behaviour.
-
-Everything in this table has a live receipt — numbers plus job/endpoint ids — in
-[spikes/RESULTS.md](spikes/RESULTS.md):
+Experimental (see the note at the top). Every row has a live receipt — numbers plus
+job/endpoint ids — in [spikes/RESULTS.md](https://github.com/davanstrien/saturate/blob/main/spikes/RESULTS.md) or [bench/](https://github.com/davanstrien/saturate/blob/main/bench/README.md):
 
 | surface | live receipt |
 |---|---|
 | engines | vLLM, SGLang, llama.cpp boot templates + gauge scrapes; TEI queue-depth gauge only (`te_queue_size` — no KV, no running gauge) |
 | serving arrangements | in-process `Engine` · exposed-Job proxy · laptop→Job · Inference Endpoints **including scale-to-zero cold start** (retry ladder + breaker ride the managed-wake 503s; 100/100 after one healing re-run) |
-| routes | `/chat/completions` · `/completions` · `/embeddings` (micro-batch rows) · `/audio/transcriptions` (multipart) |
-| adaptivity | window self-ranged 8→376 with zero config; 1.209× the delivered tok/s of a hand-tuned fixed-64 bare-httpx client, same 10k rows (it discovered 272 was better than 64) |
+| routes | `/chat/completions` · `/completions` · `/embeddings` (micro-batch rows) · `/audio/transcriptions` (multipart) · `/rerank` · `/classify` (Whisper, a reranker and a classifier on vLLM: every row ok, [bench/results/routes-*](https://github.com/davanstrien/saturate/tree/main/bench/results)) |
+| adaptivity | window self-ranged 8→376 with zero config; 1.2× the delivered tok/s of a hand-tuned fixed-64 bare-httpx client, same 10k rows (it discovered 272 was better than 64) |
 | resume | cross-job kill/resume ×4, one an unplanned platform SIGTERM at 4,450/5,000; 0 duplicates at 22k pages across 4 concurrent writers |
 | fan-out | 4 Jobs → one output dir, 4,000/4,000/0 dupes, per-shard equilibria, no coordinator |
 | sinks | `hf://datasets`, `hf://buckets` (both directions), local, `FileSink` |
+| defaults | Auto against the best Fixed window, 14 engine/workload cells on HF Jobs: Auto got 83–100% of its rows/s, 97% median ([bench/results](https://github.com/davanstrien/saturate/tree/main/bench/results)) |
+| real-engine checks | complete, 2048 in flight, kill+resume, engine restart: all pass on vLLM and SGLang ([bench/live_checks.py](https://github.com/davanstrien/saturate/blob/main/bench/live_checks.py)) |
 
 Not yet tested / known bounds: hosted-API **rate-limit pacing** (deliberately deferred —
-discovering a published quota by backoff is the wrong tool; a Pacer seam is reserved),
+discovering a published quota by backoff is the wrong tool),
 **binary response routes** (TTS worked via the documented bring-your-own-transport seam,
-not the built-in one), the controller's **calibration grid** (the queue-band constants — see
-docs/design.md — pending more workload traces), and resume id-sets beyond ~10M rows in memory.
+not the built-in one), the controller's **queue thresholds** (see docs/design.md; they need more workload traces), and resume id-sets beyond ~10M rows in memory.
 
 ## More
 
-[docs/design.md](docs/design.md) is the architecture; [docs/pipeline.md](docs/pipeline.md) is how a row moves through `through()` and `drain()`; [docs/why.md](docs/why.md) answers "why not just use X" with receipts; [CONTRACT.md](CONTRACT.md) is the storage protocol; [spikes/RESULTS.md](spikes/RESULTS.md) holds every benchmark number with job ids; [docs/history/decisions.md](docs/history/decisions.md) is the decision log.
+- [docs/design.md](https://github.com/davanstrien/saturate/blob/main/docs/design.md) — the architecture
+- [docs/pipeline.md](https://github.com/davanstrien/saturate/blob/main/docs/pipeline.md) — how a row moves through `through()` and `drain()`
+- [docs/why.md](https://github.com/davanstrien/saturate/blob/main/docs/why.md) — "why not just use X", with receipts
+- [CONTRACT.md](https://github.com/davanstrien/saturate/blob/main/CONTRACT.md) — the storage protocol
+- [spikes/RESULTS.md](https://github.com/davanstrien/saturate/blob/main/spikes/RESULTS.md) and [bench/README.md](https://github.com/davanstrien/saturate/blob/main/bench/README.md) — benchmark numbers with job ids
+- [docs/history/decisions.md](https://github.com/davanstrien/saturate/blob/main/docs/history/decisions.md) — the decision log

@@ -208,7 +208,9 @@ Two sinks ship with that contract:
 - **`FileSink(outdir, ext=".md", key="markdown")`** — one file per row, named by id. The
   filesystem is the manifest, overwrites are idempotent, so OCR→markdown files or
   audio→transcripts get exact resume too. (Failed rows leave no file, so they simply retry
-  next run — there's no error record. That's the trade.)
+  next run — there's no error record. That's the trade.) A row FileSink cannot write (an id
+  that is not a safe filename, or no `key` value) counts as failed and is logged; when the
+  first 32 rows all fail that way, the run stops: check `key=`.
 
 ```python
 from saturate import FileSink

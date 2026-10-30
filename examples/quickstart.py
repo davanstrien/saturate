@@ -20,7 +20,7 @@ Locally: `uv run examples/quickstart.py` on any machine with a GPU and
 
 from huggingface_hub import HfApi
 
-from saturate import Auto, Engine, dataset_rows, pump
+from saturate import Engine, dataset_rows, pump
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -57,7 +57,6 @@ def main() -> None:
             parse,
             endpoint,
             f"hf://datasets/{repo}/data",
-            window=Auto(initial=8),
         )
     print(f"done: {stats.rows_processed} rows -> hf://datasets/{repo}/data")
 

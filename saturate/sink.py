@@ -586,6 +586,10 @@ class ParquetSink:
             f.write("\n".join(lines).encode())
 
 
+FIRST_ROWS = 32  # FileSink: this many rejected records before any accepted one stop the run
+LOGGED_REJECTIONS = 10
+
+
 class FileSink:
     """One file per successful row: {outdir}/{id}{ext} <- record[key].
     Exact resume (filenames are the manifest, writes are idempotent); failed
@@ -603,16 +607,50 @@ class FileSink:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.ext, self.key = ext, key
         self.rows_written = 0
+        self._accepted = False  # a record has passed probe: rejections are now the data's
+        self._rejected = 0
+
+    def begin_run(self, shard: tuple[int, int]) -> None:
+        """A new pump() run: the first-rows check starts again (a sink can serve several runs)."""
+        self._accepted = False
+        self._rejected = 0
 
     def existing_ids(self, retry_errors: bool = False) -> set[str]:
         return {p.name.removesuffix(self.ext) for p in self.dir.glob(f"*{self.ext}")}
 
+    def probe(self, record: dict) -> None:
+        """Raise ValueError if this record cannot become a file: its id is not a safe filename,
+        or its `key` field is missing or None. drain turns that into an error row: no file is
+        written, so the row runs again on the next run. The first rejections are logged. When
+        the first FIRST_ROWS records are all rejected, the sink is misconfigured (a wrong
+        `key=`, ids that are paths): probe raises RuntimeError, which stops the run."""
+        reason = self._rejection(record)
+        if reason is None:
+            self._accepted = True
+            return
+        self._rejected += 1
+        if self._rejected <= LOGGED_REJECTIONS:
+            log.warning(f"FileSink: row {record['id']!r} not written: {reason}; it runs again next run")
+        if not self._accepted and self._rejected >= FIRST_ROWS:
+            raise RuntimeError(
+                f"FileSink: the first {FIRST_ROWS} rows could not be written "
+                f"(the last: {reason}); check FileSink(key=...) and the row ids"
+            )
+        raise ValueError(f"FileSink: {reason}")
+
+    def _rejection(self, record: dict) -> str | None:
+        id_ = str(record["id"])
+        if not id_ or id_ != Path(id_).name or "\\" in id_ or id_.startswith("."):
+            return f"id {id_!r} is not a safe filename"
+        if record.get(self.key) is None:
+            return f"parse returned no {self.key!r} value (FileSink(key={self.key!r}))"
+        return None
+
     def append(self, record: dict) -> None:
         if record.get("error") is not None:
             return
+        self.probe(record)  # a sink called directly, without drain, checks here
         id_ = str(record["id"])
-        if not id_ or id_ != Path(id_).name or "\\" in id_ or id_.startswith("."):  # unsafe filename
-            raise ValueError(f"FileSink: id {id_!r} is not a safe filename")
         # dot-prefix + .tmp never match existing_ids; uuid keeps concurrent duplicate-id writers
         # from colliding on the temp name (last replace wins, both files complete)
         tmp = self.dir / f".{id_}.{uuid.uuid4().hex[:6]}{self.ext}.tmp"
@@ -645,8 +683,9 @@ def __getattr__(name: str):
 
 def read_output(out_uri: str) -> Iterator[tuple[str, dict]]:
     """Read a saturate output dir back as an (id, row) source, applying the
-    CONTRACT §4.2 reader rule: the error-IS-NULL record wins; error-only ids
-    are skipped. Materializes the successful id->record map (fine to ~1M rows; document)."""
+    CONTRACT §4 reader rule: the error-IS-NULL record wins; error-only ids
+    are skipped. Holds every successful id -> record in memory before it yields
+    (comfortable to about 1M rows)."""
     import fsspec
 
     fs, root = fsspec.url_to_fs(out_uri)

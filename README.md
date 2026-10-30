@@ -55,6 +55,7 @@ out/
 └── __saturate/                                  # saturate's own files; loaders skip them
     ├── manifest/ids-part-…parquet               # [id, error] sidecar per part
     ├── completions/shard-0.done                 # marker when a shard finishes
+    ├── completions/stats-0.json                 # the shard's exact run summary (Stats)
     └── telemetry/telemetry-shard0-….jsonl       # per-tick controller records
 ```
 
@@ -98,9 +99,9 @@ shared hosted API: after sustained 5xx the circuit breaker pauses the run and pr
 route about once a second (a one-token request) for up to `max_open_s`; those probes may
 count toward a requests-per-minute quota.
 
-Where do `rows` come from? Any iterable works; for Hub datasets there's a built-in
-(streaming by default — `load_dataset(streaming=True)` now runs at local-SSD speed for
-this one-sequential-pass access pattern, see hf.co/blog/streaming-datasets):
+Where do `rows` come from? Any iterable works. For Hub datasets there is a built-in. It
+streams by default: for one sequential pass, `load_dataset(streaming=True)` reads at about
+local-SSD speed (see hf.co/blog/streaming-datasets):
 
 ```python
 from saturate import dataset_rows
@@ -113,9 +114,11 @@ rows = dataset_rows(
 Notes on what you didn't have to do:
 
 - **No concurrency number.** The in-flight window tunes itself: it backs off when the
-  server shows pressure (errors, timeouts, a growing queue) and creeps up while delivered
-  throughput keeps improving — the same idea TCP uses for network congestion. When the
-  engine's `/metrics` gauges are reachable (vLLM, SGLang, llama.cpp, TRT-LLM, and TEI's
+  server shows pressure (errors, timeouts, a growing queue). Otherwise it tries a wider or
+  narrower window: it keeps a wider one when delivered throughput improves, and a narrower
+  one when throughput holds
+  (docs/design.md, "The controller"). When the
+  engine's metrics gauges are reachable (vLLM, SGLang, llama.cpp, TensorRT-LLM, and TEI's
   queue depth) they sharpen the decisions; against opaque endpoints (a hosted API, a
   proxy that drops `/metrics`) it works from errors, timeouts
   and delivered throughput alone. It grows only
@@ -124,7 +127,8 @@ Notes on what you didn't have to do:
   Want control anyway? `window=Fixed(64)` pins it; `window=Auto(initial=32, max_limit=128)`
   sets the starting point and ceiling (do cap it for vision workloads — in-flight images
   live in RAM). `Auto` starts at the engine's capacity when the engine reports one
-  (SGLang's running-request limit, llama.cpp's slots, TEI's concurrency limit), a little
+  (SGLang's running-request limit, llama.cpp's slots, TEI's concurrency limit,
+  TensorRT-LLM's batch size from 1.3), a little
   above it so a waiting request refills a free slot (TEI rejects past its limit, so it starts
   there and never goes above); otherwise (vLLM, a hosted API) at 64. For a next batch
   against the same endpoint, start near where the last one ended,
@@ -132,7 +136,10 @@ Notes on what you didn't have to do:
   during a trial). Only the window carries over; a hosted API's 429 limit is met again.
 - **Ids are yours if you want them.** Pass `(id, row)` tuples, or `id_key="my_column"`, or
   an `id_fn=` callable. Default: a stable content-hash of the row — identical input rows
-  then dedupe for free.
+  then dedupe for free. Raw bytes (an audio or image file as read, at any depth) hash by
+  content, so identical rows with identical bytes are one row; the same bytes at a
+  different place in the row make a different id. A decoded object (PIL image, array) needs
+  one of the id options above, or load the column undecoded (`datasets` `decode=False`).
 - **`kill -9` it, re-run the same command.** Output is append-only parquet with a manifest
   sidecar; resume is an exact anti-join on id — it re-pays at most one flush buffer, never
   duplicates a row. This holds across separate Jobs writing at different times.
@@ -173,7 +180,7 @@ from datasets import load_dataset
 
 from saturate import AdaptiveClient, Auto, stream, skip_done, through, drain
 
-rows = stream(load_dataset("...", streaming=True))  # (id, row) pairs, lazy
+rows = stream(load_dataset("...", split="train", streaming=True))  # (id, row) pairs, lazy
 rows = skip_done(rows, sink)  # exact resume filter
 
 async with AdaptiveClient(endpoint, window=Auto()) as client:
@@ -208,7 +215,9 @@ Two sinks ship with that contract:
 - **`FileSink(outdir, ext=".md", key="markdown")`** — one file per row, named by id. The
   filesystem is the manifest, overwrites are idempotent, so OCR→markdown files or
   audio→transcripts get exact resume too. (Failed rows leave no file, so they simply retry
-  next run — there's no error record. That's the trade.)
+  next run — there's no error record. That's the trade.) A row FileSink cannot write (an id
+  that is not a safe filename, or no `key` value) counts as failed and is logged; when the
+  first 32 rows all fail that way, the run stops: check `key=`.
 
 ```python
 from saturate import FileSink
@@ -331,9 +340,9 @@ with ProcessPoolExecutor(8, mp_context=multiprocessing.get_context("spawn")) as 
   `render_page` and the rows must be picklable for a process pool. The work happens before
   the pump sees the row, so the verdict then reads `SOURCE-BOUND` rather than `PREP-BOUND`.
 
-Each tick of the telemetry names the bottleneck as `bound_by` (`engine`, `source`, `prep`, or
-`loop` when `parse` or a sink flush blocked the event loop) so you can read which side to
-scale before changing anything.
+Each tick of the telemetry names the bottleneck as `bound_by`: `engine`, `source`, `prep`,
+`sink` (the output fell behind), or `loop` (`parse` or other work blocked the event loop).
+Read it to find which side to scale before you change anything.
 
 ## Embeddings
 
@@ -352,10 +361,11 @@ stats = pump(
 
 ## Running under an agent
 
-In agent mode (detected via env) stdout carries exactly one line — the run's stats as JSON —
-and everything human goes to stderr (unless you point a logging handler at stdout), including the run-end advisor ("server ceiling: running
-pinned at N — relaunch with --max-num-seqs 2N") and the standing hint that re-running the
-same command is always safe.
+In agent mode (env `CLAUDECODE`, `CODEX_SANDBOX` or `AI_AGENT` set), stdout carries exactly
+one line: the run's stats as JSON. Everything for humans goes to stderr, unless you point a
+logging handler at stdout. That includes the run-end advisor (for example "server ceiling:
+running pinned at N with a standing queue for 80% of the run — relaunch with --max-num-seqs
+2N") and the hint that re-running the same command is always safe.
 
 ## Logging
 
@@ -396,7 +406,7 @@ Everything in this table has a live receipt — numbers plus job/endpoint ids �
 
 | surface | live receipt |
 |---|---|
-| engines | vLLM, SGLang, llama.cpp boot templates + gauge dialects; TEI queue-depth gauge only (`te_queue_size` — no KV, no running gauge) |
+| engines | vLLM, SGLang, llama.cpp boot templates + gauge scrapes; TEI queue-depth gauge only (`te_queue_size` — no KV, no running gauge) |
 | serving arrangements | in-process `Engine` · exposed-Job proxy · laptop→Job · Inference Endpoints **including scale-to-zero cold start** (retry ladder + breaker ride the managed-wake 503s; 100/100 after one healing re-run) |
 | routes | `/chat/completions` · `/completions` · `/embeddings` (micro-batch rows) · `/audio/transcriptions` (multipart) |
 | adaptivity | window self-ranged 8→376 with zero config; 1.209× the delivered tok/s of a hand-tuned fixed-64 bare-httpx client, same 10k rows (it discovered 272 was better than 64) |
@@ -412,4 +422,4 @@ docs/design.md — pending more workload traces), and resume id-sets beyond ~10M
 
 ## More
 
-[docs/design.md](docs/design.md) is the architecture; [docs/why.md](docs/why.md) answers "why not just use X" with receipts; [CONTRACT.md](CONTRACT.md) is the storage protocol; [spikes/RESULTS.md](spikes/RESULTS.md) holds every benchmark number with job ids; [docs/history/decisions.md](docs/history/decisions.md) is the decision log.
+[docs/design.md](docs/design.md) is the architecture; [docs/pipeline.md](docs/pipeline.md) is how a row moves through `through()` and `drain()`; [docs/why.md](docs/why.md) answers "why not just use X" with receipts; [CONTRACT.md](CONTRACT.md) is the storage protocol; [spikes/RESULTS.md](spikes/RESULTS.md) holds every benchmark number with job ids; [docs/history/decisions.md](docs/history/decisions.md) is the decision log.

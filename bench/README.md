@@ -10,6 +10,8 @@ which is what an A/B across a rewrite needs.
 | `serve.py` | the test stub server in its own process (no GIL shared with the client) |
 | `ab.py` | two versions, interleaved runs, head/base ratio with a 95% bootstrap interval |
 | `jobs_ab.sh` | the same A/B against a real vLLM engine inside one HF Job |
+| `live_checks.py` | four end-to-end checks against a real engine (see the end of this page) |
+| `controller_sim.py` | `Auto` from any git refs against simulated engines (`tests/sim_engine.py`): one table of throughput share, latency, failures and ramp time |
 | `results/` | JSON from runs worth keeping (each names its base and head commits) |
 
 ## Run
@@ -65,12 +67,12 @@ lets the paired ratios be recomputed. The 95% bootstrap intervals of the head/ba
 | `first_durable_s` | ±5% to ±70% | only large changes |
 | `loop_lag_p99_s` (≈ max) | up to −80% / +50% | too noisy for a verdict; use it to spot large blocks |
 
-Two baseline facts from the same run, worth knowing before the rewrite:
+Two baseline facts from the same run:
 - `overhead-w512`: the event loop is blocked up to ~0.45 s per tick at a 512 window with zero
   latency; at window 64 it is ~0.02 s.
-- `default-flush-w64` against `overhead-w64`: the default local flush of the time (10 rows; 1000
-  rows or 10 s since #66) costs ~40% of
-  zero-latency throughput (546 vs 928 rows/s) and ~50% more CPU per row.
+- `default-flush-w64` against `overhead-w64`: the default local flush at that commit (10 rows;
+  the default is 1000 rows or 10 s since #66) cost ~40% of zero-latency throughput (546 vs 928
+  rows/s) and ~50% more CPU per row.
 
 ### On a real engine
 
@@ -107,6 +109,8 @@ httpx2's pool did work for every connection on each request, which also blocked 
 (up to 0.87 s per tick on SGLang). SGLang ran with `--max-running-requests 256`: at its default,
 the repetition-penalty buffers ran a 24 GB GPU out of memory.
 
-`live_checks.py` runs four checks against a real engine: a complete run, 2048 requests in flight,
-an interrupted run resumed, and the engine restarted mid-run. Each passes only if every row is
-written once with no error rows (`results/live-checks-*`: all pass on both engines, both clients).
+`live_checks.py` runs four row-count checks against a real engine: a complete run, 2048 requests
+in flight, an interrupted run resumed, and the engine restarted mid-run. Each passes only if every
+row is written once with no error rows (`results/live-checks-*`: all pass on both engines, both
+clients). With `--engine`, a fifth check (signals) compares the probe, the capacity and the
+telemetry gauges of a loaded run with what that engine must report (`EXPECT`).

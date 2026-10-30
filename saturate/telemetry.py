@@ -58,7 +58,8 @@ def cut_reasons(telemetry: list[dict]) -> dict[str, int]:
 
 
 def bound_by_counts(telemetry: list[dict]) -> dict[str, int]:
-    """Ticks per `bound_by` verdict (engine / source / prep / loop); inconclusive ticks are not counted."""
+    """Ticks per `bound_by` verdict (engine / source / prep / sink / loop); inconclusive ticks
+    are not counted."""
     return dict(Counter(t["bound_by"] for t in telemetry if t.get("bound_by")))
 
 
@@ -97,9 +98,9 @@ def advise_input(telemetry: list[dict], prepare_workers: int = 0) -> list[str]:
         run_s = max(telemetry[-1].get("t", 0.0), 1e-9)
         pct = min(100, round(100 * sum(t.get("loop_lag_s", 0.0) for t in telemetry) / run_s))
         hints.append(
-            f"LOOP-BOUND: the event loop was blocked {pct}% of the run (parse, sink writes, "
-            "and any to_request share under the prep threshold); keep parse cheap, raise "
-            "flush_every, and move to_request work off the loop"
+            f"LOOP-BOUND: the event loop was blocked {pct}% of the run (parse, and any "
+            "to_request share under the prep threshold); keep parse cheap and move "
+            "to_request work off the loop"
         )
     return hints
 
@@ -115,6 +116,8 @@ def advise(telemetry: list[dict], dialect: str | None, final_limit: int, ceiling
     if len(queued) / len(ticks) < 0.5:
         return []  # no standing queue -> engine wasn't the ceiling
     mode, freq = Counter(t["running"] for t in queued).most_common(1)[0]
+    if mode == 0:
+        return []  # running reads 0 under a queue: the gauge does not count this work (vLLM pooling routes)
     if freq / len(queued) >= 0.7 and mode < final_limit:
         flag = ceiling_flags.get(dialect or "", "raise the server's max concurrent requests")
         return [

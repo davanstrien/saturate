@@ -179,6 +179,10 @@ what to do.
 - The run logs how many rows it deduped and how to keep repeats (#43).
 - The README shows how to start a new batch at the last window:
   `Auto(initial=stats.final_limit)` (#69).
+- Rows with raw bytes (`bytes`, `bytearray` or a one-dimensional single-byte `memoryview`,
+  at any depth) get a default content id: each bytes value is hashed by its content, so
+  identical files dedupe. In 0.2 such a row raised `TypeError`. Ids of JSON-only rows do
+  not change (#89).
 
 ### Changed
 
@@ -251,3 +255,11 @@ what to do.
 - `load_dataset(out)` and `pq.read_table(out)` no longer fail on sidecar files (#62).
 - Multipart uploads send the file name only, and send a file from its start (#57).
 - A Prometheus value of `+Inf` or `NaN` no longer breaks the metrics scrape (#80).
+- A `FileSink` record it cannot write (an id that is not a safe filename, or a `key` value
+  that is missing or `None`) becomes an error row that runs again next run, with the
+  reason logged. In 0.2 it stopped the run, and a `None` value was written as the text
+  `None`. If the first 32 records of a run are all rejected, the run stops (#83).
+- On vLLM `/rerank` and `/classify` routes the `running` gauge reads 0, so the run no
+  longer advises `--max-num-seqs 0` (#88).
+- The `LOOP-BOUND` hint no longer names sink writes or `flush_every`: sink writes run on
+  the writer thread (#84).

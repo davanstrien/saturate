@@ -2,7 +2,7 @@ name: release
 # A release is one merged PR: bump `version` in pyproject.toml and date its CHANGELOG section.
 # When that reaches main, this workflow runs the full suite, publishes to PyPI, then tags the
 # commit and creates the GitHub release from the CHANGELOG section. A push to main whose version
-# already has a GitHub release does nothing; a run that stopped part-way can be re-run.
+# already has a GitHub release does nothing; re-run the failed jobs of a run that stopped part-way.
 on:
   push:
     branches: [main]

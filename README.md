@@ -13,25 +13,6 @@ sustainable throughput and holds it there; you never pick a concurrency number),
 crash-safe output, and resume. Killing it at any point is fine. Re-running the same
 command is always safe.
 
-**Why not…**
-
-- **a semaphore loop?** You pick the number, a crash loses the work, and failed rows leave gaps.
-  saturate picks the number, resumes exactly, and records each failure as an error row.
-- **vLLM's offline `LLM.generate`?** That is one engine library inside one process. saturate
-  talks HTTP to any OpenAI-compatible server, including one that is shared or already running,
-  and resumes across separate Jobs.
-- **a provider's Batch API?** Their models, their queue, results within a day. This is your
-  endpoint, now.
-- **datatrove?** It orchestrates pipelines. saturate is the inference step; it can sit inside a
-  datatrove stage.
-
-Not for: agent loops or multi-turn rollouts (one request per row), DAG authoring, or pacing to a
-hosted API's published rate limit — it backs off on 429s and errors, but it does not schedule
-requests against a quota. It records measured tokens and latency and leaves dollars to you.
-Scaling is shards writing to storage, not a live cluster. `pump()` is deliberately the highest
-level here: task-shaped wrappers ("OCR this dataset with model X") belong a layer up, in recipe
-scripts built out of `pump()`.
-
 ```bash
 uv pip install 'saturate[hf]'   # or: pip install 'saturate[hf]'
 ```
@@ -57,7 +38,7 @@ MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 rows = dataset_rows("databricks/databricks-dolly-15k", columns=["instruction"], limit=100)
 
-with Engine(MODEL, engine="vllm") as endpoint:  # vllm | sglang | llamacpp; needs a GPU
+with Engine(MODEL, engine="vllm") as endpoint:  # needs a GPU and `vllm` on PATH
     stats = pump(
         rows,  # any iterable of dicts — streams, never materializes
         to_request=lambda row: {  # row -> OpenAI-style request body
@@ -95,8 +76,8 @@ What a run prints (a 10-page OCR smoke run on HF Jobs, LightOnOCR-2-1B on an A10
 [pump] done: 10 ok, 0 failed, 1461.0 tok/s, window settled at 8
 ```
 
-The *window* is how many requests are in flight. At the end of a run saturate also prints an
-*advisor* line when something other than the model limited throughput — slow input, slow
+The *window* is the limit on requests in flight. At the end of a run saturate can also print
+an *advisor* line when it measured that something other than the model limited throughput — slow input, slow
 request preparation, or a server cap — with what to change.
 
 Output is append-only parquet, read back with `read_output` (or `load_dataset`, given a
@@ -114,14 +95,33 @@ Notes on what you didn't have to do:
 - **No concurrency number.** The window tunes itself to the endpoint (see
   [Tuning the window](#tuning-the-window)). Cap it for image workloads, because in-flight
   images live in RAM: `window=Auto(max_limit=48)`.
-- **`kill -9` it, re-run the same command.** Resume skips the ids already written — at most
-  one buffer of rows is re-done, and no row is duplicated. This holds across separate Jobs.
+- **`kill -9` it, re-run the same command.** Resume skips the ids already written; rows that were
+  not yet written run again, and no row is duplicated. This holds across separate Jobs.
 - **No id column.** A plain dict row's default id is a stable hash of its content, so
   identical rows dedupe (`dataset_rows` uses the row's position instead); or bring your own
   (see [Ids](#ids-yours-or-a-content-hash)).
 - **Buckets or dataset repos.** Both work as `output=`. Use a bucket while several Jobs
   write at once (a dataset repo makes every flush a commit), and a dataset repo for a
   single writer or the final publish.
+
+## Why not just…
+
+- **a semaphore loop?** You pick the number, a crash loses the work, and failed rows leave gaps.
+  saturate picks the number, resumes exactly, and records each failure as an error row.
+- **vLLM's offline `LLM.generate`?** That is one engine library inside one process. saturate
+  talks HTTP to any OpenAI-compatible server, including one that is shared or already running,
+  and resumes across separate Jobs.
+- **a provider's Batch API?** Their models, their queue, results within a day. This is your
+  endpoint, now.
+- **datatrove?** It orchestrates pipelines. saturate is the inference step; it can sit inside a
+  datatrove stage.
+
+Not for: agent loops or multi-turn rollouts (one request per row), DAG authoring, or pacing to a
+hosted API's published rate limit — it backs off on 429s and errors, but it does not schedule
+requests against a quota. It records measured tokens and latency and leaves dollars to you.
+Scaling is shards writing to storage, not a live cluster. `pump()` is deliberately the highest
+level here: task-shaped wrappers ("OCR this dataset with model X") belong a layer up, in recipe
+scripts built out of `pump()`.
 
 ## What you get
 

@@ -81,8 +81,8 @@ What that command prints (about 3 minutes on the A10G, leaving out the engine's 
 done: 100 rows -> hf://datasets/you/saturate-quickstart/data
 ```
 
-Run it again and nothing is paid for twice: it prints `resume: skipped 100 rows already in the
-output` and `done: 0 ok`.
+Run it again and no row runs twice: the engine still boots, then it prints `resume: skipped 100
+rows already in the output` and `done: 0 ok`.
 
 The *window* is the limit on requests in flight. At the end of a run saturate can also print
 an *advisor* line when it measured that something other than the model limited throughput — slow input, slow

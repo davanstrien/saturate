@@ -109,7 +109,7 @@ class Engine:
             pgid = self.proc.pid
         if self.proc.poll() is None:
             log.info(
-                "engine: stopping the server; shutdown errors logged by the engine from here on are expected"
+                "engine: stopping the server; errors the engine logs from here on come from the shutdown"
             )
             try:
                 os.killpg(pgid, signal.SIGTERM)
@@ -128,37 +128,41 @@ class Engine:
             except ProcessLookupError:
                 return  # group empty: teardown verified
             except PermissionError:
-                pass  # macOS refuses a group that holds only zombies; the check below decides
-            if not _group_has_live_members(pgid):
-                return  # only zombies are left, and they wait for PID 1 to reap them
+                pass  # macOS refuses a group that holds only zombies; the sweep ends in the warning
+            if _group_is_only_zombies(pgid):
+                return  # they run nothing, and they wait for PID 1 to reap them
             time.sleep(0.1)
         log.warning(f"engine: process group {pgid} still has members after SIGKILL sweep")
 
 
-def _group_has_live_members(pgid: int, proc_root: str = "/proc") -> bool:
-    """Whether any process in the group is still running. A zombie counts as gone: it runs
-    nothing and holds no resources, but killpg still finds it until its parent reaps it, and in
-    a container PID 1 may never do that. Without a /proc to read, the answer is True, so the
-    caller keeps sweeping and warns if the group stays."""
+def _group_is_only_zombies(pgid: int, proc_root: str = "/proc") -> bool:
+    """Whether /proc shows members of the group and every one is a zombie. killpg finds a zombie
+    until its parent reaps it, and in a container PID 1 may never do that. The answer is False
+    whenever the check cannot see: no /proc, a process it may not read, or no member found
+    (hidepid or another PID namespace can hide a live one), so the caller keeps sweeping."""
     try:
         entries = os.listdir(proc_root)
     except OSError:
-        return True
-    if not os.path.exists(os.path.join(proc_root, "self", "stat")):
-        return True
+        return False
+    found_a_member = False
     for entry in entries:
         if not entry.isdigit():
             continue
         try:
             with open(os.path.join(proc_root, entry, "stat"), encoding="utf-8", errors="replace") as f:
                 stat = f.read()
-        except OSError:
+        except (FileNotFoundError, ProcessLookupError):
             continue  # the process exited while the table was being read
-        fields = stat.rpartition(")")[2].split()  # the command name before ")" may hold spaces
+        except OSError:
+            return False
+        # After the command name, which may hold spaces or ")": state, parent pid, process group.
+        fields = stat.rpartition(")")[2].split()
         state, process_group = fields[0], int(fields[2])
-        if process_group == pgid and state not in ("Z", "X"):
-            return True
-    return False
+        if process_group == pgid:
+            if state not in ("Z", "X"):
+                return False
+            found_a_member = True
+    return found_a_member
 
 
 def _port_in_use(port: int) -> bool:

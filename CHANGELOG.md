@@ -13,8 +13,8 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
 ### Changed
 
 - Engine teardown no longer warns about, or waits 5 s for, a process group that holds only
-  zombies. It logs one line before it stops the server, so that shutdown errors from the
-  engine read as expected.
+  zombies. It logs one line before it stops the server, which says that errors the
+  engine logs after it come from the shutdown.
 
 ### Known issues
 

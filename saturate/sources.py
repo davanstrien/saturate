@@ -103,7 +103,7 @@ def dataset_rows(
     `limit` stops after the first `limit` rows of the dataset (before sharding,
     so K shards with one limit cover those rows between them). Known issue: on a Hub
     Parquet repo, a process that exits soon after `limit` stops a stream can abort or
-    hang during interpreter exit, after all output is written (see the README).
+    hang during interpreter exit, after pump has returned (see the README).
 
     `shard=(rank, world)` yields only the rows whose id belongs to that shard
     (`shard_of`, CONTRACT §2). When `dataset` is a repo id and the id is an

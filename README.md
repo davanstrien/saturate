@@ -512,19 +512,14 @@ discovering a published quota by backoff is the wrong tool),
 not the built-in one), the controller's **queue thresholds** (see docs/design.md; they need more workload traces), and resume id-sets beyond ~10M rows in memory.
 
 Known issue, exit after a stream stopped early: on Python 3.12 with pyarrow 26, a process that
-exits soon after a Hub Parquet stream stopped before its end (`dataset_rows(limit=)`, or a run that
-fails midway) can abort with `Fatal Python error: PyGILState_Release`, or hang until its Job times
-out. This happens during interpreter exit, so a Job can show as failed after `pump` has returned and
-written its completion marker. Check for the marker, and note that a re-run is always safe. It
-reproduces with pyarrow and `HfFileSystem` alone
+exits soon after a Hub Parquet stream stopped before its end (`dataset_rows(limit=)`) can abort with
+`Fatal Python error: PyGILState_Release`, or hang until its Job times out
 ([datasets#8793](https://github.com/huggingface/datasets/issues/8793),
-[arrow#54536](https://github.com/apache/arrow/issues/54536)). In tests, waiting 30 s before exit
-gave clean exits, and `batch_size` and `pre_buffer` settings did not fix it reliably.
-
-In a script that stops a stream early, make `sys.stdout.flush()` and `os._exit(0)` the last
-statements of the success path, after the `with Engine(...)` block and your own uploads and log
-finalisers. `os._exit` skips `finally` blocks, `atexit` handlers and buffered file writes. Never call
-it in a `finally` or `except` path, because exit code 0 would hide a failed run.
+[arrow#54536](https://github.com/apache/arrow/issues/54536)). A Job can show as failed after `pump`
+has returned, so check for the completion marker; a re-run is always safe. To avoid it, make
+`sys.stdout.flush()` and `os._exit(0)` the last statements of the success path, after your own
+uploads and log finalisers. `os._exit` skips `finally` blocks, `atexit` handlers and buffered file
+writes, so never call it in a `finally` or `except` path: exit code 0 would hide a failed run.
 
 ## More
 

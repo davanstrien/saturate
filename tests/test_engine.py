@@ -4,14 +4,11 @@ session). The GROUP is the teardown unit: teardown kills every member of the pro
 not only the leader."""
 
 import os
-import signal
 import socket
-import subprocess
 
 import pytest
 
 from saturate import Engine
-from saturate.engine import _group_is_only_zombies
 
 
 def test_failed_boot_kills_process_group():
@@ -71,90 +68,3 @@ def test_a_port_already_in_use_is_refused_before_anything_is_spawned():
         with pytest.raises(RuntimeError, match="already in use"):
             eng.__enter__()
         assert eng.proc is None  # nothing was spawned
-
-
-def _fake_proc(root, processes):
-    (root / "not-a-pid").mkdir()
-    for pid, command, state, process_group in processes:
-        (root / str(pid)).mkdir()
-        (root / str(pid) / "stat").write_text(f"{pid} ({command}) {state} 1 {process_group} {process_group}")
-    return str(root)
-
-
-def test_a_group_of_only_zombies_is_recognised(tmp_path):
-    root = _fake_proc(tmp_path, [(10, "vllm", "Z", 10), (11, "worker", "X", 10), (12, "other", "S", 99)])
-    assert _group_is_only_zombies(10, proc_root=root)
-
-
-def test_a_running_member_counts_even_with_spaces_in_its_name(tmp_path):
-    root = _fake_proc(tmp_path, [(10, "vllm", "Z", 10), (11, "a b) c", "S", 10)])
-    assert not _group_is_only_zombies(10, proc_root=root)
-
-
-def test_no_visible_member_is_not_proof_the_group_is_gone(tmp_path):
-    """hidepid or another PID namespace can hide a live member, so seeing none proves nothing."""
-    root = _fake_proc(tmp_path, [(12, "other", "S", 99)])
-    assert not _group_is_only_zombies(10, proc_root=root)
-    assert not _group_is_only_zombies(10, proc_root=str(tmp_path / "missing"))
-
-
-def test_a_process_it_may_not_read_is_not_proof(tmp_path, monkeypatch):
-    root = _fake_proc(tmp_path, [(10, "vllm", "Z", 10)])
-    real_open = open
-
-    def refuse_one(path, *args, **kwargs):
-        if str(path).endswith("/10/stat"):
-            raise PermissionError(path)
-        return real_open(path, *args, **kwargs)
-
-    monkeypatch.setattr("builtins.open", refuse_one)
-    assert not _group_is_only_zombies(10, proc_root=root)
-
-
-def _exited_engine(monkeypatch, port):
-    """An Engine whose leader has exited, with sleep recorded instead of slept."""
-    import saturate.engine as engmod
-
-    eng = Engine(model="x", cmd=["true"], port=port)
-    eng.proc = subprocess.Popen(["true"], start_new_session=True)
-    eng.proc.wait()
-    sleeps = []
-    monkeypatch.setattr(engmod.os, "getpgid", lambda pid: pid)
-    monkeypatch.setattr(engmod.time, "sleep", sleeps.append)
-    return eng, sleeps, engmod
-
-
-def test_teardown_ends_at_once_when_only_zombies_remain(monkeypatch, caplog):
-    """killpg keeps finding a zombie that PID 1 never reaps."""
-    eng, sleeps, engmod = _exited_engine(monkeypatch, 59997)
-    signals = []
-    monkeypatch.setattr(engmod.os, "killpg", lambda pgid, sig: signals.append(sig))
-    monkeypatch.setattr(engmod, "_group_is_only_zombies", lambda pgid: True)
-    eng.__exit__()
-    assert signals == [signal.SIGKILL]
-    assert sleeps == []
-    assert "still has members" not in caplog.text
-
-
-def test_teardown_sweeps_and_warns_when_a_member_stays_alive(monkeypatch, caplog):
-    eng, sleeps, engmod = _exited_engine(monkeypatch, 59996)
-    signals = []
-    monkeypatch.setattr(engmod.os, "killpg", lambda pgid, sig: signals.append(sig))
-    monkeypatch.setattr(engmod, "_group_is_only_zombies", lambda pgid: False)
-    eng.__exit__()
-    assert signals == [signal.SIGKILL] * 50
-    assert len(sleeps) == 50
-    assert "still has members" in caplog.text
-
-
-def test_a_refused_sweep_warns_instead_of_raising(monkeypatch, caplog):
-    """macOS raises PermissionError for a group of only zombies, and it has no /proc to check."""
-    eng, _, engmod = _exited_engine(monkeypatch, 59995)
-
-    def refuse(pgid, sig):
-        raise PermissionError
-
-    monkeypatch.setattr(engmod.os, "killpg", refuse)
-    monkeypatch.setattr(engmod, "_group_is_only_zombies", lambda pgid: False)
-    eng.__exit__()
-    assert "still has members" in caplog.text

@@ -108,9 +108,7 @@ class Engine:
         except ProcessLookupError:
             pgid = self.proc.pid
         if self.proc.poll() is None:
-            log.info(
-                "engine: stopping the server; errors the engine logs from here on come from the shutdown"
-            )
+            log.info("engine: stopping the server; shutdown may produce engine error logs")
             try:
                 os.killpg(pgid, signal.SIGTERM)
                 self.proc.wait(timeout=30)

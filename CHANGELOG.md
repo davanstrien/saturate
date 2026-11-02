@@ -12,8 +12,8 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
 
 ### Changed
 
-- Engine teardown logs one line before it stops the server, which says that errors the engine
-  logs after it come from the shutdown. The SIGKILL sweep warning now says that its usual cause
+- Engine teardown logs one line before it stops the server, which says that shutdown may
+  produce engine error logs. The SIGKILL sweep warning now says that its usual cause
   is harmless zombies.
 
 ### Known issues

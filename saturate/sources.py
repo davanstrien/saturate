@@ -101,7 +101,9 @@ def dataset_rows(
     `columns` selects a subset into the yielded row (slims what flows
     downstream; also how ids="content" leaves out a decoded column).
     `limit` stops after the first `limit` rows of the dataset (before sharding,
-    so K shards with one limit cover those rows between them).
+    so K shards with one limit cover those rows between them). Known issue: on a Hub
+    Parquet repo, a process that exits soon after `limit` stops a stream can abort or
+    hang during interpreter exit, after all output is written (see the README).
 
     `shard=(rank, world)` yields only the rows whose id belongs to that shard
     (`shard_of`, CONTRACT §2). When `dataset` is a repo id and the id is an

@@ -5,10 +5,12 @@ not only the leader."""
 
 import os
 import socket
+import subprocess
 
 import pytest
 
 from saturate import Engine
+from saturate.engine import _group_has_live_members
 
 
 def test_failed_boot_kills_process_group():
@@ -68,3 +70,56 @@ def test_a_port_already_in_use_is_refused_before_anything_is_spawned():
         with pytest.raises(RuntimeError, match="already in use"):
             eng.__enter__()
         assert eng.proc is None  # nothing was spawned
+
+
+def _fake_proc(root, processes):
+    (root / "self").mkdir()
+    (root / "self" / "stat").write_text("1 (self) R 0 1 1")
+    (root / "not-a-pid").mkdir()
+    for pid, command, state, process_group in processes:
+        (root / str(pid)).mkdir()
+        (root / str(pid) / "stat").write_text(f"{pid} ({command}) {state} 1 {process_group} {process_group}")
+    return str(root)
+
+
+def test_a_group_of_only_zombies_has_no_live_members(tmp_path):
+    root = _fake_proc(tmp_path, [(10, "vllm", "Z", 10), (11, "worker", "X", 10), (12, "other", "S", 99)])
+    assert not _group_has_live_members(10, proc_root=root)
+
+
+def test_a_running_member_counts_even_with_spaces_in_its_name(tmp_path):
+    root = _fake_proc(tmp_path, [(10, "vllm", "Z", 10), (11, "a b) c", "S", 10)])
+    assert _group_has_live_members(10, proc_root=root)
+
+
+def test_without_proc_the_group_counts_as_live(tmp_path):
+    assert _group_has_live_members(10, proc_root=str(tmp_path / "missing"))
+    assert _group_has_live_members(10, proc_root=str(tmp_path))  # a directory, but not a /proc
+
+
+def test_teardown_does_not_warn_when_only_zombies_remain(monkeypatch, caplog):
+    """killpg keeps finding a zombie that PID 1 never reaps. Teardown ends at once, with no warning."""
+    import saturate.engine as engmod
+
+    eng = Engine(model="x", cmd=["true"], port=59997)
+    eng.proc = subprocess.Popen(["true"], start_new_session=True)
+    eng.proc.wait()
+    monkeypatch.setattr(engmod.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(engmod.os, "killpg", lambda pgid, sig: None)  # the zombie is still found
+    monkeypatch.setattr(engmod, "_group_has_live_members", lambda pgid: False)
+    eng.__exit__()
+    assert "still has members" not in caplog.text
+
+
+def test_teardown_warns_when_a_member_stays_alive(monkeypatch, caplog):
+    import saturate.engine as engmod
+
+    eng = Engine(model="x", cmd=["true"], port=59996)
+    eng.proc = subprocess.Popen(["true"], start_new_session=True)
+    eng.proc.wait()
+    monkeypatch.setattr(engmod.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(engmod.os, "killpg", lambda pgid, sig: None)
+    monkeypatch.setattr(engmod, "_group_has_live_members", lambda pgid: True)
+    monkeypatch.setattr(engmod.time, "sleep", lambda s: None)
+    eng.__exit__()
+    assert "still has members" in caplog.text

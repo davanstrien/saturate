@@ -511,6 +511,16 @@ discovering a published quota by backoff is the wrong tool),
 **binary response routes** (TTS worked via the documented bring-your-own-transport seam,
 not the built-in one), the controller's **queue thresholds** (see docs/design.md; they need more workload traces), and resume id-sets beyond ~10M rows in memory.
 
+Known issue, exit after a stream stopped early: on Python 3.12 with pyarrow 26, a process that
+exits soon after a Hub Parquet stream was stopped early (`dataset_rows(limit=)`) can abort with
+`Fatal Python error: PyGILState_Release`, or hang until its Job times out. The output is already
+written, so a re-run is not needed, but the Job can show as failed. It reproduces with pyarrow and
+`HfFileSystem` alone ([datasets#8793](https://github.com/huggingface/datasets/issues/8793),
+[arrow#54536](https://github.com/apache/arrow/issues/54536)). In tests, waiting 30 s before exit
+gave clean exits, and `batch_size` and `pre_buffer` settings did not fix it reliably. In a script
+that stops a stream early, call `sys.stdout.flush()` and `os._exit(0)` after the last step, or use a
+Job timeout you can afford.
+
 ## More
 
 - [docs/design.md](https://github.com/davanstrien/saturate/blob/main/docs/design.md) — the architecture

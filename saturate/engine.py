@@ -108,6 +108,9 @@ class Engine:
         except ProcessLookupError:
             pgid = self.proc.pid
         if self.proc.poll() is None:
+            log.info(
+                "engine: stopping the server; shutdown errors logged by the engine from here on are expected"
+            )
             try:
                 os.killpg(pgid, signal.SIGTERM)
                 self.proc.wait(timeout=30)
@@ -124,8 +127,38 @@ class Engine:
                 os.killpg(pgid, signal.SIGKILL)
             except ProcessLookupError:
                 return  # group empty: teardown verified
+            except PermissionError:
+                pass  # macOS refuses a group that holds only zombies; the check below decides
+            if not _group_has_live_members(pgid):
+                return  # only zombies are left, and they wait for PID 1 to reap them
             time.sleep(0.1)
         log.warning(f"engine: process group {pgid} still has members after SIGKILL sweep")
+
+
+def _group_has_live_members(pgid: int, proc_root: str = "/proc") -> bool:
+    """Whether any process in the group is still running. A zombie counts as gone: it runs
+    nothing and holds no resources, but killpg still finds it until its parent reaps it, and in
+    a container PID 1 may never do that. Without a /proc to read, the answer is True, so the
+    caller keeps sweeping and warns if the group stays."""
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        return True
+    if not os.path.exists(os.path.join(proc_root, "self", "stat")):
+        return True
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc_root, entry, "stat"), encoding="utf-8", errors="replace") as f:
+                stat = f.read()
+        except OSError:
+            continue  # the process exited while the table was being read
+        fields = stat.rpartition(")")[2].split()  # the command name before ")" may hold spaces
+        state, process_group = fields[0], int(fields[2])
+        if process_group == pgid and state not in ("Z", "X"):
+            return True
+    return False
 
 
 def _port_in_use(port: int) -> bool:

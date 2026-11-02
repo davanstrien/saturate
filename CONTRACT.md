@@ -44,9 +44,10 @@ out/
         └── telemetry-shard{rank}-….jsonl  # per-tick controller trajectory
 ```
 
-The data parts are the only files outside `__saturate/`. `datasets` and pyarrow skip paths
-that start with `__`, so their loaders see the parts alone. What they can load depends on
-the schema:
+The data parts are the only files outside `__saturate/` in `out`. An `hf://datasets` writer
+also adds a short `README.md` with the `saturate` tag at the repo root, when the repo has no
+README; it never changes one that exists. `datasets` and pyarrow skip paths that start with
+`__`, so their loaders see the parts alone. What they can load depends on the schema:
 
 - **Declared schema** (`schema=`): every part has the same columns, so `load_dataset`,
   `pq.read_table` and `pyarrow.dataset` load the whole output.

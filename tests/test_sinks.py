@@ -866,6 +866,93 @@ def test_hf_output_repo_autocreated(tmp_path, monkeypatch):
     assert len(calls) == 2
 
 
+class FakeCardApi:
+    """A Hub with one dataset repo: records uploads, and has a README only when told."""
+
+    def __init__(self, has_readme=False, upload_error=None):
+        self.has_readme = has_readme
+        self.upload_error = upload_error
+        self.uploads = []
+        self.created = []
+
+    def __call__(self):  # stands in for the HfApi class: HfApi() returns this same fake
+        return self
+
+    def create_repo(self, repo, **kw):
+        self.created.append(repo)
+
+    def create_bucket(self, repo, **kw):
+        self.created.append(repo)
+
+    def file_exists(self, repo, filename, **kw):
+        assert kw.get("repo_type") == "dataset"
+        return filename == "README.md" and self.has_readme
+
+    def upload_file(self, **kw):
+        if self.upload_error is not None:
+            raise self.upload_error
+        self.uploads.append(kw)
+        self.has_readme = True
+
+
+def _use_fake_hub(monkeypatch, api):
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", api)
+
+
+def test_a_dataset_repo_with_no_readme_gets_one_card_with_the_saturate_tag(monkeypatch):
+    from huggingface_hub import DatasetCard
+
+    from saturate import ParquetSink
+
+    api = FakeCardApi()
+    _use_fake_hub(monkeypatch, api)
+    ParquetSink("hf://datasets/owner/name/runs/out")
+    ParquetSink("hf://datasets/owner/name/runs/out")  # a re-run or another shard: no second commit
+    assert len(api.uploads) == 1
+    upload = api.uploads[0]
+    assert (upload["repo_id"], upload["repo_type"], upload["path_in_repo"]) == (
+        "owner/name",
+        "dataset",
+        "README.md",
+    )
+    card = DatasetCard(upload["path_or_fileobj"].decode())
+    assert card.data.tags == ["saturate"]
+    assert 'read_output("hf://datasets/owner/name/runs/out")' in card.text
+
+
+def test_a_readme_that_exists_is_left_alone(monkeypatch):
+    from saturate import ParquetSink
+
+    api = FakeCardApi(has_readme=True)
+    _use_fake_hub(monkeypatch, api)
+    ParquetSink("hf://datasets/owner/name/data")
+    assert api.uploads == []
+
+
+def test_only_a_writer_on_a_dataset_repo_adds_a_card(tmp_path, monkeypatch):
+    from saturate import ParquetSink
+
+    api = FakeCardApi()
+    _use_fake_hub(monkeypatch, api)
+    ParquetSink("hf://buckets/owner/name/runs/out")
+    ParquetSink("hf://datasets/owner/name/data", create=False)
+    ParquetSink(str(tmp_path / "datasets/owner/name"))
+    assert api.uploads == []
+
+
+def test_a_card_that_cannot_be_written_is_logged_and_the_sink_still_opens(monkeypatch, caplog):
+    from saturate import ParquetSink
+
+    api = FakeCardApi(upload_error=RuntimeError("403 no write access"))
+    _use_fake_hub(monkeypatch, api)
+    with caplog.at_level("WARNING", logger="saturate"):
+        ParquetSink("hf://datasets/owner/name/data")
+    assert api.created == ["owner/name"]
+    assert "could not add a dataset card to owner/name: 403 no write access" in caplog.text
+
+
 def test_hf_autocreate_needs_exact_protocol_match(monkeypatch):
     """Only the HF filesystem gets a repo auto-created: a protocol name that merely
     contains "hf" is not it, while HfFileSystem's alias tuple is."""

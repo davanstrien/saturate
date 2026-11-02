@@ -52,6 +52,44 @@ TELEMETRY_DIR = f"{SIDECAR_DIR}/telemetry"
 LOCAL_FLUSH_INTERVAL_S = 10.0  # a local output's oldest buffered row is written within this
 REMOTE_FLUSH_INTERVAL_S = 60.0  # a remote output's: each write there is a slow commit or upload
 
+CARD_TEMPLATE = """---
+tags:
+- saturate
+---
+
+# {repo}
+
+Batch inference output written by [saturate](https://github.com/davanstrien/saturate).
+
+Read the successful rows, one per id:
+
+```python
+from saturate import read_output
+
+for row_id, row in read_output("hf://{root}"):
+    ...
+```
+
+The parquet parts hold every record. A row that failed has its message in the `error` column.
+"""
+
+
+def _add_card_if_missing(api, repo: str, root: str) -> None:
+    """Give a dataset repo that has no README a short card with the `saturate` tag. A README
+    that exists is never changed. The card is not worth stopping a run for: a failure is logged."""
+    try:
+        if api.file_exists(repo, "README.md", repo_type="dataset"):
+            return
+        api.upload_file(
+            path_or_fileobj=CARD_TEMPLATE.format(repo=repo, root=root).encode(),
+            path_in_repo="README.md",
+            repo_id=repo,
+            repo_type="dataset",
+            commit_message="Add dataset card",
+        )
+    except Exception as e:
+        log.warning(f"could not add a dataset card to {repo}: {e}")
+
 
 def _list_parts(fs, root: str) -> list[str]:
     """The data parts of an output dir, in write order (the CONTRACT part-name pattern)."""
@@ -150,7 +188,9 @@ class ParquetSink:
                     from huggingface_hub import HfApi
 
                     if parts[0] == "datasets":
-                        HfApi().create_repo(repo, repo_type="dataset", private=True, exist_ok=True)
+                        api = HfApi()
+                        api.create_repo(repo, repo_type="dataset", private=True, exist_ok=True)
+                        _add_card_if_missing(api, repo, self.root)
                     else:
                         HfApi().create_bucket(repo, private=True, exist_ok=True)
                     # fsspec shares one filesystem instance per process: a read-only check that

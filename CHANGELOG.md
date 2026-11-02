@@ -10,6 +10,12 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
 
 ## [Unreleased]
 
+### Added
+
+- An `hf://datasets` output whose repo has no README gets a short dataset card with the
+  `saturate` tag. A README that exists is never changed, so to opt out, add your own before
+  the run. If the card cannot be written, the sink logs a warning and the run goes on.
+
 ### Changed
 
 - Engine teardown logs one line before it stops the server, which says that shutdown may

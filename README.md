@@ -9,9 +9,13 @@ You point it at an endpoint you control — a vLLM server you just started, a SG
 TEI, an Inference Endpoint — and give it two functions: one that turns a row into a
 request, one that turns a response into output columns. It handles everything between:
 how many requests to keep in flight (congestion-aware, like TCP — it finds the endpoint's
-sustainable throughput and holds it there; you never pick a concurrency number), retries,
-crash-safe output, and resume. Killing it at any point is fine. Re-running the same
-command is always safe.
+sustainable throughput and holds it there, so you don't need to pick a concurrency number;
+image workloads should still set a ceiling), retries, crash-safe output, and resume. Killing
+it at any point is fine. Re-running the same command is always safe.
+
+One real run: 14,483 scanned pages from 1,161 documents, OCRed with Xiaomi-OCR-0 on one GPU
+Job. 0 failed, 8.88 pages/s once the engine was up, 32 minutes in total, about $1.47 at the
+listed rate. Those numbers cover throughput and failures; that run has no accuracy check yet.
 
 ```bash
 uv pip install 'saturate[hf]'   # or: pip install 'saturate[hf]'
@@ -68,17 +72,24 @@ hf jobs uv run --image vllm/vllm-openai:v0.22.1 --flavor a10g-small \
     --secrets HF_TOKEN examples/quickstart.py
 ```
 
-What a run prints (a 10-page OCR smoke run on HF Jobs, LightOnOCR-2-1B on an A10G):
+What that command prints (about 3 minutes on the A10G, leaving out the engine's own logs):
 
 ```
-[pump] engine: vllm serve lightonai/LightOnOCR-2-1B --port 8000 --max-model-len 8192 …
+[pump] engine: vllm serve Qwen/Qwen2.5-0.5B-Instruct --port 8000
 [pump] engine ready (health x3 + trial 404)
-[pump] done: 10 ok, 0 failed, 1461.0 tok/s, window settled at 8
+[pump] done: 100 ok, 0 failed, 970.5 tok/s, window settled at 64
+done: 100 rows -> hf://datasets/you/saturate-quickstart/data
 ```
+
+Run it again and nothing is paid for twice: it prints `resume: skipped 100 rows already in the
+output` and `done: 0 ok`.
 
 The *window* is the limit on requests in flight. At the end of a run saturate can also print
 an *advisor* line when it measured that something other than the model limited throughput — slow input, slow
 request preparation, or a server cap — with what to change.
+
+If a Job ends as failed, or hangs, after `pump` has returned, your output is already written:
+see the known issue on exit after a stopped stream under [Status](#status).
 
 Output is append-only parquet, read back with `read_output` (or `load_dataset`, given a
 `schema=`); a failed row is a durable *error row*, not a gap (see [What you get](#what-you-get)).

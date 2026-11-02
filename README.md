@@ -69,8 +69,9 @@ Run the command again and no page runs twice: the engine still boots, then it pr
 `resume: skipped 7 rows already in the output` and `done: 0 ok`. For your own pages, change the
 first argument, and try `--max-samples 10` first.
 
-The script is short, because saturate does the work between these two functions
-(`to_data_url`, `SERVE_ARGS` and `SCHEMA` are in the script):
+The script is short, because saturate does the work between these two functions. This is a
+trimmed copy: the script also records token counts and defines `to_data_url`, `SERVE_ARGS` and
+`SCHEMA`.
 
 ```python
 def to_request(row):  # row -> OpenAI-style request body
@@ -79,6 +80,8 @@ def to_request(row):  # row -> OpenAI-style request body
         "model": MODEL,
         "messages": [{"role": "user", "content": [image]}],
         "max_tokens": 4096,
+        "temperature": 0.2,
+        "top_p": 0.9,
     }
 
 
@@ -173,8 +176,9 @@ out/
 With a declared `schema=`, every part has the same columns and `load_dataset("out")` and
 `pq.read_table("out")` load the output too. They read the parts raw: error rows included,
 and a row that failed and later succeeded appears twice. Without `schema=`, a column can first
-appear in a later part, and those loaders fail or drop it (see CONTRACT.md). A dataset repo with
-no README gets a short card with the `saturate` tag; a README you already have is never changed.
+appear in a later part, and those loaders fail or drop it (see CONTRACT.md). After 0.3.0, an
+output in a subdirectory of a dataset repo with no README gives the repo a short card with the
+`saturate` tag; a README you already have is never changed.
 
 ```python
 # a success row and an error row from one live run (its parse() kept token counts and the category):

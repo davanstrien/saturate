@@ -1,6 +1,8 @@
 """Smoke tests for surfaces outside the oracle: FileSink resume, read_output's
 healing rule, skip_done with an external done-set."""
 
+from types import SimpleNamespace
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -884,13 +886,18 @@ class FakeCardApi:
     def create_bucket(self, repo, **kw):
         self.created.append(repo)
 
+    def dataset_info(self, repo, **kw):
+        return SimpleNamespace(sha="commit-checked")
+
     def file_exists(self, repo, filename, **kw):
         assert kw.get("repo_type") == "dataset"
+        assert kw.get("revision") == "commit-checked"
         return filename == "README.md" and self.has_readme
 
     def upload_file(self, **kw):
         if self.upload_error is not None:
             raise self.upload_error
+        assert kw.get("parent_commit") == "commit-checked"
         self.uploads.append(kw)
         self.has_readme = True
 
@@ -909,7 +916,7 @@ def test_a_dataset_repo_with_no_readme_gets_one_card_with_the_saturate_tag(monke
     api = FakeCardApi()
     _use_fake_hub(monkeypatch, api)
     ParquetSink("hf://datasets/owner/name/runs/out")
-    ParquetSink("hf://datasets/owner/name/runs/out")  # a re-run or another shard: no second commit
+    ParquetSink("hf://datasets/owner/name/runs/out")  # a re-run: no second commit
     assert len(api.uploads) == 1
     upload = api.uploads[0]
     assert (upload["repo_id"], upload["repo_type"], upload["path_in_repo"]) == (
@@ -940,6 +947,37 @@ def test_only_a_writer_on_a_dataset_repo_adds_a_card(tmp_path, monkeypatch):
     ParquetSink("hf://datasets/owner/name/data", create=False)
     ParquetSink(str(tmp_path / "datasets/owner/name"))
     assert api.uploads == []
+
+
+def test_an_output_at_the_repo_root_gets_no_card(tmp_path, monkeypatch):
+    """A README beside the parts would stop pq.read_table, which the contract promises."""
+    from saturate import ParquetSink
+
+    pq.write_table(pa.table({"id": ["a"]}), tmp_path / "part-1.parquet")
+    (tmp_path / "README.md").write_text("---\ntags: [saturate]\n---\n")
+    with pytest.raises(pa.ArrowInvalid):
+        pq.read_table(tmp_path)  # the reason for the rule; if this ever passes, the rule can go
+
+    api = FakeCardApi()
+    _use_fake_hub(monkeypatch, api)
+    ParquetSink("hf://datasets/owner/name")
+    assert api.created == ["owner/name"]
+    assert api.uploads == []
+
+
+def test_a_repo_that_moved_on_after_the_check_is_not_a_warning(monkeypatch, caplog):
+    """Another shard's card, or the owner's README, landed between the check and the upload:
+    the Hub refuses the upload (412), so nothing is overwritten, and it is not a problem."""
+    from saturate import ParquetSink
+
+    conflict = RuntimeError("412 Precondition Failed")
+    conflict.response = SimpleNamespace(status_code=412)  # ty: ignore[unresolved-attribute]
+    api = FakeCardApi(upload_error=conflict)
+    _use_fake_hub(monkeypatch, api)
+    with caplog.at_level("WARNING", logger="saturate"):
+        ParquetSink("hf://datasets/owner/name/data")
+    assert api.uploads == []
+    assert caplog.text == ""
 
 
 def test_a_card_that_cannot_be_written_is_logged_and_the_sink_still_opens(monkeypatch, caplog):

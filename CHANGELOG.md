@@ -12,9 +12,10 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
 
 ### Added
 
-- An `hf://datasets` output whose repo has no README gets a short dataset card with the
-  `saturate` tag. A README that exists is never changed, so to opt out, add your own before
-  the run. If the card cannot be written, the sink logs a warning and the run goes on.
+- An output in a subdirectory of an `hf://datasets` repo with no README gives the repo a short
+  dataset card with the `saturate` tag. A README that exists is never changed, so to opt out,
+  add your own before the run. An output at the repo root gets no card, because a README beside
+  the parts stops `pq.read_table`. If the card cannot be written, the run goes on.
 
 ### Changed
 

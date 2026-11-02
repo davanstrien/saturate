@@ -437,3 +437,11 @@ durable error rows carrying the exact server message (job 6a699d86);
 killed the boot on 24GB (job 6a69a16c). The fix (explicit 16384) is the
 argument for recipe-level [tool.serving] starting values: the invariant needs
 both bounds — above input+max_tokens, below what the card's KV affords.
+
+# A real corpus on one GPU: 14,483 pages (2026-11-02, saturate 0.3.0)
+
+Whole-page OCR with Xiaomi-OCR-0 through `Engine` on vLLM, one `rtx-pro-6000` Job
+(job 6ae894f00e0338d1bb7e33c1): 14,483 scanned pages from 1,161 documents, 0 failed.
+8.88 pages/s while running, 279 s boot, 32 min 10 s for the whole Job, about $1.47 at the
+listed $2.75/hour. Bound by the engine; the window settled at 512. The output stays private,
+because the rights in these documents stay with their creators. This run has no accuracy check.

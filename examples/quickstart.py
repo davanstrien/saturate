@@ -33,6 +33,8 @@ For more OCR models, see https://huggingface.co/datasets/uv-scripts/ocr
 import argparse
 import base64
 import io
+import os
+import sys
 
 import pyarrow as pa
 from PIL import Image, ImageOps
@@ -116,6 +118,12 @@ def main() -> None:
         )
     url = f"https://huggingface.co/datasets/{args.output_dataset}"
     print(f"{url}: {stats.rows_processed} ok, {stats.rows_failed} failed")
+
+    if args.max_samples is not None:
+        # A Hub Parquet stream stopped early can crash or hang at interpreter exit (README, Status).
+        # The output is written, so leave here. A failed run raised above and never gets here.
+        sys.stdout.flush()
+        os._exit(0)
 
 
 if __name__ == "__main__":

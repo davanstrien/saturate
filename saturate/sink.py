@@ -76,9 +76,12 @@ The parquet parts hold every record. A row that failed has its message in the `e
 
 def _add_card_if_missing(api, repo: str, root: str) -> None:
     """Give a dataset repo that has no README a short card with the `saturate` tag. A README
-    that exists is never changed. The card is not worth stopping a run for: a failure is logged."""
+    that exists is never changed: the upload is conditional on the commit that was checked, so
+    it fails when anything landed in between (another shard's card, or the owner's README). The
+    card is not worth stopping a run for: a failure is logged, and the next run tries again."""
     try:
-        if api.file_exists(repo, "README.md", repo_type="dataset"):
+        head = api.dataset_info(repo, expand=["sha"]).sha
+        if api.file_exists(repo, "README.md", repo_type="dataset", revision=head):
             return
         api.upload_file(
             path_or_fileobj=CARD_TEMPLATE.format(repo=repo, root=root).encode(),
@@ -86,9 +89,14 @@ def _add_card_if_missing(api, repo: str, root: str) -> None:
             repo_id=repo,
             repo_type="dataset",
             commit_message="Add dataset card",
+            parent_commit=head,
         )
     except Exception as e:
-        log.warning(f"could not add a dataset card to {repo}: {e}")
+        response = getattr(e, "response", None)
+        if getattr(response, "status_code", None) == 412:  # the repo moved on after the check
+            log.info(f"{repo} changed while adding a dataset card; not adding it on this run")
+        else:
+            log.warning(f"could not add a dataset card to {repo}: {e}")
 
 
 def _list_parts(fs, root: str) -> list[str]:
@@ -190,7 +198,8 @@ class ParquetSink:
                     if parts[0] == "datasets":
                         api = HfApi()
                         api.create_repo(repo, repo_type="dataset", private=True, exist_ok=True)
-                        _add_card_if_missing(api, repo, self.root)
+                        if len(parts) > 3:  # at the repo root, pyarrow would try to read the README
+                            _add_card_if_missing(api, repo, self.root)
                     else:
                         HfApi().create_bucket(repo, private=True, exist_ok=True)
                     # fsspec shares one filesystem instance per process: a read-only check that

@@ -918,7 +918,7 @@ def test_a_dataset_repo_with_no_readme_gets_one_card_with_the_saturate_tag(monke
         "README.md",
     )
     card = DatasetCard(upload["path_or_fileobj"].decode())
-    assert card.data.tags == ["saturate"]
+    assert card.data.to_dict()["tags"] == ["saturate"]
     assert 'read_output("hf://datasets/owner/name/runs/out")' in card.text
 
 

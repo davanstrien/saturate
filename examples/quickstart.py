@@ -114,9 +114,8 @@ def main() -> None:
             window=Auto(max_limit=48),  # a ceiling, not a setting: images in flight live in RAM
             schema=SCHEMA,
         )
-    print(
-        f"https://huggingface.co/datasets/{args.output_dataset}: {stats.rows_processed} ok, {stats.rows_failed} failed"
-    )
+    url = f"https://huggingface.co/datasets/{args.output_dataset}"
+    print(f"{url}: {stats.rows_processed} ok, {stats.rows_failed} failed")
 
 
 if __name__ == "__main__":

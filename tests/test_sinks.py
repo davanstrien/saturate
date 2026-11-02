@@ -1,6 +1,8 @@
 """Smoke tests for surfaces outside the oracle: FileSink resume, read_output's
 healing rule, skip_done with an external done-set."""
 
+from types import SimpleNamespace
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -864,6 +866,130 @@ def test_hf_output_repo_autocreated(tmp_path, monkeypatch):
     assert ("bucket", "owner/name", True) in calls
     ParquetSink(str(tmp_path / "datasets/owner/name"))  # local lookalike: untouched
     assert len(calls) == 2
+
+
+class FakeCardApi:
+    """A Hub with one dataset repo: records uploads, and has a README only when told."""
+
+    def __init__(self, has_readme=False, upload_error=None):
+        self.has_readme = has_readme
+        self.upload_error = upload_error
+        self.uploads = []
+        self.created = []
+
+    def __call__(self):  # stands in for the HfApi class: HfApi() returns this same fake
+        return self
+
+    def create_repo(self, repo, **kw):
+        self.created.append(repo)
+
+    def create_bucket(self, repo, **kw):
+        self.created.append(repo)
+
+    def dataset_info(self, repo, **kw):
+        return SimpleNamespace(sha="commit-checked")
+
+    def file_exists(self, repo, filename, **kw):
+        assert kw.get("repo_type") == "dataset"
+        assert kw.get("revision") == "commit-checked"
+        return filename == "README.md" and self.has_readme
+
+    def upload_file(self, **kw):
+        if self.upload_error is not None:
+            raise self.upload_error
+        assert kw.get("parent_commit") == "commit-checked"
+        self.uploads.append(kw)
+        self.has_readme = True
+
+
+def _use_fake_hub(monkeypatch, api):
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", api)
+
+
+def test_hf_dataset_repo_with_no_readme_gets_one_card_with_the_saturate_tag(monkeypatch):
+    from huggingface_hub import DatasetCard
+
+    from saturate import ParquetSink
+
+    api = FakeCardApi()
+    _use_fake_hub(monkeypatch, api)
+    ParquetSink("hf://datasets/owner/name/runs/out")
+    ParquetSink("hf://datasets/owner/name/runs/out")  # a re-run: no second commit
+    assert len(api.uploads) == 1
+    upload = api.uploads[0]
+    assert (upload["repo_id"], upload["repo_type"], upload["path_in_repo"]) == (
+        "owner/name",
+        "dataset",
+        "README.md",
+    )
+    card = DatasetCard(upload["path_or_fileobj"].decode())
+    assert card.data.to_dict()["tags"] == ["saturate"]
+    assert 'read_output("hf://datasets/owner/name/runs/out")' in card.text
+
+
+def test_hf_readme_that_exists_is_left_alone(monkeypatch):
+    from saturate import ParquetSink
+
+    api = FakeCardApi(has_readme=True)
+    _use_fake_hub(monkeypatch, api)
+    ParquetSink("hf://datasets/owner/name/data")
+    assert api.uploads == []
+
+
+def test_hf_only_a_writer_on_a_dataset_repo_adds_a_card(tmp_path, monkeypatch):
+    from saturate import ParquetSink
+
+    api = FakeCardApi()
+    _use_fake_hub(monkeypatch, api)
+    ParquetSink("hf://buckets/owner/name/runs/out")
+    ParquetSink("hf://datasets/owner/name/data", create=False)
+    ParquetSink(str(tmp_path / "datasets/owner/name"))
+    assert api.uploads == []
+
+
+def test_hf_output_at_the_repo_root_gets_no_card(tmp_path, monkeypatch):
+    """A README beside the parts would stop pq.read_table, which the contract promises."""
+    from saturate import ParquetSink
+
+    pq.write_table(pa.table({"id": ["a"]}), tmp_path / "part-1.parquet")
+    (tmp_path / "README.md").write_text("---\ntags: [saturate]\n---\n")
+    with pytest.raises(pa.ArrowInvalid):
+        pq.read_table(tmp_path)  # the reason for the rule; if this ever passes, the rule can go
+
+    api = FakeCardApi()
+    _use_fake_hub(monkeypatch, api)
+    ParquetSink("hf://datasets/owner/name")
+    assert api.created == ["owner/name"]
+    assert api.uploads == []
+
+
+@pytest.mark.parametrize("status", [409, 412])
+def test_hf_repo_that_moved_on_after_the_check_is_not_a_warning(status, monkeypatch, caplog):
+    """Another shard's card, or the owner's README, landed around the upload: the Hub refuses
+    it (412 seen with a stale parent, 409 with four writers at once), so nothing is overwritten."""
+    from saturate import ParquetSink
+
+    conflict = RuntimeError(f"{status} conflict")
+    conflict.response = SimpleNamespace(status_code=status)  # ty: ignore[unresolved-attribute]
+    api = FakeCardApi(upload_error=conflict)
+    _use_fake_hub(monkeypatch, api)
+    with caplog.at_level("WARNING", logger="saturate"):
+        ParquetSink("hf://datasets/owner/name/data")
+    assert api.uploads == []
+    assert caplog.text == ""
+
+
+def test_hf_card_that_cannot_be_written_is_logged_and_the_sink_still_opens(monkeypatch, caplog):
+    from saturate import ParquetSink
+
+    api = FakeCardApi(upload_error=RuntimeError("403 no write access"))
+    _use_fake_hub(monkeypatch, api)
+    with caplog.at_level("WARNING", logger="saturate"):
+        ParquetSink("hf://datasets/owner/name/data")
+    assert api.created == ["owner/name"]
+    assert "could not add a dataset card to owner/name: 403 no write access" in caplog.text
 
 
 def test_hf_autocreate_needs_exact_protocol_match(monkeypatch):

@@ -57,7 +57,7 @@ ones deserve an issue first. New public surface needs a recorded decision in
 ceiling). Real-workload claims go in `spikes/RESULTS.md` with job ids.
 
 **Releasing**: one PR. Bump `version` in `pyproject.toml` (and the `saturate` entry in
-`uv.lock`), and change the CHANGELOG heading from `## [X.Y.Z] - unreleased` to the release
+`uv.lock`) and the pins in `examples/quickstart.py` and the README, and change the CHANGELOG heading from `## [X.Y.Z] - unreleased` to the release
 date. When the PR merges, `.github/workflows/release.yml` runs the full suite (slow tier
 too), publishes to PyPI by trusted publishing, then creates the `vX.Y.Z` tag and the GitHub
 release, with the CHANGELOG section as its notes and the built files attached. It fails

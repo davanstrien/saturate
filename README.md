@@ -9,9 +9,13 @@ You point it at an endpoint you control — a vLLM server you just started, a SG
 TEI, an Inference Endpoint — and give it two functions: one that turns a row into a
 request, one that turns a response into output columns. It handles everything between:
 how many requests to keep in flight (congestion-aware, like TCP — it finds the endpoint's
-sustainable throughput and holds it there; you never pick a concurrency number), retries,
-crash-safe output, and resume. Killing it at any point is fine. Re-running the same
+sustainable throughput and holds it there, so you don't need to pick a concurrency number),
+retries, crash-safe output, and resume. Killing it at any point is fine. Re-running the same
 command is always safe.
+
+One real run: 14,483 scanned pages from 1,161 documents, OCRed with Xiaomi-OCR-0 on one GPU
+Job. 0 failed, 8.88 pages/s once the engine was up, 32 minutes in total, about $1.47 at the
+listed rate. Those numbers cover throughput and failures; that run has no accuracy check yet.
 
 ```bash
 uv pip install 'saturate[hf]'   # or: pip install 'saturate[hf]'
@@ -26,59 +30,89 @@ Plain `saturate` works with your own iterables and local output.
 > [CHANGELOG.md](https://github.com/davanstrien/saturate/blob/main/CHANGELOG.md) before you
 > upgrade. See [Status](#status).
 
-## Quickstart: one model, one Job, one dataset
+## Quickstart: OCR a dataset in one command
 
-The most common shape — boot the model and pump a dataset through it, all in one process
-(e.g. a single GPU Job on HF Jobs):
-
-```python
-from saturate import Engine, dataset_rows, pump
-
-MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
-
-rows = dataset_rows("databricks/databricks-dolly-15k", columns=["instruction"], limit=100)
-
-with Engine(MODEL, engine="vllm") as endpoint:  # needs a GPU and `vllm` on PATH
-    stats = pump(
-        rows,  # any iterable of dicts — streams, never materializes
-        to_request=lambda row: {  # row -> OpenAI-style request body
-            "model": MODEL,
-            "messages": [{"role": "user", "content": row["instruction"]}],
-            "max_tokens": 150,
-        },
-        parse=lambda row, body: {  # response JSON -> your output columns
-            "instruction": row["instruction"],
-            "response": body["choices"][0]["message"]["content"],
-        },
-        endpoint=endpoint,
-        output="out",  # a local dir, hf://datasets/you/repo/data, or hf://buckets/...
-    )
-print(stats.rows_processed, stats.tokens_per_sec)
-```
-
-`pump()` is a plain blocking call. Already have a server running? Skip `Engine` and pass its URL:
-`endpoint="http://localhost:8000/v1"`.
-
-The runnable version is
-[examples/quickstart.py](https://github.com/davanstrien/saturate/blob/main/examples/quickstart.py)
-— a self-contained uv script (PEP 723) that works the same on your machine and on HF Jobs:
+First, [install the `hf` CLI (1.32 or later) and sign in](https://huggingface.co/docs/hub/jobs-quickstart).
+HF Jobs needs pay-as-you-go credit. This runs
+[LightOnOCR-2-1B](https://huggingface.co/lightonai/LightOnOCR-2-1B) on seven scanned pages from
+[NASA's *Food for Space Flight* booklet](https://huggingface.co/datasets/uv-scripts/ocr-demo).
+Replace `your-username`:
 
 ```bash
-hf jobs uv run --image vllm/vllm-openai:v0.22.1 --flavor a10g-small \
-    --secrets HF_TOKEN examples/quickstart.py
+hf jobs uv run \
+    https://raw.githubusercontent.com/davanstrien/saturate/main/examples/quickstart.py \
+    uv-scripts/ocr-demo your-username/ocr-demo-results
 ```
 
-What a run prints (a 10-page OCR smoke run on HF Jobs, LightOnOCR-2-1B on an A10G):
+There is nothing else to install. [The script](https://github.com/davanstrien/saturate/blob/main/examples/quickstart.py)
+declares its dependencies, and its header sets the GPU, the Docker image, the timeout and the
+token. Once the Job started, it took about 3.5 minutes on an `a10g-small` ($1.00/hour, so about
+$0.06), most of it startup. It prints (leaving out the engine's own logs):
 
 ```
 [pump] engine: vllm serve lightonai/LightOnOCR-2-1B --port 8000 --max-model-len 8192 …
 [pump] engine ready (health x3 + trial 404)
-[pump] done: 10 ok, 0 failed, 1461.0 tok/s, window settled at 8
+[pump] done: 7 ok, 0 failed, 652.2 tok/s, window settled at 48
+https://huggingface.co/datasets/your-username/ocr-demo-results: 7 ok, 0 failed
 ```
+
+The result is a new private dataset, one row per page:
+
+```python
+from datasets import load_dataset
+
+pages = load_dataset("your-username/ocr-demo-results", split="train")
+print(pages[0]["markdown"])
+```
+
+Run the command again and no page runs twice: the engine still boots, then it prints
+`resume: skipped 7 rows already in the output` and `done: 0 ok`. For your own pages, change the
+first argument, and try `--max-samples 10` first.
+
+The script is short, because saturate does the work between these two functions. This is a
+trimmed copy: the script also records token counts and defines `to_data_url`, `SERVE_ARGS` and
+`SCHEMA`.
+
+```python
+def to_request(row):  # row -> OpenAI-style request body
+    image = {"type": "image_url", "image_url": {"url": to_data_url(row["image"])}}
+    return {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": [image]}],
+        "max_tokens": 4096,
+        "temperature": 0.2,
+        "top_p": 0.9,
+    }
+
+
+def parse(row, body):  # response JSON -> your output columns
+    return {"markdown": body["choices"][0]["message"]["content"].strip()}
+
+
+rows = dataset_rows("uv-scripts/ocr-demo", columns=["image"])  # any iterable of dicts; streams
+
+with Engine(MODEL, engine="vllm", extra_args=SERVE_ARGS) as endpoint:  # needs a GPU and `vllm`
+    stats = pump(
+        rows,
+        to_request,
+        parse,
+        endpoint,
+        "hf://datasets/you/repo/data",  # or a local dir, or hf://buckets/...
+        window=Auto(max_limit=48),
+        schema=SCHEMA,
+    )
+```
+
+`pump()` is a plain blocking call. Already have a server running? Skip `Engine` and pass its URL:
+`endpoint="http://localhost:8000/v1"`. On your own GPU machine with `vllm` on PATH, use `uv run`
+with the same URL and arguments.
 
 The *window* is the limit on requests in flight. At the end of a run saturate can also print
 an *advisor* line when it measured that something other than the model limited throughput — slow input, slow
 request preparation, or a server cap — with what to change.
+
+If a Job ends as failed, or hangs, after `pump` has returned, your output is already written:
+see the known issue on exit after a stopped stream under [Status](#status).
 
 Output is append-only parquet, read back with `read_output` (or `load_dataset`, given a
 `schema=`); a failed row is a durable *error row*, not a gap (see [What you get](#what-you-get)).
@@ -86,9 +120,10 @@ Re-running the same command skips the rows already done; `retry_errors=True` ret
 failed ones. An id names the input row, not the prompt or model: to re-run with a new prompt
 or model, write to a new output.
 
-For complete recipes, see the `-saturate` scripts in
+For more models, see the `-saturate` scripts in
 [uv-scripts/ocr](https://huggingface.co/datasets/uv-scripts/ocr) (for example
-`lighton-ocr2-saturate.py`), which run saturate on HF Jobs end to end.
+`xiaomi-ocr-0-saturate.py`). [uv-scripts](https://huggingface.co/uv-scripts) has the same kind of
+one-command recipe for other tasks.
 
 Notes on what you didn't have to do:
 
@@ -141,8 +176,9 @@ out/
 With a declared `schema=`, every part has the same columns and `load_dataset("out")` and
 `pq.read_table("out")` load the output too. They read the parts raw: error rows included,
 and a row that failed and later succeeded appears twice. Without `schema=`, a column can first
-appear in a later part, and those loaders fail or drop it (see CONTRACT.md). saturate writes no
-dataset card; the Hub finds the parts.
+appear in a later part, and those loaders fail or drop it (see CONTRACT.md). After 0.3.0, an
+output in a subdirectory of a dataset repo with no README gives the repo a short card with the
+`saturate` tag; a README you already have is never changed.
 
 ```python
 # a success row and an error row from one live run (its parse() kept token counts and the category):

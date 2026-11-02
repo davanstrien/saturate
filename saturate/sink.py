@@ -52,6 +52,53 @@ TELEMETRY_DIR = f"{SIDECAR_DIR}/telemetry"
 LOCAL_FLUSH_INTERVAL_S = 10.0  # a local output's oldest buffered row is written within this
 REMOTE_FLUSH_INTERVAL_S = 60.0  # a remote output's: each write there is a slow commit or upload
 
+CARD_TEMPLATE = """---
+tags:
+- saturate
+---
+
+# {repo}
+
+Batch inference output written by [saturate](https://github.com/davanstrien/saturate).
+
+Read the successful rows, one per id:
+
+```python
+from saturate import read_output
+
+for row_id, row in read_output("hf://{root}"):
+    ...
+```
+
+The parquet parts hold every record. A row that failed has its message in the `error` column.
+"""
+
+
+def _add_card_if_missing(api, repo: str, root: str) -> None:
+    """Give a dataset repo that has no README a short card with the `saturate` tag. A README
+    that exists is never changed: the upload is conditional on the commit that was checked, so
+    it fails when anything landed in between (another shard's card, or the owner's README). The
+    card is not worth stopping a run for: a failure is logged, and the next run tries again."""
+    try:
+        head = api.dataset_info(repo, expand=["sha"]).sha
+        if api.file_exists(repo, "README.md", repo_type="dataset", revision=head):
+            return
+        api.upload_file(
+            path_or_fileobj=CARD_TEMPLATE.format(repo=repo, root=root).encode(),
+            path_in_repo="README.md",
+            repo_id=repo,
+            repo_type="dataset",
+            commit_message="Add dataset card",
+            parent_commit=head,
+        )
+    except Exception as e:
+        response = getattr(e, "response", None)
+        # the repo moved on after the check (412), or another commit was landing at that moment (409)
+        if getattr(response, "status_code", None) in (409, 412):
+            log.info(f"{repo} changed while adding a dataset card; not adding it on this run")
+        else:
+            log.warning(f"could not add a dataset card to {repo}: {e}")
+
 
 def _list_parts(fs, root: str) -> list[str]:
     """The data parts of an output dir, in write order (the CONTRACT part-name pattern)."""
@@ -150,7 +197,10 @@ class ParquetSink:
                     from huggingface_hub import HfApi
 
                     if parts[0] == "datasets":
-                        HfApi().create_repo(repo, repo_type="dataset", private=True, exist_ok=True)
+                        api = HfApi()
+                        api.create_repo(repo, repo_type="dataset", private=True, exist_ok=True)
+                        if len(parts) > 3:  # at the repo root, pyarrow would try to read the README
+                            _add_card_if_missing(api, repo, self.root)
                     else:
                         HfApi().create_bucket(repo, private=True, exist_ok=True)
                     # fsspec shares one filesystem instance per process: a read-only check that

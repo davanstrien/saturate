@@ -8,6 +8,19 @@ saturate is experimental. Before 1.0, any minor release (0.x) can change the API
 defaults or the output layout, often with no deprecation period. Pin an exact version
 (for example `saturate==0.3.0`) if you depend on current behaviour.
 
+## [Unreleased]
+
+### Changed
+
+- Engine teardown logs one line before it stops the server, which says that shutdown may
+  produce engine error logs. The SIGKILL sweep warning now says that its usual cause
+  is harmless zombies.
+
+### Known issues
+
+- A process that exits soon after a Hub Parquet stream was stopped early, for example by
+  `dataset_rows(limit=)`, can abort or hang during interpreter exit. See the README.
+
 ## [0.3.0] - 2026-10-30
 
 ### Breaking changes and migration

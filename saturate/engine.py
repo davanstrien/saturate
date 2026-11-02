@@ -108,6 +108,7 @@ class Engine:
         except ProcessLookupError:
             pgid = self.proc.pid
         if self.proc.poll() is None:
+            log.info("engine: stopping the server; shutdown may produce engine error logs")
             try:
                 os.killpg(pgid, signal.SIGTERM)
                 self.proc.wait(timeout=30)
@@ -125,7 +126,10 @@ class Engine:
             except ProcessLookupError:
                 return  # group empty: teardown verified
             time.sleep(0.1)
-        log.warning(f"engine: process group {pgid} still has members after SIGKILL sweep")
+        log.warning(
+            f"engine: process group {pgid} still has members after SIGKILL sweep; "
+            "usually zombies waiting for PID 1 to reap them, which are harmless"
+        )
 
 
 def _port_in_use(port: int) -> bool:

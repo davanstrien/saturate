@@ -908,7 +908,7 @@ def _use_fake_hub(monkeypatch, api):
     monkeypatch.setattr(huggingface_hub, "HfApi", api)
 
 
-def test_a_dataset_repo_with_no_readme_gets_one_card_with_the_saturate_tag(monkeypatch):
+def test_hf_dataset_repo_with_no_readme_gets_one_card_with_the_saturate_tag(monkeypatch):
     from huggingface_hub import DatasetCard
 
     from saturate import ParquetSink
@@ -929,7 +929,7 @@ def test_a_dataset_repo_with_no_readme_gets_one_card_with_the_saturate_tag(monke
     assert 'read_output("hf://datasets/owner/name/runs/out")' in card.text
 
 
-def test_a_readme_that_exists_is_left_alone(monkeypatch):
+def test_hf_readme_that_exists_is_left_alone(monkeypatch):
     from saturate import ParquetSink
 
     api = FakeCardApi(has_readme=True)
@@ -938,7 +938,7 @@ def test_a_readme_that_exists_is_left_alone(monkeypatch):
     assert api.uploads == []
 
 
-def test_only_a_writer_on_a_dataset_repo_adds_a_card(tmp_path, monkeypatch):
+def test_hf_only_a_writer_on_a_dataset_repo_adds_a_card(tmp_path, monkeypatch):
     from saturate import ParquetSink
 
     api = FakeCardApi()
@@ -949,7 +949,7 @@ def test_only_a_writer_on_a_dataset_repo_adds_a_card(tmp_path, monkeypatch):
     assert api.uploads == []
 
 
-def test_an_output_at_the_repo_root_gets_no_card(tmp_path, monkeypatch):
+def test_hf_output_at_the_repo_root_gets_no_card(tmp_path, monkeypatch):
     """A README beside the parts would stop pq.read_table, which the contract promises."""
     from saturate import ParquetSink
 
@@ -966,7 +966,7 @@ def test_an_output_at_the_repo_root_gets_no_card(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("status", [409, 412])
-def test_a_repo_that_moved_on_after_the_check_is_not_a_warning(status, monkeypatch, caplog):
+def test_hf_repo_that_moved_on_after_the_check_is_not_a_warning(status, monkeypatch, caplog):
     """Another shard's card, or the owner's README, landed around the upload: the Hub refuses
     it (412 seen with a stale parent, 409 with four writers at once), so nothing is overwritten."""
     from saturate import ParquetSink
@@ -981,7 +981,7 @@ def test_a_repo_that_moved_on_after_the_check_is_not_a_warning(status, monkeypat
     assert caplog.text == ""
 
 
-def test_a_card_that_cannot_be_written_is_logged_and_the_sink_still_opens(monkeypatch, caplog):
+def test_hf_card_that_cannot_be_written_is_logged_and_the_sink_still_opens(monkeypatch, caplog):
     from saturate import ParquetSink
 
     api = FakeCardApi(upload_error=RuntimeError("403 no write access"))

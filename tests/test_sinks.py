@@ -965,13 +965,14 @@ def test_an_output_at_the_repo_root_gets_no_card(tmp_path, monkeypatch):
     assert api.uploads == []
 
 
-def test_a_repo_that_moved_on_after_the_check_is_not_a_warning(monkeypatch, caplog):
-    """Another shard's card, or the owner's README, landed between the check and the upload:
-    the Hub refuses the upload (412), so nothing is overwritten, and it is not a problem."""
+@pytest.mark.parametrize("status", [409, 412])
+def test_a_repo_that_moved_on_after_the_check_is_not_a_warning(status, monkeypatch, caplog):
+    """Another shard's card, or the owner's README, landed around the upload: the Hub refuses
+    it (412 seen with a stale parent, 409 with four writers at once), so nothing is overwritten."""
     from saturate import ParquetSink
 
-    conflict = RuntimeError("412 Precondition Failed")
-    conflict.response = SimpleNamespace(status_code=412)  # ty: ignore[unresolved-attribute]
+    conflict = RuntimeError(f"{status} conflict")
+    conflict.response = SimpleNamespace(status_code=status)  # ty: ignore[unresolved-attribute]
     api = FakeCardApi(upload_error=conflict)
     _use_fake_hub(monkeypatch, api)
     with caplog.at_level("WARNING", logger="saturate"):

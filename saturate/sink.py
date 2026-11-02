@@ -93,7 +93,8 @@ def _add_card_if_missing(api, repo: str, root: str) -> None:
         )
     except Exception as e:
         response = getattr(e, "response", None)
-        if getattr(response, "status_code", None) == 412:  # the repo moved on after the check
+        # the repo moved on after the check (412), or another commit was landing at that moment (409)
+        if getattr(response, "status_code", None) in (409, 412):
             log.info(f"{repo} changed while adding a dataset card; not adding it on this run")
         else:
             log.warning(f"could not add a dataset card to {repo}: {e}")

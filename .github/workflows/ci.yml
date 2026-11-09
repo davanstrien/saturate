@@ -9,6 +9,9 @@ on:
         type: boolean
         default: false
   workflow_dispatch:
+permissions:
+  contents: read
+
 jobs:
   test:
     # a label only matters to the slow job: adding one does not rerun the matrix
@@ -24,8 +27,10 @@ jobs:
     env:
       UV_PYTHON: ${{ matrix.python }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       - run: uv python install ${{ matrix.python }}
       - name: the lock names public PyPI only
         # a maintainer's private index or mirror would otherwise leak into it
@@ -59,8 +64,10 @@ jobs:
       UV_PYTHON: "3.13"
       SATURATE_DEEP: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       - run: uv python install 3.13
       - run: uv sync --locked
       # deep Hypothesis runs take minutes per test: past the suite's 120 s deadlock guard
@@ -72,8 +79,10 @@ jobs:
     env:
       UV_PYTHON: "3.13"
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       - run: uv python install 3.13
       - run: uv sync --locked
       - run: uv run ty check saturate tests
@@ -83,8 +92,10 @@ jobs:
     env:
       UV_PYTHON: "3.10"
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       - run: uv python install 3.10
       - run: uv sync --python 3.10 --resolution lowest-direct
       - run: uv pip list | grep -iE "^(aiohttp|anyio|fsspec|pyarrow|huggingface-hub|datasets) "

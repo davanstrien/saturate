@@ -3,13 +3,49 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Mapping, Sequence
+from typing import Any, TypedDict
+
+from saturate.signals import Gauges
+
+
+class Tick(TypedDict):
+    """One controller tick as it is recorded: the keys of a telemetry line (CONTRACT §6)."""
+
+    t: float  # seconds since the run began
+    limit: int
+    inflight: int
+    waiting: int | None
+    running: int | None
+    bp: int
+    ok: int
+    retries: int
+    input_bound: bool
+    tok_s: float
+    kv: float | None
+    hits: float | None
+    preempts: int | None
+    reason: str
+    latency_s: float | None
+    bound_by: str | None
+    source_s: float
+    prep_s: float
+    sink_s: float
+    prep_n: int
+    prep_workers: int
+    loop_lag_s: float
+
+
+# Tick records as the advisor functions take them: a run's own (list[Tick]), or partial records
+# with only the keys a function reads, so a key that may be missing is read with .get.
+Telemetry = Sequence[Mapping[str, Any]]
 
 
 def tick_record(
     t: float,
     limit: int,
     inflight: int,
-    gauges: dict | None,
+    gauges: Gauges | None,
     bp: int,
     ok: int,
     input_bound: bool,
@@ -24,8 +60,8 @@ def tick_record(
     sink_s: float = 0.0,
     loop_lag_s: float = 0.0,
     retries: int = 0,
-) -> dict:
-    g = gauges or {}
+) -> Tick:
+    g: Gauges = gauges or {}
     return {
         "t": round(t, 1),
         "limit": limit,
@@ -52,18 +88,18 @@ def tick_record(
     }
 
 
-def cut_reasons(telemetry: list[dict]) -> dict[str, int]:
+def cut_reasons(telemetry: Telemetry) -> dict[str, int]:
     """How many times the window was reduced, by the controller's stated reason (`cut:*`)."""
     return dict(Counter(t["reason"] for t in telemetry if str(t.get("reason", "")).startswith("cut:")))
 
 
-def bound_by_counts(telemetry: list[dict]) -> dict[str, int]:
+def bound_by_counts(telemetry: Telemetry) -> dict[str, int]:
     """Ticks per `bound_by` verdict (engine / source / prep / sink / loop); inconclusive ticks
     are not counted."""
     return dict(Counter(t["bound_by"] for t in telemetry if t.get("bound_by")))
 
 
-def advise_input(telemetry: list[dict], prepare_workers: int = 0) -> list[str]:
+def advise_input(telemetry: Telemetry, prepare_workers: int = 0) -> list[str]:
     """Client-side bottlenecks: when at least 30% of ticks were bound by `to_request` (prep),
     by the source iterator, or by a blocked event loop, say so with what was measured and
     the remedy. A run under three ticks is too short to diagnose (start-up and the sink's
@@ -105,7 +141,9 @@ def advise_input(telemetry: list[dict], prepare_workers: int = 0) -> list[str]:
     return hints
 
 
-def advise(telemetry: list[dict], dialect: str | None, final_limit: int, ceiling_flags: dict) -> list[str]:
+def advise(
+    telemetry: Telemetry, dialect: str | None, final_limit: int, ceiling_flags: Mapping[str, str]
+) -> list[str]:
     """Server-ceiling detection: `running` modally pinned below our limit while
     a queue stands — the server, not the client, is the bottleneck; hand back
     the exact relaunch flag."""

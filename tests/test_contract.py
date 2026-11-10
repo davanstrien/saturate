@@ -60,6 +60,7 @@ from saturate import (
 from saturate.core import Done
 from saturate.http import HttpClient, Timeouts
 from saturate.source import skip_done
+from saturate.telemetry import Tick
 from saturate.transport import Breaker
 from saturate.writer import sink_hooks
 
@@ -590,7 +591,7 @@ def test_a_slow_sink_bounds_the_rows_waiting_and_is_named_the_bottleneck(stub, t
             appended.append(record["id"])
             super().append(record)
 
-    ticks: list[dict] = []
+    ticks: list[Tick] = []
     most_waiting = 0
 
     async def go():
@@ -938,7 +939,7 @@ def test_any_2xx_is_a_success(stub, tmp_path, no_retries):
 def test_a_2xx_without_a_json_object_is_a_server_error_not_a_success(stub, no_retries, status, page):
     stub.status_for = lambda request: status
     stub.raw_for = lambda request: page
-    ticks: list[dict] = []
+    ticks: list[Tick] = []
 
     async def go():
         async with AdaptiveClient(
@@ -1155,7 +1156,7 @@ class ShrinkTo:
 def test_shrinking_the_window_holds_admissions_until_inflight_drops_below_it():
     """Four holders at once under limit 4; the limit drops to 2 while they hold; releasing them
     one by one admits a waiter only once fewer than 2 are in flight."""
-    ticks: list[dict] = []
+    ticks: list[Tick] = []
 
     async def go():
         holding: list[int] = []
@@ -1231,7 +1232,7 @@ def test_the_controller_hears_backpressure_while_the_row_is_still_retrying(stub)
     """Pressure is reported on the first failed attempt, not when the row gives up: a row
     backing off for minutes must not hide an overload from the controller meanwhile."""
     stub.status_for = lambda request: 429
-    ticks: list[dict] = []
+    ticks: list[Tick] = []
 
     async def go():
         async with AdaptiveClient(
@@ -1287,7 +1288,7 @@ def test_growing_after_a_shrink_admits_only_up_to_the_new_limit():
     """Four held at limit 4; shrink to 2, then grow to 3: three would still be too many with
     four in flight, so the queued waiter stays queued. (anyio before 4.14.2 admits it: this test pins
     the anyio floor.)"""
-    ticks: list[dict] = []
+    ticks: list[Tick] = []
 
     async def go():
         async with AdaptiveLimiter(cast(Fixed, Sequence(4, [2, 3])), on_tick=ticks.append) as limiter:

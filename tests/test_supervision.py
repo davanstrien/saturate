@@ -8,6 +8,7 @@ import pytest
 import saturate.core as core
 from saturate import AdaptiveLimiter, Fixed, ParquetSink
 from saturate.sink import as_sink
+from saturate.telemetry import Tick
 
 
 class CrashingWindow(Fixed):
@@ -122,7 +123,7 @@ def test_a_failing_signal_source_costs_the_gauges_not_the_run(monkeypatch, caplo
 
     async def go():
         enough = asyncio.Event()
-        ticks: list[dict] = []
+        ticks: list[Tick] = []
 
         def on_tick(tick):
             ticks.append(tick)

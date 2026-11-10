@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import functools
+import io
 import json as jsonlib
 import os
 import urllib.request
@@ -207,32 +208,40 @@ def environment_proxy(scheme: str, host: str, port: int | None = None) -> str | 
     return proxies.get(scheme) or proxies.get("all")
 
 
-def _file_parts(value) -> tuple[str | None, Any, str | None]:
-    """(filename, content, content type) of one entry of a request's `files`: a file object or
-    bytes, or a (filename, content[, content type]) tuple. None where the entry does not say."""
+def _file_parts(name: str, value) -> tuple[str | None, Any, str | None]:
+    """(filename, content, content type) of the entry `name` of a request's `files`. A
+    (filename, content[, content type]) tuple says them itself. A bare file object or bytes goes
+    by the base name of its path, else by `name` (never the local path), with no content type.
+    A BytesIO is read here, whole: its content is in memory already, and as bytes it can be
+    sent again."""
     if isinstance(value, tuple):
-        return value[0], value[1], value[2] if len(value) > 2 else None
-    return None, value, None
+        filename, content = value[0], value[1]
+        content_type = value[2] if len(value) > 2 else None
+    else:
+        content, content_type = value, None
+        path = getattr(content, "name", None)
+        filename = os.path.basename(path) if isinstance(path, str) else name
+    if isinstance(content, io.BytesIO):
+        content = content.getvalue()
+    return filename, content, content_type
 
 
 def resendable(files: Mapping) -> bool:
     """Whether a multipart body with these files can go on the wire a second time: every file is
-    bytes held in memory. A file object cannot: the first send reads it, and closes it."""
-    return all(isinstance(_file_parts(value)[1], bytes | bytearray) for value in files.values())
+    bytes held in memory (bytes, a bytearray or a BytesIO). Any other file object cannot: the
+    first send reads it, and closes it."""
+    return all(isinstance(_file_parts(name, value)[1], bytes | bytearray) for name, value in files.items())
 
 
 def multipart(data: Mapping | None, files: Mapping) -> aiohttp.FormData:
     """Form fields and files as one multipart body. A file is bytes or a file object, or a
-    (filename, file[, content type]) tuple. A file object is sent from its start, wherever it was
-    left (a BytesIO just written to sits at its end)."""
+    (filename, file[, content type]) tuple. A BytesIO is sent whole and a seekable file from its
+    start, wherever either was left (a BytesIO just written to sits at its end)."""
     form = aiohttp.FormData()
     for name, value in (data or {}).items():
         form.add_field(name, str(value))
     for name, value in files.items():
-        filename, fileobj, content_type = _file_parts(value)
-        if filename is None:
-            path = getattr(fileobj, "name", None)
-            filename = os.path.basename(path) if isinstance(path, str) else name  # never the local path
+        filename, fileobj, content_type = _file_parts(name, value)
         if getattr(fileobj, "seekable", lambda: False)():
             fileobj.seek(0)
         form.add_field(name, fileobj, filename=filename, content_type=content_type)

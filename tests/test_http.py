@@ -323,12 +323,25 @@ def test_bytes_can_be_sent_twice_and_an_open_file_cannot(tmp_path):
                 await client.post(f"{server.url}/v1/upload", form=multipart(None, files))
             return [body.count(b"AUDIO") for body in server.received]
 
-    assert resendable({"file": ("a.wav", b"AUDIO")}) and resendable({"file": bytearray(b"AUDIO")})
-    assert run(send_twice({"file": ("a.wav", b"AUDIO")})) == [1, 1]
+    buffer = io.BytesIO()
+    buffer.write(b"AUDIO")  # left at its end
+    for files in ({"file": ("a.wav", b"AUDIO")}, {"file": bytearray(b"AUDIO")}, {"file": ("a.wav", buffer)}):
+        assert resendable(files)
+        assert run(send_twice(files)) == [1, 1]
 
     path = tmp_path / "a.wav"
     path.write_bytes(b"AUDIO")
     with path.open("rb") as f:
-        assert not resendable({"file": f}) and not resendable({"file": ("a.wav", io.BytesIO(b"AUDIO"))})
+        assert not resendable({"file": f})
         with pytest.raises(ValueError, match="closed file"):
             run(send_twice({"file": f}))
+
+
+def test_a_file_tuple_keeps_the_filename_it_gives_even_none():
+    """Only a bare file goes by a name saturate picks; a tuple's filename is sent as given."""
+    from saturate.http import _file_parts
+
+    assert _file_parts("file", b"x") == ("file", b"x", None)
+    assert _file_parts("file", ("a.wav", b"x")) == ("a.wav", b"x", None)
+    assert _file_parts("file", (None, b"x", "audio/wav")) == (None, b"x", "audio/wav")
+    assert _file_parts("file", io.BytesIO(b"x")) == ("file", b"x", None)

@@ -1,6 +1,6 @@
 """Retry-After sleeps are capped by the retry
-budget (a 3600s header must not overrun RETRY_BUDGET_S); multipart requests
-never retry (their file objects are consumed — a re-send posts empty bodies)."""
+budget (a 3600s header must not overrun RETRY_BUDGET_S); a multipart request
+is retried when its files are held in memory, and sent once when it holds an open file."""
 
 import asyncio
 import io
@@ -175,25 +175,35 @@ def test_breaker_open_time_credited_back_to_budget(monkeypatch):
 
 
 @pytest.mark.internals
-def test_a_multipart_request_with_a_file_object_is_sent_once(monkeypatch):
-    """The first send reads and closes a file object, so there is nothing to send again."""
+def test_a_multipart_request_with_an_open_file_is_sent_once(monkeypatch, tmp_path):
+    """The first send reads and closes an open file, so there is nothing to send again."""
+    (tmp_path / "a.wav").write_bytes(b"x")
+    stream = (tmp_path / "a.wav").open("rb")
     monkeypatch.setattr(transport, "BACKOFF_BASE_S", 0.001)
     client = _Client(_Resp(500))
     body, err = asyncio.run(
         call_endpoint(
             cast(HttpClient, client),
             "http://x",
-            make_multipart_request("/upload", {"a": "1"}, {"file": ("a.wav", io.BytesIO(b"x"))}),
+            make_multipart_request("/upload", {"a": "1"}, {"file": ("a.wav", stream)}),
             Breaker(),
             _Observed(),
         )
     )
+    stream.close()
     assert body is None and err == "http 500 after retries: nope"  # the server message is kept
     assert client.posts == 1
 
 
 @pytest.mark.internals
-@pytest.mark.parametrize("files", [{"file": b"x"}, {"file": ("a.wav", bytearray(b"x"), "audio/wav")}])
+@pytest.mark.parametrize(
+    "files",
+    [
+        {"file": b"x"},
+        {"file": ("a.wav", bytearray(b"x"), "audio/wav")},
+        {"file": ("a.wav", io.BytesIO(b"x"))},
+    ],
+)
 def test_a_multipart_request_with_bytes_is_retried(monkeypatch, files):
     """Bytes can go on the wire again, so the request has the same retries as a JSON one, each
     retry with its timeouts capped to what is left of the row's budget."""
@@ -211,7 +221,9 @@ def test_a_multipart_request_with_bytes_is_retried(monkeypatch, files):
     )
     assert body is None and err == "http 500 after retries: nope"
     assert client.posts == 5 and sum(a.retry for a in observed) == 4
-    assert client.sent[0] == "absent" and all(isinstance(t, Timeouts) for t in client.sent[1:])
+    assert client.sent[0] == "absent"  # the first attempt: the client's own timeouts
+    budget = transport.RETRY_BUDGET_S
+    assert all(t.read <= budget and t.write <= budget and t.pool <= budget for t in client.sent[1:])
 
 
 @pytest.mark.internals

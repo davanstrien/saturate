@@ -16,6 +16,12 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
   produce engine error logs. The SIGKILL sweep warning now says that its usual cause
   is harmless zombies.
 
+### Fixed
+
+- `through()`: leaving the `async with`, or calling `results.stop()`, before the run had
+  started did not stop it. The run then started anyway and hung once its backlog was full.
+  A stop before the start now holds: no row is read and no request is sent.
+
 ### Known issues
 
 - A process that exits soon after a Hub Parquet stream was stopped early, for example by

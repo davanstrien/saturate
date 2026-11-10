@@ -3,6 +3,7 @@ budget (a 3600s header must not overrun RETRY_BUDGET_S); multipart requests
 never retry (their file objects are consumed — a re-send posts empty bodies)."""
 
 import asyncio
+import io
 import time
 from typing import cast
 
@@ -174,19 +175,43 @@ def test_breaker_open_time_credited_back_to_budget(monkeypatch):
 
 
 @pytest.mark.internals
-def test_multipart_never_retries():
+def test_a_multipart_request_with_a_file_object_is_sent_once(monkeypatch):
+    """The first send reads and closes a file object, so there is nothing to send again."""
+    monkeypatch.setattr(transport, "BACKOFF_BASE_S", 0.001)
     client = _Client(_Resp(500))
     body, err = asyncio.run(
         call_endpoint(
             cast(HttpClient, client),
             "http://x",
-            make_multipart_request("/upload", {"a": "1"}, {"file": b"x"}),
+            make_multipart_request("/upload", {"a": "1"}, {"file": ("a.wav", io.BytesIO(b"x"))}),
             Breaker(),
             _Observed(),
         )
     )
     assert body is None and err == "http 500 after retries: nope"  # the server message is kept
-    assert client.posts == 1  # single attempt: the file stream is already consumed
+    assert client.posts == 1
+
+
+@pytest.mark.internals
+@pytest.mark.parametrize("files", [{"file": b"x"}, {"file": ("a.wav", bytearray(b"x"), "audio/wav")}])
+def test_a_multipart_request_with_bytes_is_retried(monkeypatch, files):
+    """Bytes can go on the wire again, so the request has the same retries as a JSON one, each
+    retry with its timeouts capped to what is left of the row's budget."""
+    monkeypatch.setattr(transport, "BACKOFF_BASE_S", 0.001)
+    client = _Client(_Resp(500))
+    observed = _Observed()
+    body, err = asyncio.run(
+        call_endpoint(
+            cast(HttpClient, client),
+            "http://x",
+            make_multipart_request("/upload", {"a": "1"}, files),
+            Breaker(),
+            observed,
+        )
+    )
+    assert body is None and err == "http 500 after retries: nope"
+    assert client.posts == 5 and sum(a.retry for a in observed) == 4
+    assert client.sent[0] == "absent" and all(isinstance(t, Timeouts) for t in client.sent[1:])
 
 
 @pytest.mark.internals

@@ -15,6 +15,7 @@ import json as jsonlib
 import os
 import urllib.request
 from collections.abc import Mapping
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
@@ -206,19 +207,30 @@ def environment_proxy(scheme: str, host: str, port: int | None = None) -> str | 
     return proxies.get(scheme) or proxies.get("all")
 
 
+def _file_parts(value) -> tuple[str | None, Any, str | None]:
+    """(filename, content, content type) of one entry of a request's `files`: a file object or
+    bytes, or a (filename, content[, content type]) tuple. None where the entry does not say."""
+    if isinstance(value, tuple):
+        return value[0], value[1], value[2] if len(value) > 2 else None
+    return None, value, None
+
+
+def resendable(files: Mapping) -> bool:
+    """Whether a multipart body with these files can go on the wire a second time: every file is
+    bytes held in memory. A file object cannot: the first send reads it, and closes it."""
+    return all(isinstance(_file_parts(value)[1], bytes | bytearray) for value in files.values())
+
+
 def multipart(data: Mapping | None, files: Mapping) -> aiohttp.FormData:
-    """Form fields and files as one multipart body. A file is a file object or a
+    """Form fields and files as one multipart body. A file is bytes or a file object, or a
     (filename, file[, content type]) tuple. A file object is sent from its start, wherever it was
     left (a BytesIO just written to sits at its end)."""
     form = aiohttp.FormData()
     for name, value in (data or {}).items():
         form.add_field(name, str(value))
     for name, value in files.items():
-        if isinstance(value, tuple):
-            filename, fileobj = value[0], value[1]
-            content_type = value[2] if len(value) > 2 else None
-        else:
-            fileobj, content_type = value, None
+        filename, fileobj, content_type = _file_parts(value)
+        if filename is None:
             path = getattr(fileobj, "name", None)
             filename = os.path.basename(path) if isinstance(path, str) else name  # never the local path
         if getattr(fileobj, "seekable", lambda: False)():

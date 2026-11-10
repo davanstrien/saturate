@@ -8,7 +8,7 @@ import pytest
 
 import saturate.http as http
 from saturate.engine import _get
-from saturate.http import HttpClient, TimedOut, Timeouts, TransportError, multipart, server_root
+from saturate.http import HttpClient, TimedOut, Timeouts, TransportError, multipart, resendable, server_root
 
 OK = b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 12\r\n\r\n{"ok": true}'
 
@@ -307,3 +307,28 @@ def test_a_multipart_file_goes_by_its_base_name_and_a_stream_is_not_rewound(tmp_
 )
 def test_server_root_drops_a_final_v1_segment_only(endpoint, root):
     assert server_root(endpoint) == root
+
+
+def test_bytes_can_be_sent_twice_and_an_open_file_cannot(tmp_path):
+    """What `resendable` says is what the wire does: a form built again from the same bytes
+    carries them again; an open file is closed by the first send."""
+
+    async def ok(writer):
+        writer.write(OK)
+        await writer.drain()
+
+    async def send_twice(files):
+        async with RawServer(ok) as server, HttpClient() as client:
+            for _ in range(2):
+                await client.post(f"{server.url}/v1/upload", form=multipart(None, files))
+            return [body.count(b"AUDIO") for body in server.received]
+
+    assert resendable({"file": ("a.wav", b"AUDIO")}) and resendable({"file": bytearray(b"AUDIO")})
+    assert run(send_twice({"file": ("a.wav", b"AUDIO")})) == [1, 1]
+
+    path = tmp_path / "a.wav"
+    path.write_bytes(b"AUDIO")
+    with path.open("rb") as f:
+        assert not resendable({"file": f}) and not resendable({"file": ("a.wav", io.BytesIO(b"AUDIO"))})
+        with pytest.raises(ValueError, match="closed file"):
+            run(send_twice({"file": f}))

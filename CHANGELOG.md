@@ -50,6 +50,12 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
   with `v1` and has no `/v1` path (`http://v1-gpu:8000`) was scraped at `http://metrics`,
   so the run was blind. Only a final `/v1` path segment is removed now.
 
+- A multipart request whose files are all bytes is retried after a 5xx, a 429 or a
+  transport failure, like a JSON request. It used to be sent once whatever it held, so a
+  transient failure became an error row. A request that holds a file object is still sent
+  once: the first send reads and closes the file. A retry of a multipart request has its
+  timeouts capped to what is left of the row's retry budget.
+
 ### Known issues
 
 - A process that exits soon after a Hub Parquet stream was stopped early, for example by

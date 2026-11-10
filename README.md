@@ -459,9 +459,9 @@ becomes an error row, and `retry_errors=True` retries it on the next run.
 
 ## In a notebook or an async function
 
-`pump()` runs its own event loop, so it cannot start where one is already running: a Jupyter
-or Colab cell, or the inside of an `async def`. It raises a `RuntimeError` that says so. Run
-it in a thread there:
+`pump()` runs its own asyncio event loop, so it cannot start where one is already running: a
+Jupyter or Colab cell, or the inside of an `async def`. It raises a `RuntimeError` that says
+so. Run it in a thread there:
 
 ```python
 import asyncio
@@ -469,8 +469,12 @@ import asyncio
 stats = await asyncio.to_thread(pump, rows, to_request, parse, endpoint, "out/")
 ```
 
-Interrupting the cell does not stop a run started this way; it ends when the rows do, or when
-the kernel restarts. A re-run resumes, as always.
+Interrupting the cell does not stop a run started this way. The cell stays busy until the rows
+end, then shows `CancelledError` in place of the stats; the output is complete all the same.
+To stop a run, restart the kernel. Do not start a second run on the same output while the
+first is still going: both would request the same rows.
+
+With `nest_asyncio` applied, `asyncio.run` nests, and `pump()` runs in a cell as it is.
 
 ## Running under an agent
 

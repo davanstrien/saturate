@@ -92,8 +92,9 @@ def fast_ticks(monkeypatch):
 
 
 def test_pump_inside_a_running_loop_says_how_to_run_it_there(stub, tmp_path):
-    """A notebook cell and an async function already run an event loop. pump() refuses there
-    with its own message, before any row is read, and runs in a thread as that message says."""
+    """A notebook cell and an async function already run an event loop. asyncio refuses to
+    start pump() there; pump() raises its own message for that, with no row read, and runs in a
+    thread as the message says."""
     read: list[int] = []
 
     def counted(n):

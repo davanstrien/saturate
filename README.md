@@ -456,8 +456,10 @@ def to_request(row):
 ```
 
 A row that holds the raw audio bytes gets a content id by default, so identical clips dedupe:
-load the column undecoded (`decode=False`). A multipart request is sent once: a failure
-becomes an error row, and `retry_errors=True` retries it on the next run.
+load the column undecoded (`decode=False`). A multipart request whose files are bytes (or a
+`BytesIO`) is retried like any other. One that holds an open file is sent once (the first send reads and
+closes the file): a failure becomes an error row, and `retry_errors=True` retries it on the
+next run.
 
 ## In a notebook or an async function
 

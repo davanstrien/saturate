@@ -15,11 +15,11 @@ import pytest
 from stub_server import StubLimiter
 
 from saturate import AdaptiveClient, AdaptiveLimiter, Auto, Fixed, Stats, through
-from saturate.telemetry import advise_input, bound_by_counts, tick_record
+from saturate.telemetry import Tick, advise_input, bound_by_counts, tick_record
 from saturate.transport import Attempt
 
 
-def tick(lim: AdaptiveLimiter, dt: float = 1.0) -> dict:
+def tick(lim: AdaptiveLimiter, dt: float = 1.0) -> Tick:
     """One tick whose wall-clock is `dt` seconds."""
     lim._t_last = time.monotonic() - dt
     asyncio.run(lim._tick())

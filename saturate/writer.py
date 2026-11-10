@@ -16,12 +16,11 @@ import logging
 import time
 from collections.abc import AsyncIterable, Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Protocol
 
 import anyio
 
 from saturate.core import Done
-from saturate.sink import UNSTORABLE, error_row
+from saturate.sink import UNSTORABLE, Shard, Sink, error_row
 from saturate.stats import Stats
 from saturate.transport import usage_tokens
 
@@ -31,17 +30,6 @@ WRITER_QUEUE = 256  # finished rows waiting for the writer; a full queue makes d
 _END = object()  # put in the writer's queue after the last row
 
 
-class Sink(Protocol):
-    """What drain needs from an output. Anything with these three methods is a sink; the
-    optional extras are read by sink_hooks()."""
-
-    def existing_ids(self, retry_errors: bool = False) -> set[str]: ...
-
-    def append(self, record: dict) -> None: ...
-
-    def flush(self) -> None: ...
-
-
 @dataclasses.dataclass(frozen=True)
 class SinkHooks:
     """The optional parts of the sink contract, read in one place. A hook the sink does not
@@ -49,14 +37,14 @@ class SinkHooks:
 
     probe: Callable[[dict], None] | None  # check a record fits before it is buffered
     flush_interval_s: float | None  # flush buffered rows once the oldest has waited this long
-    begin_run: Callable | None
-    write_telemetry: Callable | None
-    write_stats: Callable | None
-    write_marker: Callable | None
+    begin_run: Callable[[Shard], None] | None  # a run on this shard starts
+    write_telemetry: Callable[[Shard, list[str]], None] | None  # the run's tick lines so far, all of them
+    write_stats: Callable[[Shard, str], None] | None  # the run's Stats as JSON
+    write_marker: Callable[[Shard], None] | None  # the shard is complete
     telemetry_every_ticks: int
 
 
-def sink_hooks(sink) -> SinkHooks:
+def sink_hooks(sink: Sink) -> SinkHooks:
     interval = getattr(sink, "flush_interval_s", None)
     return SinkHooks(
         probe=getattr(sink, "probe", None),
@@ -70,7 +58,7 @@ def sink_hooks(sink) -> SinkHooks:
 
 
 async def drain(
-    results: AsyncIterable[Done], sink, shard: tuple[int, int] = (0, 1), stats: Stats | None = None
+    results: AsyncIterable[Done], sink: Sink, shard: Shard = (0, 1), stats: Stats | None = None
 ) -> Stats:
     """Write every finished row to the sink; returns the run's Stats.
 
@@ -162,7 +150,7 @@ class _Writer:
     waiting and appends them in one call to the thread; when none arrive for the sink's flush
     interval, what the sink holds is flushed."""
 
-    def __init__(self, sink, stats: Stats):
+    def __init__(self, sink: Sink, stats: Stats):
         self.sink, self.stats = sink, stats
         self.hooks = sink_hooks(sink)
         self.failure: BaseException | None = None
@@ -309,7 +297,7 @@ def _record(done: Done, probe, stats: Stats) -> dict:
     return rec
 
 
-def _count_demoted(sink, demoted_before: int, stats: Stats) -> None:
+def _count_demoted(sink: Sink, demoted_before: int, stats: Stats) -> None:
     """Rows a flush demoted landed as error rows, not successes. Capped at what this drain
     counted: rows buffered before it started were never in these stats."""
     demoted = min(getattr(sink, "rows_demoted", 0) - demoted_before, stats.rows_processed)

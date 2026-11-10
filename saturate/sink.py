@@ -21,6 +21,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -51,6 +52,27 @@ TELEMETRY_DIR = f"{SIDECAR_DIR}/telemetry"
 
 LOCAL_FLUSH_INTERVAL_S = 10.0  # a local output's oldest buffered row is written within this
 REMOTE_FLUSH_INTERVAL_S = 60.0  # a remote output's: each write there is a slow commit or upload
+
+
+Shard = tuple[int, int]  # (rank, world): this run's shard of a fan-out
+
+
+@runtime_checkable
+class Resumable(Protocol):
+    """An output that can say which row ids it already holds: what a resume needs."""
+
+    def existing_ids(self, retry_errors: bool = False) -> set[str]: ...
+
+
+class Sink(Resumable, Protocol):
+    """What a run needs from an output: the ids it holds, and somewhere to put a record. Anything
+    with these three methods is a sink. The optional extras (probe, begin_run, write_telemetry,
+    write_stats, write_marker and two settings) are read in one place,
+    saturate.writer.sink_hooks()."""
+
+    def append(self, record: dict, /) -> None: ...
+
+    def flush(self) -> None: ...
 
 
 def _list_parts(fs, root: str) -> list[str]:
@@ -663,7 +685,9 @@ class FileSink:
         pass  # write-through
 
 
-def as_sink(output, flush_every: int | None = None, schema: pa.Schema | None = None):
+def as_sink(
+    output: str | Path | Sink, flush_every: int | None = None, schema: pa.Schema | None = None
+) -> Sink:
     """A string or Path is a ParquetSink (the CONTRACT); anything with
     existing_ids/append/flush passes through."""
     if isinstance(output, (str, Path)):

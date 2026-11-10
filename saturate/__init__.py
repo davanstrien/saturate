@@ -196,7 +196,7 @@ def _check_pump_settings(
 
 
 def _run(main: Coroutine[Any, Any, Stats]) -> Stats:
-    """`asyncio.run(main)`. Where asyncio refuses to start it, because an asyncio event loop is
+    """Run `main` with `asyncio.run`. Where asyncio refuses to start it, because an event loop is
     already running in this thread (a notebook cell, an async function), the error says how to
     call pump() there. The refusal is asyncio's own, so a loop that does let `asyncio.run` nest
     (nest_asyncio) runs pump() as it is."""

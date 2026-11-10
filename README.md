@@ -469,9 +469,9 @@ import asyncio
 stats = await asyncio.to_thread(pump, rows, to_request, parse, endpoint, "out/")
 ```
 
-Interrupting the cell does not stop a run started this way. The cell stays busy until the rows
-end, then shows `CancelledError` in place of the stats; the output is complete all the same.
-To stop a run, restart the kernel. Do not start a second run on the same output while the
+Interrupting the cell does not stop a run started this way. The cell stays busy until the run
+ends, then shows `CancelledError` in place of the stats. The run itself is not affected: it
+writes its output and stats as usual. To stop a run, restart the kernel. Do not start a second run on the same output while the
 first is still going: both would request the same rows.
 
 With `nest_asyncio` applied, `asyncio.run` nests, and `pump()` runs in a cell as it is.

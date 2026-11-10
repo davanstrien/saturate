@@ -33,6 +33,12 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
   there (`await asyncio.to_thread(pump, ...)`). It used to fail with asyncio's own message,
   `asyncio.run() cannot be called from a running event loop`. See the README.
 
+- A multipart request whose files are all bytes (or a `BytesIO`) is retried after a 5xx, a
+  429 or a transport failure, like a JSON request. It used to be sent once whatever it held, so a
+  transient failure became an error row. A request that holds an open file is still sent
+  once: the first send reads and closes the file. A retry of a multipart request has its
+  timeouts capped to what is left of the row's retry budget.
+
 ### Fixed
 
 - `through()`: leaving the `async with`, or calling `results.stop()`, before the run had

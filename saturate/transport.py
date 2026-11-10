@@ -21,7 +21,7 @@ import random
 import time
 from collections.abc import Callable
 
-from saturate.http import HttpClient, Reply, TransportError, multipart
+from saturate.http import HttpClient, Reply, TransportError, multipart, resendable
 
 log = logging.getLogger(__name__)
 
@@ -233,16 +233,16 @@ async def call_endpoint(
     loop owns the I/O and the budget. When a row's attempts fail in different ways, its error
     names the first failure too (the root cause is often the first).
 
-    Poison rows (3xx/4xx) never retry; multipart is single-attempt (file objects are consumed
-    by the wire — a re-send posts empty bodies). Budget semantics: the FIRST attempt gets the
-    client's full read window (long generations are legitimate); retries get their timeout
-    capped to the remaining budget. Time spent waiting on an open breaker deliberately does
-    NOT consume row budgets — a paused pump that recovers must resume its rows, not fail them
-    all. Backpressure counts once per row, however many of its attempts fail: a row that
-    always fails (a 500 on one bad image) would otherwise cut the window on every retry and
-    hold it at the floor. Many rows failing still counts many times; the breaker sees every
-    attempt. `budget_s` is the row's total wall-clock for its attempts (RETRY_BUDGET_S when None):
-    a retry of a request that legitimately takes minutes needs a budget of several of them."""
+    Poison rows (3xx/4xx) never retry; neither does a multipart request that holds an open file (the
+    first send reads and closes it: pass bytes for a request that can be retried). Budget semantics:
+    the FIRST attempt gets the client's full read window (long generations are legitimate); retries
+    get their timeout capped to the remaining budget. Time spent waiting on an open breaker
+    deliberately does NOT consume row budgets — a paused pump that recovers must resume its rows,
+    not fail them all. Backpressure counts once per row, however many of its attempts fail: a row
+    that always fails (a 500 on one bad image) would otherwise cut the window on every retry and
+    hold it at the floor. Many rows failing still counts many times; the breaker sees every attempt.
+    `budget_s` is the row's total wall-clock for its attempts (RETRY_BUDGET_S when None): a retry of
+    a request that legitimately takes minutes needs a budget of several of them."""
     url = f"{base.rstrip('/')}{req.route}"
     budget = RETRY_BUDGET_S if budget_s is None else budget_s
     delay, t0 = BACKOFF_BASE_S, time.monotonic()
@@ -276,24 +276,28 @@ async def call_endpoint(
         if result.breaker_fail:
             breaker.fail()
         errors.append(result.error)
-        if not result.retry or attempt == 4 or req.files is not None or not RETRY_ACTIVE:
+        if not result.retry or attempt == 4 or not _resendable(req) or not RETRY_ACTIVE:
             return None, _row_error(errors)
         wait, delay = next_wait(delay, result.retry_after)
         await asyncio.sleep(min(wait, max(0.0, left())))
     return None, _row_error(errors)
 
 
+def _resendable(req: Request) -> bool:
+    """Whether the request can be sent again after a failed attempt: a JSON body always, a
+    multipart one when its files are held in memory (`saturate.http.resendable`)."""
+    return req.kind != "multipart" or resendable(req.files or {})
+
+
 async def _send(client: HttpClient, url: str, req: Request, retry: bool, left: float) -> Reply:
-    """One attempt on the wire. A multipart request goes once with its files; a retry's phase
+    """One attempt on the wire. A multipart body is built anew for each attempt; a retry's phase
     timeouts and wall-clock are capped to what is left of the row's budget; a first attempt
     gets the client's full windows (long generations are legitimate)."""
-    if req.kind == "multipart":
-        return await client.post(url, form=multipart(req.data, req.files or {}))
+    form = multipart(req.data, req.files or {}) if req.kind == "multipart" else None
     if retry and RETRY_ACTIVE:
-        return await asyncio.wait_for(
-            client.post(url, json=req.json, timeouts=client.timeouts.capped(left)), left
-        )
-    return await client.post(url, json=req.json)
+        capped = client.timeouts.capped(left)
+        return await asyncio.wait_for(client.post(url, json=req.json, form=form, timeouts=capped), left)
+    return await client.post(url, json=req.json, form=form)
 
 
 def _read(r: Reply) -> dict | Outcome:

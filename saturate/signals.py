@@ -29,7 +29,7 @@ import dataclasses
 import logging
 import math
 from collections.abc import Callable, Iterator
-from typing import NamedTuple
+from typing import NamedTuple, Protocol, TypedDict, cast
 
 from saturate.http import HttpClient, Timeouts, TransportError, server_root
 
@@ -47,6 +47,27 @@ FIELDS: dict[str, str] = {
     "hits": "last",
     "prefix_counts": "series",
 }
+
+
+class Gauges(TypedDict, total=False):
+    """One reading of an engine's gauges. A key that is absent or None is a gauge the engine
+    does not publish (TEI has a queue depth and nothing else); FIELDS says how the series of
+    each one combine."""
+
+    waiting: int | None  # requests queued in the engine
+    running: int | None  # requests the engine is working on
+    preempts: int | None  # cumulative preemptions (SGLang: retractions)
+    kv: float | None  # KV-cache use, 0 to 1
+    hits: float | None  # prefix-cache hit rate, 0 to 1
+    prefix_counts: dict[str, dict[str, float]] | None  # vLLM's counters: label set -> {queries, hits}
+    dialect: str | None  # the engine whose metric names matched
+
+
+class SignalSource(Protocol):
+    """Where the controller's gauges come from: anything with this `read`. None means no gauges
+    this tick, and the controller then runs on throughput and backpressure alone."""
+
+    async def read(self) -> Gauges | None: ...
 
 
 class Metric(NamedTuple):
@@ -165,7 +186,7 @@ METRICS_FLAG = {
 }
 
 
-def parse_gauges(text: str) -> dict | None:
+def parse_gauges(text: str) -> Gauges | None:
     """Extract waiting/running/kv/hits/preempts + dialect from a /metrics body, as METRICS
     says. `preempts` is the engine's cumulative preemption count (SGLang: retractions), summed
     over its series. `prefix_counts` is vLLM's cumulative prefix-cache token counts per series
@@ -188,7 +209,7 @@ def parse_gauges(text: str) -> dict | None:
         else:
             series = out[metric.field] = out[metric.field] or {}
             series.setdefault(labels, {})[metric.key] = value
-    return out if seen else None
+    return cast(Gauges, out) if seen else None  # the keys are FIELDS' and `dialect`: Gauges' own
 
 
 class Null:
@@ -196,7 +217,7 @@ class Null:
 
     dialect: str | None = None
 
-    async def read(self) -> dict | None:
+    async def read(self) -> Gauges | None:
         return None
 
 
@@ -223,7 +244,8 @@ class HttpScrape:
         self.engine: str | None = None
         self.reason: str | None = None  # why the last read had no gauges
         self.dialect: str | None = None
-        self._prefix: dict | None = None  # vLLM's prefix-cache counters at the last good read
+        # vLLM's prefix-cache counters at the last good read
+        self._prefix: dict[str, dict[str, float]] | None = None
 
     def identify(self, probe: Probe) -> None:
         """Scrape the probed engine's own metrics path. An engine that reports its metrics
@@ -235,7 +257,7 @@ class HttpScrape:
             self._off = True
             self.reason = "the engine reports its metrics endpoint off"
 
-    async def read(self) -> dict | None:
+    async def read(self) -> Gauges | None:
         if self._off:
             if not self._blind:
                 self._blind = True
@@ -286,7 +308,7 @@ class HttpScrape:
             log.info(f"metrics scrape recovered ({self.dialect})")
         return gauges
 
-    def _hit_rate(self, counts: dict | None) -> float | None:
+    def _hit_rate(self, counts: dict[str, dict[str, float]] | None) -> float | None:
         """vLLM's prefix-cache hit rate since the last good read: new hit tokens over new query
         tokens, over every series. None (counted as no evidence of reuse) on the first reading,
         after a missed read, when no query arrived since the last one, and when the readings do

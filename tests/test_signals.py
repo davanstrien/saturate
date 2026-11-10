@@ -420,7 +420,7 @@ def test_every_metric_row_is_read_in_both_spellings_into_its_field():
         g = parse_gauges(f'{full}{{engine="0"}} 3\n')
         assert g is not None and g["dialect"] == m.engine, full
         want = {'{engine="0"}': {m.key: 3.0}} if FIELDS[m.field] == "series" else 3
-        assert g[m.field] == want, full
+        assert dict(g)[m.field] == want, full  # a key chosen at run time: read as a plain dict
 
 
 def test_the_sample_parser_skips_what_is_not_a_finite_sample():

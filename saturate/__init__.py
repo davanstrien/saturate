@@ -42,7 +42,7 @@ from saturate.source import (
     stream,
 )
 from saturate.sources import bucket_rows, dataset_rows
-from saturate.telemetry import advise, advise_input, bound_by_counts, cut_reasons
+from saturate.telemetry import Tick, advise, advise_input, bound_by_counts, cut_reasons
 from saturate.transport import (
     Attempt,
     FatalTransportError,
@@ -426,7 +426,7 @@ async def _pump(
         except Exception as e:
             log.warning(f"telemetry write failed (non-fatal): {e}")
 
-    def on_tick(rec: dict) -> None:  # periodically the trajectory so far lands on storage, so a
+    def on_tick(rec: Tick) -> None:  # periodically the trajectory so far lands on storage, so a
         nonlocal writer, next_at  # reader sees a partial run, not only a finished one (CONTRACT §6)
         lines.append(json.dumps(rec))
         if len(lines) >= next_at and write_lines is not None and (writer is None or writer.done()):

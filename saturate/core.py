@@ -25,8 +25,8 @@ import anyio
 from saturate import transport
 from saturate.controller import TICK_S, Auto, Fixed, Obs
 from saturate.http import HttpClient, Timeouts
-from saturate.signals import HttpScrape, Null, probe
-from saturate.telemetry import tick_record
+from saturate.signals import Gauges, HttpScrape, Null, SignalSource, probe
+from saturate.telemetry import Tick, tick_record
 from saturate.transport import Attempt, Breaker, FatalTransportError, Request, call_endpoint, coerce_request
 
 log = logging.getLogger(__name__)
@@ -143,17 +143,20 @@ class AdaptiveLimiter:
     """
 
     def __init__(
-        self, window: Fixed | Auto | None = None, signals=None, on_tick: Callable[[dict], None] | None = None
+        self,
+        window: Fixed | Auto | None = None,
+        signals: SignalSource | None = None,
+        on_tick: Callable[[Tick], None] | None = None,
     ):
         self.controller = window or Auto()
-        self.signals = signals or Null()
+        self.signals: SignalSource = signals or Null()
         self.on_tick = on_tick
         # the admission window: the controller resizes it each tick. Shrinking never evicts a
         # holder; it holds new admissions until fewer than the new limit are in flight
         self._capacity = anyio.CapacityLimiter(int(getattr(self.controller, "initial", 16)))
         self._counts = _TickCounts()
         self.retries_total = 0  # retry attempts over the run (backpressure counts rows, not attempts)
-        self.ticks: list[dict] = []
+        self.ticks: list[Tick] = []
         self.tokens_total = 0
         self._wait = {"source": 0.0, "acquire": 0.0, "prep": 0.0, "sink": 0.0}  # seconds since the last tick
         self._prep_n = 0  # to_request calls measured since the last tick
@@ -292,7 +295,7 @@ class AdaptiveLimiter:
             await asyncio.sleep(TICK_S)
             await self._tick()
 
-    async def _read_gauges(self) -> dict | None:
+    async def _read_gauges(self) -> Gauges | None:
         """The signal source's gauges for this tick; None when it has none, or when it raised.
         Gauges are advice to the controller: a source that fails costs the tick its gauges
         (blind mode, as for an endpoint without metrics), never the run. A run of failures is
@@ -323,7 +326,7 @@ class AdaptiveLimiter:
         # the tick slept TICK_S and scraped; anything beyond that is time the loop was blocked
         loop_lag_s = max(0.0, dt - TICK_S - (now - t_scrape))
         bound_by, input_bound = self._bound_by(dt, loop_lag_s)
-        g = gauges or {}
+        g: Gauges = gauges or {}
         # zero tokens with requests in flight is a reading (a stalled or slow engine);
         # None means unobservable: nothing in flight, or an endpoint that never reports usage
         observable = self.inflight > 0 and self.tokens_total > 0
@@ -384,7 +387,7 @@ class AdaptiveClient:
         headers: dict | None = None,
         read_timeout: float = 1800.0,
         signal_source: str = "auto",
-        on_tick: Callable[[dict], None] | None = None,
+        on_tick: Callable[[Tick], None] | None = None,
         retry_budget_s: float | None = None,
         timeouts: dict[str, float] | None = None,
         proxy: str | bool | None = None,

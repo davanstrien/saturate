@@ -404,19 +404,20 @@ class AdaptiveClient:
         self._timeouts = Timeouts(read=read_timeout, **(timeouts or {}))
         self._headers, self._proxy = headers or {}, proxy
         self._signal_source, self._window, self._on_tick = signal_source, window, on_tick
-        self.breaker = Breaker()
-        self._client, self.limiter = self._build()
+        self._client, self.limiter, self.breaker = self._build()
 
-    def _build(self) -> tuple[HttpClient, AdaptiveLimiter]:
-        """A fresh HTTP client and limiter. Built at construction, so neither is ever None; the
-        client opens no connection and the limiter starts no tick loop until `async with`."""
+    def _build(self) -> tuple[HttpClient, AdaptiveLimiter, Breaker]:
+        """A fresh HTTP client, limiter and breaker: the objects a run uses and leaves spent.
+        Built at construction, so none is ever None; the client opens no connection and the
+        limiter starts no tick loop until `async with`."""
         client = HttpClient(headers=self._headers, timeouts=self._timeouts, proxy=self._proxy)
         signals = Null() if self._signal_source == "none" else HttpScrape(client, self.base)
-        return client, AdaptiveLimiter(self._window, signals=signals, on_tick=self._on_tick)
+        limiter = AdaptiveLimiter(self._window, signals=signals, on_tick=self._on_tick)
+        return client, limiter, Breaker()
 
     async def __aenter__(self):
         if self._client.closed:  # entered again after an earlier `async with`: start fresh
-            self._client, self.limiter = self._build()
+            self._client, self.limiter, self.breaker = self._build()
         try:
             await self._begin()
             await self.limiter.__aenter__()

@@ -314,8 +314,9 @@ class ParquetSink:
     def probe(self, record: dict) -> None:
         """Raise (TypeError/ValueError/OverflowError) if this record cannot serialize into
         THIS sink's schema — drain turns that into an error row before buffering, with the
-        row's tokens still counted. flush() is the guarantee (a row it cannot store becomes
-        an error row there too); probe is the early check that keeps stats exact."""
+        row's tokens still counted. probe is the early check that keeps stats exact. Without
+        a declared schema, flush() is the guarantee: a row it cannot store becomes an error row
+        there too. With one, flush() raises for a row that was appended without this check."""
         if self._declared is None:
             if not self._seeded:
                 self._seed_schema()

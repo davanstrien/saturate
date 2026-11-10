@@ -11,6 +11,7 @@ import http.client
 import json
 import logging
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -28,13 +29,49 @@ from saturate.transport import PROBE_HEADERS, probe_body
 log = logging.getLogger(__name__)
 
 
+_HAS_MODULE = "import importlib.util, sys; sys.exit(importlib.util.find_spec(sys.argv[1]) is None)"
+
+
+def _has_module(python: str, module: str) -> bool:
+    """Whether the interpreter `python` has `module` installed, asked without importing it. An
+    interpreter that cannot be started, or does not answer in 30 s (a broken shim), has not."""
+    try:
+        asked = subprocess.run(
+            [python, "-c", _HAS_MODULE, module],
+            check=False,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return asked.returncode == 0
+
+
+def python_with(module: str) -> str:
+    """The Python to start a server that needs `module` with: this process's own if the module
+    is installed there, else the first `python3` on PATH where it is. An engine image keeps its
+    server in an environment of its own, and a script started with `uv run` runs in another,
+    which comes first on PATH. When the module is installed nowhere, this process's own: the
+    server's import error then says so."""
+    candidates = [sys.executable]
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        python = shutil.which("python3", path=directory)
+        if python is not None:
+            candidates.append(python)
+    for python in candidates:
+        if _has_module(python, module):
+            return python
+    return sys.executable
+
+
 # boot templates per engine; ceiling flags live in signals.CEILING_FLAG
 def _boot(engine: str, model: str, port: int, extra: list[str]) -> list[str]:
     if engine == "vllm":
         return ["vllm", "serve", model, "--port", str(port), *extra]
     if engine == "sglang":
         return [
-            sys.executable,
+            python_with("sglang"),
             "-m",
             "sglang.launch_server",
             "--model-path",

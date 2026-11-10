@@ -696,6 +696,26 @@ def test_a_client_can_be_entered_again(stub):
         assert error is None and body["choices"]
 
 
+def test_a_client_entered_again_has_a_new_breaker(stub, quick_breaker):
+    """The server is down for the first run and its breaker gives up. The server comes back;
+    the same client, entered again, must not start from the breaker that gave up."""
+
+    async def use(client):
+        async with client:
+            return await client.post(default_to_request({"text": "hi"}))
+
+    client = AdaptiveClient(stub.endpoint, signal_source="none")
+    stub.status_for = lambda request: 500
+    with pytest.raises(FatalTransportError, match="circuit breaker"):
+        asyncio.run(use(client))
+    assert client.breaker.opens == 1
+
+    stub.status_for = lambda request: 200
+    body, error = asyncio.run(use(client))
+    assert error is None and body["choices"]
+    assert client.breaker.opens == 0
+
+
 def test_through_needs_the_client_entered(stub):
     async def go():
         client = AdaptiveClient(stub.endpoint, signal_source="none")  # never entered

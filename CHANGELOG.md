@@ -16,6 +16,12 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
   produce engine error logs. The SIGKILL sweep warning now says that its usual cause
   is harmless zombies.
 
+### Fixed
+
+- `AdaptiveClient`: a client entered a second time kept the circuit breaker of its first
+  run. After a run whose breaker had given up, every request of the next run failed at
+  once, and `breaker.opens` carried over. Each `async with` now starts with a new breaker.
+
 ### Known issues
 
 - A process that exits soon after a Hub Parquet stream was stopped early, for example by

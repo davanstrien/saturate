@@ -21,6 +21,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Protocol
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -51,6 +52,26 @@ TELEMETRY_DIR = f"{SIDECAR_DIR}/telemetry"
 
 LOCAL_FLUSH_INTERVAL_S = 10.0  # a local output's oldest buffered row is written within this
 REMOTE_FLUSH_INTERVAL_S = 60.0  # a remote output's: each write there is a slow commit or upload
+
+
+Shard = tuple[int, int]  # (rank, world): this run's shard of a fan-out
+
+
+class Resumable(Protocol):
+    """An output that can say which row ids it already holds: what a resume needs."""
+
+    def existing_ids(self, retry_errors: bool = False) -> set[str]: ...
+
+
+class Sink(Resumable, Protocol):
+    """What a run needs from an output: the ids it holds, and somewhere to put a record. Anything
+    with these three methods is a sink. The optional extras (probe, begin_run, write_telemetry,
+    write_stats, write_marker and two settings) are read in one place,
+    saturate.writer.sink_hooks()."""
+
+    def append(self, record: dict, /) -> None: ...
+
+    def flush(self) -> None: ...
 
 
 def _list_parts(fs, root: str) -> list[str]:
@@ -550,18 +571,18 @@ class ParquetSink:
             if not demoted:
                 return cast
 
-    def begin_run(self, shard: tuple[int, int]) -> None:
+    def begin_run(self, shard: Shard) -> None:
         """A new run on this shard: its telemetry lands in a new file (a crashed run's partial
         trajectory is kept; the marker alone cannot end a run that never returned)."""
         self._telemetry_names.pop(shard[0], None)
 
-    def write_marker(self, shard: tuple[int, int]) -> None:
+    def write_marker(self, shard: Shard) -> None:
         self.fs.makedirs(f"{self.root}/{COMPLETIONS_DIR}", exist_ok=True)
         with self.fs.open(f"{self.root}/{COMPLETIONS_DIR}/shard-{shard[0]}.done", "wb") as f:
             f.write(b"done")
         self._telemetry_names.pop(shard[0], None)  # the marker ends a run: the next one gets a new file
 
-    def write_stats(self, shard: tuple[int, int], stats_json: str) -> None:
+    def write_stats(self, shard: Shard, stats_json: str) -> None:
         """Console-facing run summary beside the marker (CONTRACT §5): exact
         final counts + shard geometry, so a storage-only reader never has to
         approximate from telemetry ticks or open parquet."""
@@ -573,7 +594,7 @@ class ParquetSink:
         with self.fs.open(f"{self.root}/{COMPLETIONS_DIR}/stats-{shard[0]}.json", "wb") as f:
             f.write(_json.dumps(payload).encode())
 
-    def write_telemetry(self, shard: tuple[int, int], lines: list[str]) -> None:
+    def write_telemetry(self, shard: Shard, lines: list[str]) -> None:
         """One telemetry file per run and shard: the name is chosen on the first call and every
         later call rewrites the whole file from the full tick list, until write_marker() ends
         the run. Whole-file rewrite rather than append: object stores have no append, and a
@@ -611,7 +632,7 @@ class FileSink:
         self._accepted = False  # a record has passed probe: rejections are now the data's
         self._rejected = 0
 
-    def begin_run(self, shard: tuple[int, int]) -> None:
+    def begin_run(self, shard: Shard) -> None:
         """A new pump() run: the first-rows check starts again (a sink can serve several runs)."""
         self._accepted = False
         self._rejected = 0
@@ -663,7 +684,9 @@ class FileSink:
         pass  # write-through
 
 
-def as_sink(output, flush_every: int | None = None, schema: pa.Schema | None = None):
+def as_sink(
+    output: str | Path | Sink, flush_every: int | None = None, schema: pa.Schema | None = None
+) -> Sink:
     """A string or Path is a ParquetSink (the CONTRACT); anything with
     existing_ids/append/flush passes through."""
     if isinstance(output, (str, Path)):

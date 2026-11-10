@@ -15,11 +15,12 @@ import hashlib
 import json
 import numbers
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from concurrent.futures import Executor, ThreadPoolExecutor
 from functools import partial
-from typing import NoReturn
+from typing import NoReturn, cast
 
+from saturate.sink import ParquetSink, Resumable
 from saturate.stats import Stats
 
 BYTE_FORMATS = ("B", "b", "c")  # memoryview formats whose items are single bytes
@@ -129,7 +130,10 @@ stream = normalize  # the README-facing name
 
 
 def skip_done(
-    rows: Iterable[tuple[str, dict]], done, retry_errors: bool = False, stats: Stats | None = None
+    rows: Iterable[tuple[str, dict]],
+    done: Collection[str] | Resumable | str,
+    retry_errors: bool = False,
+    stats: Stats | None = None,
 ) -> Iterator[tuple[str, dict]]:
     """Exact resume filter + within-run dedup (first admission wins).
 
@@ -138,12 +142,11 @@ def skip_done(
     `stats` when given (rows_total / rows_done_prior / rows_errored_prior / rows_deduped);
     rows_errored_prior counts the skipped rows whose only record is an error."""
     if isinstance(done, str):
-        from saturate.sink import ParquetSink
-
         done = ParquetSink(done, create=False)  # a resume check reads; it never creates the output
     error_only: set[str] = set()
-    if hasattr(done, "existing_ids"):
-        sink, done = done, done.existing_ids(retry_errors=retry_errors)
+    if hasattr(done, "existing_ids"):  # a sink, or anything else that can say what it holds
+        sink = cast(Resumable, done)
+        done = sink.existing_ids(retry_errors=retry_errors)
         error_only = getattr(sink, "error_only_ids", set()) if not retry_errors else set()
     seen: set[str] = set()
     for id_, row in rows:

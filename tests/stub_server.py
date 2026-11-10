@@ -126,6 +126,7 @@ class StubServer:
         self._ready.set()
         async with server:
             await self._stop.wait()
+            server.close()  # no new connection from here: every handler is one of those ended below
             await self._end_open_connections()
 
     async def _end_open_connections(self) -> None:

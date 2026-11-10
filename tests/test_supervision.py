@@ -10,19 +10,23 @@ from saturate import AdaptiveLimiter, Fixed, ParquetSink
 from saturate.sink import as_sink
 
 
+class CrashingWindow(Fixed):
+    """A window whose controller fails at its first decision: the way these tests crash the
+    tick loop."""
+
+    def decide(self, obs, limit):
+        raise RuntimeError("controller bug")
+
+
 @pytest.mark.internals
 def test_crashed_tick_loop_surfaces(monkeypatch):
     monkeypatch.setattr(core, "TICK_S", 0.01)
 
-    class BadSignals:
-        async def read(self):
-            raise RuntimeError("scrape bug")
-
     async def go():
-        async with AdaptiveLimiter(signals=BadSignals()):
+        async with AdaptiveLimiter(CrashingWindow(4)):
             await asyncio.sleep(0.1)
 
-    with pytest.raises(RuntimeError, match="scrape bug"):
+    with pytest.raises(RuntimeError, match="controller bug"):
         asyncio.run(go())
 
 
@@ -34,19 +38,14 @@ def test_client_closed_when_tick_loop_crashed(monkeypatch):
 
     monkeypatch.setattr(core, "TICK_S", 0.01)
 
-    class BadSignals:
-        async def read(self):
-            raise RuntimeError("scrape bug")
-
     holder = []
 
     async def go():
-        async with AdaptiveClient("http://127.0.0.1:1", signal_source="none") as c:
+        async with AdaptiveClient("http://127.0.0.1:1", CrashingWindow(4), signal_source="none") as c:
             holder.append(c)
-            c.limiter.signals = BadSignals()
             await asyncio.sleep(0.05)
 
-    with pytest.raises(RuntimeError, match="scrape bug"):
+    with pytest.raises(RuntimeError, match="controller bug"):
         asyncio.run(go())
     assert holder[0]._client.closed
 
@@ -59,12 +58,8 @@ def test_admission_fails_fast_after_tick_death(monkeypatch):
 
     monkeypatch.setattr(core, "TICK_S", 0.01)
 
-    class BadSignals:
-        async def read(self):
-            raise RuntimeError("scrape bug")
-
     async def go():
-        async with AdaptiveLimiter(signals=BadSignals()) as lim:
+        async with AdaptiveLimiter(CrashingWindow(4)) as lim:
             await asyncio.sleep(0.05)  # let the tick loop die
             async with lim.slot():
                 pass
@@ -82,12 +77,8 @@ def test_blocked_admission_fails_after_tick_death(monkeypatch):
 
     monkeypatch.setattr(core, "TICK_S", 0.01)
 
-    class BadSignals:
-        async def read(self):
-            raise RuntimeError("scrape bug")
-
     async def go():
-        async with AdaptiveLimiter(window=Fixed(1), signals=BadSignals()) as lim:
+        async with AdaptiveLimiter(CrashingWindow(1)) as lim:
             first = lim.slot()
             await first.__aenter__()  # fill the window
             waiter = asyncio.create_task(lim.slot().__aenter__())
@@ -105,17 +96,53 @@ def test_body_exception_wins_over_tick_crash(monkeypatch):
     primary body exception."""
     monkeypatch.setattr(core, "TICK_S", 0.01)
 
-    class BadSignals:
-        async def read(self):
-            raise RuntimeError("scrape bug")
-
     async def go():
-        async with AdaptiveLimiter(signals=BadSignals()):
+        async with AdaptiveLimiter(CrashingWindow(4)):
             await asyncio.sleep(0.05)
             raise ValueError("primary")
 
     with pytest.raises(ValueError, match="primary"):
         asyncio.run(go())
+
+
+@pytest.mark.internals
+def test_a_failing_signal_source_costs_the_gauges_not_the_run(monkeypatch, caplog):
+    """Gauges are advice: a signal source that raises leaves its ticks without gauges and the
+    controller running. The source here fails twice, reads twice, then fails for good: each run
+    of failures is logged once, and so is the recovery between them."""
+    monkeypatch.setattr(core, "TICK_S", 0.01)
+    readings = iter([OSError("scrape failed 1"), OSError("scrape failed 2"), {"waiting": 3}, {"waiting": 3}])
+
+    class FlakySignals:
+        async def read(self):
+            reading = next(readings, OSError("scrape failed again"))
+            if isinstance(reading, Exception):
+                raise reading
+            return reading
+
+    async def go():
+        enough = asyncio.Event()
+        ticks: list[dict] = []
+
+        def on_tick(tick):
+            ticks.append(tick)
+            if len(ticks) >= 6:
+                enough.set()
+
+        async with AdaptiveLimiter(Fixed(4), signals=FlakySignals(), on_tick=on_tick) as limiter:
+            await asyncio.wait_for(enough.wait(), 10)
+            async with limiter.slot():  # admission still works: the controller loop is alive
+                pass
+        return ticks[:6]
+
+    with caplog.at_level("INFO", logger="saturate"):
+        ticks = asyncio.run(go())
+    assert [tick["waiting"] for tick in ticks] == [None, None, 3, 3, None, None]
+    assert [record.message for record in caplog.records if "signal source" in record.message] == [
+        "signal source failed: OSError('scrape failed 1'); running without gauges until it recovers",
+        "signal source reads again",
+        "signal source failed: OSError('scrape failed again'); running without gauges until it recovers",
+    ]
 
 
 def test_fixed_zero_raises():

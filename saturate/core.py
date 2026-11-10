@@ -162,6 +162,7 @@ class AdaptiveLimiter:
         self._latencies: deque[float] = deque(maxlen=128)  # successful attempts only; recent is what matters
         self._task: asyncio.Task | None = None
         self._closing = False  # __aexit__ has begun: the controller loop is being stopped
+        self._signals_failing = False  # the signal source's last read raised
         self._t0 = self._t_last = time.monotonic()
         self._last_tokens = 0
 
@@ -263,6 +264,7 @@ class AdaptiveLimiter:
     async def __aenter__(self):
         self._t0 = self._t_last = time.monotonic()
         self._closing = False  # entered again after an earlier exit: supervise the new loop
+        self._signals_failing = False  # and warn again if the source still fails
         self._task = asyncio.create_task(self._loop())
         return self
 
@@ -290,9 +292,26 @@ class AdaptiveLimiter:
             await asyncio.sleep(TICK_S)
             await self._tick()
 
+    async def _read_gauges(self) -> dict | None:
+        """The signal source's gauges for this tick; None when it has none, or when it raised.
+        Gauges are advice to the controller: a source that fails costs the tick its gauges
+        (blind mode, as for an endpoint without metrics), never the run. A run of failures is
+        logged once, when it starts, and once more when the source reads again."""
+        try:
+            gauges = await self.signals.read()
+        except Exception as e:
+            if not self._signals_failing:
+                log.warning(f"signal source failed: {e!r}; running without gauges until it recovers")
+            self._signals_failing = True
+            return None
+        if self._signals_failing:
+            log.info("signal source reads again")
+        self._signals_failing = False
+        return gauges
+
     async def _tick(self):
         t_scrape = time.monotonic()
-        gauges = await self.signals.read()
+        gauges = await self._read_gauges()
         # everything since the last tick, read together with no await in between: reports that
         # arrived during the scrape count in this decision, and a cancelled scrape loses none
         counts, self._counts = self._counts, _TickCounts()

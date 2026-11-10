@@ -140,7 +140,7 @@ def test_a_failing_signal_source_costs_the_gauges_not_the_run(monkeypatch, caplo
     assert [tick["waiting"] for tick in ticks] == [None, None, 3, 3, None, None]
     assert [record.message for record in caplog.records if "signal source" in record.message] == [
         "signal source failed: OSError('scrape failed 1'); running without gauges until it recovers",
-        "signal source recovered",
+        "signal source reads again",
         "signal source failed: OSError('scrape failed again'); running without gauges until it recovers",
     ]
 

@@ -264,6 +264,7 @@ class AdaptiveLimiter:
     async def __aenter__(self):
         self._t0 = self._t_last = time.monotonic()
         self._closing = False  # entered again after an earlier exit: supervise the new loop
+        self._signals_failing = False  # and warn again if the source still fails
         self._task = asyncio.create_task(self._loop())
         return self
 
@@ -304,7 +305,7 @@ class AdaptiveLimiter:
             self._signals_failing = True
             return None
         if self._signals_failing:
-            log.info("signal source recovered")
+            log.info("signal source reads again")
         self._signals_failing = False
         return gauges
 

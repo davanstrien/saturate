@@ -5,6 +5,7 @@ not only the leader."""
 
 import os
 import socket
+import sys
 
 import pytest
 
@@ -68,3 +69,40 @@ def test_a_port_already_in_use_is_refused_before_anything_is_spawned():
         with pytest.raises(RuntimeError, match="already in use"):
             eng.__enter__()
         assert eng.proc is None  # nothing was spawned
+
+
+def _fake_python(directory, has_module: bool) -> str:
+    """A `python3` in `directory` that answers the has-module check with yes or no."""
+    directory.mkdir()
+    python = directory / "python3"
+    python.write_text(f"#!/bin/sh\nexit {0 if has_module else 1}\n")
+    python.chmod(0o755)
+    return str(python)
+
+
+def test_python_with_is_this_python_when_it_has_the_module():
+    from saturate.engine import python_with
+
+    assert python_with("json") == sys.executable
+
+
+def test_python_with_finds_the_first_python_on_path_that_has_the_module(tmp_path, monkeypatch):
+    """The script's own environment has no sglang (as under `uv run` on the SGLang image): the
+    SGLang boot command uses the first python3 on PATH that has it, past one that has not."""
+    from saturate.engine import _boot, python_with
+
+    _fake_python(tmp_path / "script-env", has_module=False)
+    image_python = _fake_python(tmp_path / "image-env", has_module=True)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(tmp_path / "script-env"), str(tmp_path / "image-env")]))
+    assert python_with("no_such_module_here") == image_python
+
+    monkeypatch.setattr("saturate.engine.python_with", lambda module: image_python)
+    assert _boot("sglang", "org/model", 8000, ["--x"])[:3] == [image_python, "-m", "sglang.launch_server"]
+
+
+def test_python_with_falls_back_to_this_python(tmp_path, monkeypatch):
+    from saturate.engine import python_with
+
+    _fake_python(tmp_path / "script-env", has_module=False)
+    monkeypatch.setenv("PATH", str(tmp_path / "script-env"))
+    assert python_with("no_such_module_here") == sys.executable

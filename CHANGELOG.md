@@ -50,6 +50,11 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
   with `v1` and has no `/v1` path (`http://v1-gpu:8000`) was scraped at `http://metrics`,
   so the run was blind. Only a final `/v1` path segment is removed now.
 
+- `Engine(engine="sglang")` starts the server with the Python that has sglang: its own if
+  it has, else the first `python3` on PATH that has. It used to start it with the script's
+  own Python, which under `uv run` on the SGLang image has no sglang, so each recipe looked
+  the image's Python up itself and passed `cmd=`.
+
 ### Known issues
 
 - A process that exits soon after a Hub Parquet stream was stopped early, for example by

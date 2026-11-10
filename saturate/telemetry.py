@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import Any, TypedDict
 
-if TYPE_CHECKING:
-    from saturate.signals import Gauges
+from saturate.signals import Gauges
 
 
 class Tick(TypedDict):
@@ -37,8 +36,8 @@ class Tick(TypedDict):
     loop_lag_s: float
 
 
-# Tick records as the advisor reads them: a run's own (list[Tick]), or lines read back from a
-# telemetry file, which an older version wrote with fewer keys. So every key is read with .get.
+# Tick records as the advisor functions take them: a run's own (list[Tick]), or partial records
+# with only the keys a function reads, so a key that may be missing is read with .get.
 Telemetry = Sequence[Mapping[str, Any]]
 
 

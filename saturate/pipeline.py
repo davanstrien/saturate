@@ -88,12 +88,13 @@ class _Run:
     prepare: anyio.Semaphore  # request bodies built but not yet admitted
     backlog: anyio.Semaphore  # rows started but not yet taken from `results`
     prepare_threads: anyio.CapacityLimiter | None  # None: to_request runs on the event loop
-    reader: _Reader | None = None
+    reader: _Reader  # built with the run, started by the feeder: a stop before the start still stops it
     failure: BaseException | None = None  # the first failure: the error the run raises
     held: list[Done] = dataclasses.field(default_factory=list)  # fail_fast: errors before a success
     succeeded: bool = False
     discarding: bool = False  # fail_fast gave up: finished rows are dropped, not stored
-    scope: anyio.CancelScope | None = None  # the feeder's and row tasks' scope
+    # the feeder's and row tasks' scope; cancelled before they start, they stop as they start
+    scope: anyio.CancelScope = dataclasses.field(default_factory=anyio.CancelScope)
     # finished rows; unbounded because the backlog is the bound
     results: asyncio.Queue = dataclasses.field(default_factory=asyncio.Queue)
     finished: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)  # no more rows will come
@@ -107,10 +108,8 @@ class _Run:
         self.stop()
 
     def stop(self) -> None:
-        if self.reader is not None:
-            self.reader.stop()
-        if self.scope is not None:
-            self.scope.cancel()
+        self.reader.stop()
+        self.scope.cancel()
 
     def publish(self, done: Done) -> None:
         """Put a finished row in `results`. No await: once a row is parsed it is never lost to
@@ -198,10 +197,11 @@ async def through(
         prepare=anyio.Semaphore(max(2 * prepare_workers, 4)),
         backlog=anyio.Semaphore(room),
         prepare_threads=anyio.CapacityLimiter(prepare_workers) if prepare_workers else None,
+        reader=_Reader(rows),
     )
     caller_error: BaseException | None = None
     async with anyio.create_task_group() as group:
-        group.start_soon(_produce, run, rows)
+        group.start_soon(_produce, run)
         try:
             yield Results(run)
         except BaseException as e:
@@ -233,13 +233,13 @@ def _default_backlog(limiter: AdaptiveLimiter, fail_fast: int) -> int:
     return int(most) + max(0, fail_fast) + 2048
 
 
-async def _produce(run: _Run, rows: Iterable[tuple[str, dict]]) -> None:
-    """The feeder and its row tasks, in their own task group: a failure cancels them, not the
+async def _produce(run: _Run) -> None:
+    """The feeder and its row tasks, in the run's own scope: a failure cancels them, not the
     caller reading `results`. The end marker tells the caller there is no more."""
     try:
-        async with anyio.create_task_group() as row_tasks:
-            run.scope = row_tasks.cancel_scope
-            await _feed(run, rows, row_tasks)
+        with run.scope:
+            async with anyio.create_task_group() as row_tasks:
+                await _feed(run, row_tasks)
     finally:
         if not run.discarding and not isinstance(run.failure, FatalTransportError):
             run.publish_held()  # the input ended (or raised, or the run stopped) before fail_fast rows
@@ -247,10 +247,10 @@ async def _produce(run: _Run, rows: Iterable[tuple[str, dict]]) -> None:
         run.finished.set()
 
 
-async def _feed(run: _Run, rows: Iterable[tuple[str, dict]], row_tasks: TaskGroup) -> None:
+async def _feed(run: _Run, row_tasks: TaskGroup) -> None:
     """Start a row task per row, when there is room in the backlog and the prepare limit."""
     limiter = run.limiter
-    reader = run.reader = _Reader(rows)
+    reader = run.reader
     reader.start()
     try:
         while True:
@@ -317,6 +317,7 @@ class _Reader:
         self._room.release()
 
     def stop(self) -> None:
+        """Stop reading. Before start() too: the thread then exits before its first read."""
         self._stopped.set()
         self._room.release()  # wake the thread if it is waiting for room
 

@@ -16,6 +16,11 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
   produce engine error logs. The SIGKILL sweep warning now says that its usual cause
   is harmless zombies.
 
+- An endpoint with `/v1` that is not its last path segment (`.../v1beta/openai`, or an
+  endpoint that already holds a route, `.../v1/chat/completions`) is no longer cut there:
+  its `/metrics`, `/health` and probe paths are read under the full endpoint, not at the
+  host root. `endpoint` is the API base; the route is given separately (`route=`).
+
 ### Fixed
 
 - `through()`: leaving the `async with`, or calling `results.stop()`, before the run had
@@ -27,6 +32,11 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
 - `AdaptiveClient`: a client entered a second time kept the circuit breaker of its first
   run. After a run whose breaker had given up, every request of the next run failed at
   once, and `breaker.opens` carried over. Each `async with` now starts with a new breaker.
+
+- The server's own paths (`/metrics`, `/health`, the engine probe) were derived from the
+  endpoint by cutting at the last `/v1` anywhere in the URL. An endpoint whose host starts
+  with `v1` and has no `/v1` path (`http://v1-gpu:8000`) was scraped at `http://metrics`,
+  so the run was blind. Only a final `/v1` path segment is removed now.
 
 ### Known issues
 

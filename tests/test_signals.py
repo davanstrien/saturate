@@ -9,6 +9,8 @@ not match.
 
 from typing import cast
 
+import pytest
+
 from saturate.http import HttpClient, TransportError
 from saturate.signals import CEILING_FLAG, parse_gauges
 
@@ -458,3 +460,30 @@ def test_the_sample_parser_reads_real_exposition_shapes():
     assert g is not None and g["waiting"] == 3
     assert parse_gauges("  vllm:num_requests_waiting 7\n") is None
     assert parse_gauges('vllm:num_requests_waiting{a="b"}7\n') is None
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "root"),
+    [
+        ("http://v1-gpu:8000", "http://v1-gpu:8000"),  # /v1 inside the host is not cut
+        ("http://host/api/v1/", "http://host/api"),  # behind a path prefix
+    ],
+)
+def test_scrape_and_probe_read_the_servers_own_paths_under_its_root(endpoint, root):
+    """The scrape and the startup probe ask the server root (saturate.http.server_root)."""
+    import asyncio
+
+    from saturate.signals import CAPACITY_SOURCES, HttpScrape, probe
+
+    class Recording:
+        def __init__(self):
+            self.urls: list[str] = []
+
+        async def get(self, url, timeouts=None):
+            self.urls.append(url)
+            raise TransportError("no server")
+
+    client = Recording()
+    assert HttpScrape(cast(HttpClient, client), endpoint).url == f"{root}/metrics"
+    asyncio.run(probe(cast(HttpClient, client), endpoint))
+    assert sorted(client.urls) == sorted(f"{root}{path}" for path, _, _, _ in CAPACITY_SOURCES)

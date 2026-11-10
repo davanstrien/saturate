@@ -317,6 +317,7 @@ class _Reader:
         self._room.release()
 
     def stop(self) -> None:
+        """Stop reading. Before start() too: the thread then exits before its first read."""
         self._stopped.set()
         self._room.release()  # wake the thread if it is waiting for room
 

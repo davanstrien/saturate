@@ -126,6 +126,16 @@ class StubServer:
         self._ready.set()
         async with server:
             await self._stop.wait()
+            await self._end_open_connections()
+
+    async def _end_open_connections(self) -> None:
+        """Cancel the connection handlers still running and wait for them, so each closes its
+        connection while the loop is open. A handler left behind is closed by the garbage
+        collector after the loop has closed, which fails with "Event loop is closed"."""
+        handlers = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+        for task in handlers:
+            task.cancel()
+        await asyncio.gather(*handlers, return_exceptions=True)
 
     # -- protocol ------------------------------------------------------------------------
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:

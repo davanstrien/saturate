@@ -29,7 +29,7 @@ import dataclasses
 import logging
 import math
 from collections.abc import Callable, Iterator
-from typing import NamedTuple, Protocol, TypedDict, cast
+from typing import Any, NamedTuple, Protocol, TypedDict, cast
 
 from saturate.http import HttpClient, Timeouts, TransportError, server_root
 
@@ -193,7 +193,7 @@ def parse_gauges(text: str) -> Gauges | None:
     (label set -> {"queries": n, "hits": n}): vLLM publishes no hit-rate gauge, so HttpScrape
     derives `hits` from two readings, series by series, so that one engine's reset is not
     hidden in a sum. None when no line is a known metric."""
-    out: dict = {field: None for field in FIELDS} | {"dialect": None}
+    out: dict[str, Any] = {field: None for field in FIELDS} | {"dialect": None}
     seen = False
     for name, labels, value in _samples(text):
         metric = _BY_NAME.get(name)

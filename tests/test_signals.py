@@ -487,3 +487,27 @@ def test_scrape_and_probe_read_the_servers_own_paths_under_its_root(endpoint, ro
     assert HttpScrape(cast(HttpClient, client), endpoint).url == f"{root}/metrics"
     asyncio.run(probe(cast(HttpClient, client), endpoint))
     assert sorted(client.urls) == sorted(f"{root}{path}" for path, _, _, _ in CAPACITY_SOURCES)
+
+
+def test_gauges_names_exactly_the_keys_the_parser_fills():
+    """parse_gauges builds its result from FIELDS and casts it to Gauges: the two key sets must
+    be the same, or the cast would hide a key the type does not know."""
+    from saturate.signals import FIELDS, Gauges
+
+    assert set(FIELDS) | {"dialect"} == set(Gauges.__annotations__)
+
+
+def test_every_gauge_the_parser_reads_reaches_the_tick_record():
+    """A reading with every gauge set, through tick_record: each value arrives under its own
+    key (the limiter reads gauges with .get, where a misspelt key would read as None)."""
+    from saturate.telemetry import tick_record
+
+    text = (
+        "vllm:num_requests_waiting 7\nvllm:num_requests_running 5\nvllm:kv_cache_usage_perc 0.25\n"
+        "vllm:gpu_prefix_cache_hit_rate 0.5\nvllm:num_preemptions_total 3\n"
+    )
+    gauges = parse_gauges(text)
+    assert gauges is not None
+    tick = tick_record(1.0, 8, 2, gauges, 0, 3, False, 10.0, "hold")
+    read = (tick["waiting"], tick["running"], tick["kv"], tick["hits"], tick["preempts"])
+    assert read == (7, 5, 0.25, 0.5, 3)

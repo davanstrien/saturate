@@ -12,15 +12,17 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import importlib.metadata
+import inspect
 import json
 import logging
 import math
 import numbers
 import os
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Coroutine, Iterable, Mapping
 from decimal import Decimal
 from fractions import Fraction
+from typing import Any
 
 from saturate import _logs, settings
 from saturate.controller import Auto, Fixed, Obs
@@ -193,6 +195,24 @@ def _check_pump_settings(
     return native | dict(timeouts=timeouts)
 
 
+def _run(main: Coroutine[Any, Any, Stats]) -> Stats:
+    """Run `main` with `asyncio.run`. Where asyncio refuses to start it, because an event loop is
+    already running in this thread (a notebook cell, an async function), the error says how to
+    call pump() there. The refusal is asyncio's own, so a loop that does let `asyncio.run` nest
+    (nest_asyncio) runs pump() as it is."""
+    try:
+        return asyncio.run(main)
+    except RuntimeError as refusal:
+        if inspect.getcoroutinestate(main) != inspect.CORO_CREATED:
+            raise  # the run started: this is its own error
+        main.close()  # never started, and never will be
+        raise RuntimeError(
+            "pump() runs its own asyncio event loop and cannot start inside a running one (a "
+            "Jupyter or Colab cell, an async function). There, run it in a thread: "
+            "await asyncio.to_thread(pump, rows, ...)."
+        ) from refusal
+
+
 class RowsLostError(RuntimeError):
     """A run ended with rows that were read but neither skipped nor written."""
 
@@ -314,6 +334,10 @@ def pump(
 
     A setting outside its range (read_timeout=-1, prepare_workers=2.5, signal_source="metrics",
     ...) raises ValueError before the run starts, naming the setting and the range it needs.
+
+    pump() runs its own asyncio event loop. Where one is already running in the calling thread
+    (a notebook cell, an async function) it raises RuntimeError; call it there as
+    `await asyncio.to_thread(pump, ...)`.
     """
     checked = _check_pump_settings(
         flush_every, read_timeout, retry_budget_s, prepare_workers, fail_fast, timeouts, signal_source
@@ -325,7 +349,7 @@ def pump(
     select_shard = shard[1] > 1
     if select_shard:
         log.info(f"shard={shard}: processing only the rows whose id hashes to shard {shard[0]} of {shard[1]}")
-    return asyncio.run(
+    return _run(
         _pump(
             rows,
             to_request,

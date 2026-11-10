@@ -28,6 +28,11 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
   as a warning when it starts, and once at INFO when the source reads again. A failure in
   the controller itself still stops the run.
 
+- `pump()` called where an asyncio event loop is already running (a Jupyter or Colab cell,
+  an async function) raises a `RuntimeError` that names the cause and the way to run it
+  there (`await asyncio.to_thread(pump, ...)`). It used to fail with asyncio's own message,
+  `asyncio.run() cannot be called from a running event loop`. See the README.
+
 ### Fixed
 
 - `through()`: leaving the `async with`, or calling `results.stop()`, before the run had

@@ -21,8 +21,9 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
 - A signal source that raises no longer ends the run. An unexpected exception from the
   metrics scrape, or from a custom `signals=` object on `AdaptiveLimiter`, used to stop
   the controller loop, and the run then failed with `FatalTransportError: controller loop
-  died`. That tick now runs without gauges (blind mode), and each different failure is
-  logged once as a warning. A failure in the controller itself still stops the run.
+  died`. That tick now runs without gauges (blind mode). A run of failures is logged once
+  as a warning, and once more when the source reads again. A failure in the controller
+  itself still stops the run.
 
 ### Known issues
 

@@ -107,27 +107,42 @@ def test_body_exception_wins_over_tick_crash(monkeypatch):
 
 @pytest.mark.internals
 def test_a_failing_signal_source_costs_the_gauges_not_the_run(monkeypatch, caplog):
-    """Gauges are advice: a signal source that raises leaves each tick without gauges and the
-    controller running, and each different failure is logged once."""
+    """Gauges are advice: a signal source that raises leaves its ticks without gauges and the
+    controller running. The source here fails twice, reads twice, then fails for good: each run
+    of failures is logged once, and so is the recovery between them."""
     monkeypatch.setattr(core, "TICK_S", 0.01)
+    readings = iter([OSError("scrape failed 1"), OSError("scrape failed 2"), {"waiting": 3}, {"waiting": 3}])
 
-    class BadSignals:
+    class FlakySignals:
         async def read(self):
-            raise OSError("scrape failed")
+            reading = next(readings, OSError("scrape failed again"))
+            if isinstance(reading, Exception):
+                raise reading
+            return reading
 
     async def go():
-        async with AdaptiveLimiter(Fixed(4), signals=BadSignals()) as limiter:
-            await asyncio.sleep(0.1)
+        enough = asyncio.Event()
+        ticks: list[dict] = []
+
+        def on_tick(tick):
+            ticks.append(tick)
+            if len(ticks) >= 6:
+                enough.set()
+
+        async with AdaptiveLimiter(Fixed(4), signals=FlakySignals(), on_tick=on_tick) as limiter:
+            await asyncio.wait_for(enough.wait(), 10)
             async with limiter.slot():  # admission still works: the controller loop is alive
                 pass
-            return limiter.ticks
+        return ticks[:6]
 
-    with caplog.at_level("WARNING", logger="saturate"):
+    with caplog.at_level("INFO", logger="saturate"):
         ticks = asyncio.run(go())
-    assert len(ticks) >= 3 and all(tick["waiting"] is None for tick in ticks)
-    assert [r.message for r in caplog.records].count(
-        "signal source failed, running this tick without gauges: OSError('scrape failed')"
-    ) == 1
+    assert [tick["waiting"] for tick in ticks] == [None, None, 3, 3, None, None]
+    assert [record.message for record in caplog.records if "signal source" in record.message] == [
+        "signal source failed: OSError('scrape failed 1'); running without gauges until it recovers",
+        "signal source recovered",
+        "signal source failed: OSError('scrape failed again'); running without gauges until it recovers",
+    ]
 
 
 def test_fixed_zero_raises():

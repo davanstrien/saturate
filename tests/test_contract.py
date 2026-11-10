@@ -487,6 +487,45 @@ def test_a_second_cancel_does_not_hang_the_run(stub, tmp_path):
     assert task.cancelled() and time.monotonic() - t < 5.0
 
 
+def counted(n: int, read: list[str]):
+    """`n` rows, each noted in `read` as the input yields it."""
+    for id_, row in rows(n):
+        read.append(id_)
+        yield id_, row
+
+
+def test_leaving_through_before_the_run_starts_stops_it(stub):
+    """The caller's body fails before its first await, so the run is stopped before the feeder
+    has started. The stop must hold: no row is read, no request is sent, and the caller's error
+    is raised."""
+    read: list[str] = []
+
+    async def go():
+        async with AdaptiveClient(stub.endpoint, window=Fixed(4), signal_source="none") as client:
+            async with through(client, counted(500, read), default_to_request, default_parse, backlog=64):
+                raise ValueError("the caller failed first")
+
+    with pytest.raises(ValueError, match="the caller failed first"):
+        run_checked(go, timeout=5.0)
+    assert read == [] and stub.requests == 0
+
+
+def test_stop_before_the_run_starts_ends_it(stub):
+    """results.stop() as the caller's first call returns, with no row read and nothing to take."""
+    read: list[str] = []
+
+    async def go():
+        async with AdaptiveClient(stub.endpoint, window=Fixed(4), signal_source="none") as client:
+            async with through(
+                client, counted(500, read), default_to_request, default_parse, backlog=64
+            ) as results:
+                await results.stop()
+                return results.take_waiting()
+
+    assert run_checked(go, timeout=5.0) == []
+    assert read == [] and stub.requests == 0
+
+
 # --- the reader and the writer threads ------------------------------------------------------
 
 

@@ -18,6 +18,12 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
 
 ### Fixed
 
+- `through()`: leaving the `async with`, or calling `results.stop()`, before the run had
+  started did not stop it. The run then started anyway and hung once its backlog was full.
+  A stop before the start now holds: no row is read and no request is sent. An input that
+  is not iterable raises its `TypeError` when `through()` is entered, not inside an
+  exception group.
+
 - `AdaptiveClient`: a client entered a second time kept the circuit breaker of its first
   run. After a run whose breaker had given up, every request of the next run failed at
   once, and `breaker.opens` carried over. Each `async with` now starts with a new breaker.

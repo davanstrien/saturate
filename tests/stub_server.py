@@ -132,7 +132,9 @@ class StubServer:
     async def _end_open_connections(self) -> None:
         """Cancel the connection handlers still running and wait for them, so each closes its
         connection while the loop is open. A handler left behind is closed by the garbage
-        collector after the loop has closed, which fails with "Event loop is closed"."""
+        collector after the loop has closed, which fails with "Event loop is closed". Called
+        once the server has stopped listening, so no handler starts after this; every other task
+        on this loop is a handler, because the loop is the stub's own."""
         handlers = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
         for task in handlers:
             task.cancel()

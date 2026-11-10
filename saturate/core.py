@@ -388,7 +388,7 @@ class AdaptiveClient:
         self._client, self.limiter, self.breaker = self._build()
 
     def _build(self) -> tuple[HttpClient, AdaptiveLimiter, Breaker]:
-        """A fresh HTTP client, limiter and breaker: everything that holds one run's state.
+        """A fresh HTTP client, limiter and breaker: the objects a run uses and leaves spent.
         Built at construction, so none is ever None; the client opens no connection and the
         limiter starts no tick loop until `async with`."""
         client = HttpClient(headers=self._headers, timeouts=self._timeouts, proxy=self._proxy)

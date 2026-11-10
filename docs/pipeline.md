@@ -104,9 +104,10 @@ backlog size: the controller's maximum window + `fail_fast` + 2048 rows for the 
 task cancelled before it starts cannot return its limits; both belong to the run and are thrown
 away with it.
 
-**Fatal errors without cancelling drain.** The feeder and the row tasks run in one task, inside
-the run's own cancel scope. A stop or a fatal error cancels that scope only, even one that comes
-before the feeder has started. A fatal error also closes the results queue and is recorded; drain keeps going until it has taken everything queued; `through()` raises the recorded
+**Fatal errors without cancelling drain.** The feeder runs in one task and the row tasks are
+its children; all of them run inside the run's own cancel scope. A stop or a fatal error cancels
+that scope only, and a stop that comes before the feeder has started holds too. A fatal error
+also closes the results queue and is recorded; drain keeps going until it has taken everything queued; `through()` raises the recorded
 error when the caller leaves the `async with`.
 
 **Cancellation.** saturate runs under `asyncio.run`, so a Ctrl-C arrives as a native

@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 
 from multidict import CIMultiDict  # aiohttp's case-insensitive headers (installed with it)
 
-from saturate.http import Reply, environment_proxy
+from saturate.http import Reply, environment_proxy, server_root
 from saturate.transport import PROBE_HEADERS, probe_body
 
 log = logging.getLogger(__name__)
@@ -155,7 +155,7 @@ def wait_for_health(
     itself, pass route=/payload= AND accept= (a response predicate, e.g.
     `lambda r: r.status_code == 200`) — readiness then requires YOUR route to
     answer the way you expect."""
-    base = endpoint.rsplit("/v1", 1)[0]
+    base = server_root(endpoint)
     deadline = time.time() + timeout_s
     ok_streak = 0
     while time.time() < deadline:

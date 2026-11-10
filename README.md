@@ -457,6 +457,21 @@ A row that holds the raw audio bytes gets a content id by default, so identical 
 load the column undecoded (`decode=False`). A multipart request is sent once: a failure
 becomes an error row, and `retry_errors=True` retries it on the next run.
 
+## In a notebook or an async function
+
+`pump()` runs its own event loop, so it cannot start where one is already running: a Jupyter
+or Colab cell, or the inside of an `async def`. It raises a `RuntimeError` that says so. Run
+it in a thread there:
+
+```python
+import asyncio
+
+stats = await asyncio.to_thread(pump, rows, to_request, parse, endpoint, "out/")
+```
+
+Interrupting the cell does not stop a run started this way; it ends when the rows do, or when
+the kernel restarts. A re-run resumes, as always.
+
 ## Running under an agent
 
 In agent mode (env `CLAUDECODE`, `CODEX_SANDBOX` or `AI_AGENT` set), stdout carries exactly

@@ -193,6 +193,20 @@ def _check_pump_settings(
     return native | dict(timeouts=timeouts)
 
 
+def _check_no_running_loop() -> None:
+    """pump() runs its own event loop, so it refuses to start where one is already running (a
+    notebook cell, an async function) and says what to do there."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:  # no loop is running: the ordinary case
+        return
+    raise RuntimeError(
+        "pump() runs its own event loop, and one is already running here (a Jupyter or Colab "
+        "cell, or an async function). Run it in a thread: `await asyncio.to_thread(pump, rows, "
+        "...)`; in a script, call it outside any async function"
+    )
+
+
 class RowsLostError(RuntimeError):
     """A run ended with rows that were read but neither skipped nor written."""
 
@@ -314,7 +328,11 @@ def pump(
 
     A setting outside its range (read_timeout=-1, prepare_workers=2.5, signal_source="metrics",
     ...) raises ValueError before the run starts, naming the setting and the range it needs.
+
+    pump() runs its own event loop. Where one is already running (a notebook cell, an async
+    function) it raises RuntimeError; call it there as `await asyncio.to_thread(pump, ...)`.
     """
+    _check_no_running_loop()
     checked = _check_pump_settings(
         flush_every, read_timeout, retry_budget_s, prepare_workers, fail_fast, timeouts, signal_source
     )

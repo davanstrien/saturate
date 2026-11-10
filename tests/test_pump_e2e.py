@@ -2,6 +2,7 @@
 the full composition — stream -> skip_done -> AdaptiveClient (retry ladder, breaker,
 metrics scrape, adaptive window) -> drain -> the storage CONTRACT on disk."""
 
+import asyncio
 import json
 import os
 import threading
@@ -88,6 +89,26 @@ def stub():
 @pytest.fixture(autouse=True)
 def fast_ticks(monkeypatch):
     monkeypatch.setattr(saturate.core, "TICK_S", 0.1)  # controller ticks fast enough to matter in <10s
+
+
+def test_pump_inside_a_running_loop_says_how_to_run_it_there(stub, tmp_path):
+    """A notebook cell and an async function already run an event loop. pump() refuses there
+    with its own message, before any row is read, and runs in a thread as that message says."""
+    read: list[int] = []
+
+    def counted(n):
+        for i, row in enumerate(rows(n)):
+            read.append(i)
+            yield row
+
+    async def cell():
+        with pytest.raises(RuntimeError, match=r"asyncio\.to_thread\(pump"):
+            pump(counted(5), to_request, parse, stub.endpoint, str(tmp_path))
+        assert read == [] and stub.requests == 0
+        return await asyncio.to_thread(pump, counted(5), to_request, parse, stub.endpoint, str(tmp_path))
+
+    stats = asyncio.run(cell())
+    assert (stats.rows_processed, stats.rows_failed) == (5, 0)
 
 
 def test_pump_happy_path(stub, tmp_path):

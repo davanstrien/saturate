@@ -16,6 +16,13 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
   produce engine error logs. The SIGKILL sweep warning now says that its usual cause
   is harmless zombies.
 
+### Changed
+
+- `pump()` called where an event loop is already running (a Jupyter or Colab cell, an
+  async function) raises a `RuntimeError` that names the cause and the way to run it there
+  (`await asyncio.to_thread(pump, ...)`). It used to fail with asyncio's own message,
+  `asyncio.run() cannot be called from a running event loop`. See the README.
+
 ### Known issues
 
 - A process that exits soon after a Hub Parquet stream was stopped early, for example by

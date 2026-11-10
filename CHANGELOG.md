@@ -16,19 +16,23 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
   produce engine error logs. The SIGKILL sweep warning now says that its usual cause
   is harmless zombies.
 
+- An endpoint with `/v1` that is not its last path segment (`.../v1beta/openai`, or an
+  endpoint that already holds a route, `.../v1/chat/completions`) is no longer cut there:
+  its `/metrics`, `/health` and probe paths are read under the full endpoint, not at the
+  host root. `endpoint` is the API base; the route is given separately (`route=`).
+
 ### Fixed
+
+- `through()`: leaving the `async with`, or calling `results.stop()`, before the run had
+  started did not stop it. The run then started anyway and hung once its backlog was full.
+  A stop before the start now holds: no row is read and no request is sent. An input that
+  is not iterable raises its `TypeError` when `through()` is entered, not inside an
+  exception group.
 
 - The server's own paths (`/metrics`, `/health`, the engine probe) were derived from the
   endpoint by cutting at the last `/v1` anywhere in the URL. An endpoint whose host starts
   with `v1` and has no `/v1` path (`http://v1-gpu:8000`) was scraped at `http://metrics`,
   so the run was blind. Only a final `/v1` path segment is removed now.
-
-### Changed
-
-- An endpoint with `/v1` that is not its last path segment (`.../v1beta/openai`, or an
-  endpoint that already holds a route, `.../v1/chat/completions`) is no longer cut there:
-  its `/metrics`, `/health` and probe paths are read under the full endpoint, not at the
-  host root. `endpoint` is the API base; the route is given separately (`route=`).
 
 ### Known issues
 

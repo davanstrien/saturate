@@ -8,7 +8,6 @@ GGUF rule: download weights to local disk first — mmap-over-FUSE-mount stalls.
 from __future__ import annotations
 
 import http.client
-import importlib.util
 import json
 import logging
 import os
@@ -30,22 +29,38 @@ from saturate.transport import PROBE_HEADERS, probe_body
 log = logging.getLogger(__name__)
 
 
-HAS_MODULE = "import importlib.util, sys; sys.exit(importlib.util.find_spec(sys.argv[1]) is None)"
+_HAS_MODULE = "import importlib.util, sys; sys.exit(importlib.util.find_spec(sys.argv[1]) is None)"
+
+
+def _has_module(python: str, module: str) -> bool:
+    """Whether the interpreter `python` has `module` installed, asked without importing it. An
+    interpreter that cannot be started, or does not answer in 30 s (a broken shim), has not."""
+    try:
+        asked = subprocess.run(
+            [python, "-c", _HAS_MODULE, module],
+            check=False,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return asked.returncode == 0
 
 
 def python_with(module: str) -> str:
-    """The Python that has `module` installed: this process's own if it has, else the first
-    `python3` on PATH that has. An engine image keeps its server in an environment of its own,
-    and a script started with `uv run` runs in another, which comes first on PATH. When no
-    Python has the module, this process's own: the server's import error then says so."""
-    if importlib.util.find_spec(module) is not None:
-        return sys.executable
+    """The Python to start a server that needs `module` with: this process's own if the module
+    is installed there, else the first `python3` on PATH where it is. An engine image keeps its
+    server in an environment of its own, and a script started with `uv run` runs in another,
+    which comes first on PATH. When the module is installed nowhere, this process's own: the
+    server's import error then says so."""
+    candidates = [sys.executable]
     for directory in os.environ.get("PATH", "").split(os.pathsep):
         python = shutil.which("python3", path=directory)
-        if python is None:
-            continue
-        found = subprocess.run([python, "-c", HAS_MODULE, module], check=False, capture_output=True)
-        if found.returncode == 0:
+        if python is not None:
+            candidates.append(python)
+    for python in candidates:
+        if _has_module(python, module):
             return python
     return sys.executable
 

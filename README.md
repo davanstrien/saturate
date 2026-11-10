@@ -222,7 +222,9 @@ You never need `Engine`. Any server that speaks the OpenAI HTTP API — vLLM, SG
 llama.cpp, TGI, TEI, something a colleague runs — can be launched however you like and
 passed as `endpoint=` its URL. `Engine` is a convenience for the common case where the
 model server and the pump share one process/Job: it boots the server in its own process
-group, health-gates it, and kills it on exit.
+group, health-gates it, and kills it on exit. SGLang starts with the first Python that has
+sglang (this one, else a `python3` on PATH), so a script run with `uv run` on the SGLang image
+needs no `cmd=`.
 Health checks lie during warm-up, so readiness also POSTs a trial request — but the default
 acceptance is **alive-only**: any response below 500, including 404, counts, because it
 proves the API path parses requests. To gate readiness on your actual workload, pass

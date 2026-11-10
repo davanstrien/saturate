@@ -86,6 +86,17 @@ def test_python_with_is_this_python_when_it_has_the_module():
     assert python_with("json") == sys.executable
 
 
+def test_a_real_interpreter_answers_the_has_module_check(tmp_path):
+    """The check as it is sent, against this interpreter; one that cannot be started, or that
+    does not answer in time, counts as not having the module."""
+    import saturate.engine as engine
+
+    assert engine._has_module(sys.executable, "json")
+    assert not engine._has_module(sys.executable, "no_such_module_here")
+    assert not engine._has_module(sys.executable, "no_such_parent.child")
+    assert not engine._has_module(str(tmp_path / "no-python-here"), "json")
+
+
 def test_python_with_finds_the_first_python_on_path_that_has_the_module(tmp_path, monkeypatch):
     """The script's own environment has no sglang (as under `uv run` on the SGLang image): the
     SGLang boot command uses the first python3 on PATH that has it, past one that has not."""

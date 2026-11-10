@@ -1,4 +1,5 @@
-"""TEI is the first queue-only dialect: one real gauge, no running, no KV.
+"""TEI publishes one gauge, its queue depth, and the controller does not read it: the metric
+names the engine and nothing more.
 
 The TEI body below is a verbatim excerpt of `/metrics` on the MAIN HTTP port
 of `ghcr.io/huggingface/text-embeddings-inference:cpu-latest`
@@ -45,19 +46,20 @@ vllm:gpu_prefix_cache_hit_rate{model_name="x"} 0.9
 """
 
 
-def test_tei_queue_only():
+def test_tei_metrics_name_the_engine_and_give_no_gauge():
+    """TEI's queue holds every text until its GPU batch starts, so a deep queue is normal there
+    and must not read as requests waiting (the queue cut would shrink the window on every run)."""
     g = parse_gauges(TEI_METRICS)
     assert g is not None
     assert g["dialect"] == "tei"
-    assert g["waiting"] == 3
-    assert g["running"] is None  # TEI exposes no in-flight gauge
-    assert g["kv"] is None and g["hits"] is None  # and no KV cache at all
+    assert g["waiting"] is None  # te_queue_size is 3 in the body
+    assert g["running"] is None and g["kv"] is None and g["hits"] is None
 
 
 def test_tei_dual_spelling():
     g = parse_gauges("te:queue_size 7\n")
     assert g is not None
-    assert g["waiting"] == 7
+    assert g["dialect"] == "tei" and g["waiting"] is None
 
 
 def test_tei_ceiling_flag_is_a_relaunch_flag():
@@ -405,6 +407,9 @@ def test_the_metrics_table_is_well_formed():
     from saturate.signals import _BY_NAME, FIELDS, METRICS
 
     for m in METRICS:
+        if m.field is None:  # the metric only names the engine
+            assert m.key is None, m
+            continue
         assert m.field in FIELDS, m
         assert (m.key is not None) == (FIELDS[m.field] == "series"), m
         assert m.key in (None, "queries", "hits"), m
@@ -419,6 +424,9 @@ def test_every_metric_row_is_read_in_both_spellings_into_its_field():
     for full, m in _BY_NAME.items():
         g = parse_gauges(f'{full}{{engine="0"}} 3\n')
         assert g is not None and g["dialect"] == m.engine, full
+        if m.field is None:  # the metric only names the engine: no gauge takes its value
+            assert all(dict(g)[field] is None for field in FIELDS), full
+            continue
         want = {'{engine="0"}': {m.key: 3.0}} if FIELDS[m.field] == "series" else 3
         assert dict(g)[m.field] == want, full  # a key chosen at run time: read as a plain dict
 

@@ -8,6 +8,16 @@ saturate is experimental. Before 1.0, any minor release (0.x) can change the API
 defaults or the output layout, often with no deprecation period. Pin an exact version
 (for example `saturate==0.3.1`) if you depend on current behaviour.
 
+## [Unreleased]
+
+### Changed
+
+- On TEI, `Auto` no longer reads `te_queue_size` as requests waiting. Every text waits in
+  that queue for a GPU batch, so it is deep on a healthy server, and the queue cut shrank
+  the window on every run: to about 20 on single-text rows, which cost about 10% (20,000
+  texts on a live TEI 1.9.4: 268 texts/s, against 298 with the gauge not read and 298 for
+  `Fixed(512)`). On TEI the window is now set by throughput and rejections alone.
+
 ## [0.3.1] - 2026-11-10
 
 Fixes and small changes in behaviour from a code review of 0.3.0. Nothing changes in the

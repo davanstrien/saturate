@@ -51,7 +51,7 @@ FIELDS: dict[str, str] = {
 
 class Gauges(TypedDict, total=False):
     """One reading of an engine's gauges. A key that is absent or None is a gauge the engine
-    does not publish (TEI has a queue depth and nothing else); FIELDS says how the series of
+    does not publish (TEI has none the controller reads); FIELDS says how the series of
     each one combine."""
 
     waiting: int | None  # requests queued in the engine
@@ -76,7 +76,7 @@ class Metric(NamedTuple):
 
     engine: str
     name: str  # without the engine prefix; matched as `prefix:name` and `prefix_name`
-    field: str
+    field: str | None  # None: the metric names the engine, and its value is not read
     key: str | None = None
 
 
@@ -100,7 +100,11 @@ METRICS: tuple[Metric, ...] = (
     Metric("llamacpp", "requests_processing", "running"),
     Metric("trtllm", "num_requests_waiting", "waiting"),
     Metric("trtllm", "num_requests_running", "running"),
-    Metric("tei", "queue_size", "waiting"),
+    # TEI's queue is not a sign of overload: every text waits in it for a GPU batch, so it is
+    # in the hundreds on a healthy server, and it counts texts, not requests. Read as `waiting`
+    # it cut the window on every run (20,000 single texts, live TEI 1.9.4: 268 texts/s against
+    # 298 without it). The metric still names the engine.
+    Metric("tei", "queue_size", None),
 )
 
 # the metric-name prefix of an engine whose prefix is not its name
@@ -201,6 +205,8 @@ def parse_gauges(text: str) -> Gauges | None:
             continue
         seen = True
         out["dialect"] = metric.engine
+        if metric.field is None:
+            continue
         combine = FIELDS[metric.field]
         if combine == "sum":
             out[metric.field] = (out[metric.field] or 0) + int(value)

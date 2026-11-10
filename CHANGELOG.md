@@ -16,6 +16,18 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
   produce engine error logs. The SIGKILL sweep warning now says that its usual cause
   is harmless zombies.
 
+### Fixed
+
+- The server's own paths (`/metrics`, `/health`, the engine probe) were derived from the
+  endpoint by cutting at the last `/v1` anywhere in the URL. An endpoint whose host starts
+  with `v1` and has no `/v1` path (`http://v1-gpu:8000`) was scraped at `http://metrics`,
+  so the run was blind. Only a final `/v1` path segment is removed now.
+
+### Changed
+
+- An endpoint with `/v1` inside a longer segment (`.../v1beta/openai`) is no longer cut
+  there: its metrics path is looked up under the full endpoint, not at the host root.
+
 ### Known issues
 
 - A process that exits soon after a Hub Parquet stream was stopped early, for example by

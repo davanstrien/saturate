@@ -31,7 +31,7 @@ import math
 from collections.abc import Callable, Iterator
 from typing import NamedTuple
 
-from saturate.http import HttpClient, Timeouts, TransportError
+from saturate.http import HttpClient, Timeouts, TransportError, server_root
 
 log = logging.getLogger(__name__)
 
@@ -211,7 +211,7 @@ class HttpScrape:
     why the last read missed and, for a known engine, the flag that turns its gauges on."""
 
     def __init__(self, client: HttpClient, endpoint: str, max_fails: int = 5, retry_every: int = 30):
-        self.base = endpoint.rsplit("/v1", 1)[0]
+        self.base = server_root(endpoint)
         self.url = f"{self.base}/metrics"
         self.client = client
         self.max_fails = max_fails
@@ -419,7 +419,7 @@ async def probe(client: HttpClient, endpoint: str) -> Probe:
     probe costs one round trip, two seconds at most. vLLM, a hosted API or a proxy: Probe()."""
     import asyncio
 
-    base = endpoint.rsplit("/v1", 1)[0]
+    base = server_root(endpoint)
     paths = [path for path, _, _, _ in CAPACITY_SOURCES]
     bodies = dict(
         zip(paths, await asyncio.gather(*(_get_json(client, f"{base}{p}") for p in paths)), strict=True)

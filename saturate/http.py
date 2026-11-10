@@ -15,7 +15,7 @@ import json as jsonlib
 import os
 import urllib.request
 from collections.abc import Mapping
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 
@@ -181,6 +181,16 @@ class HttpClient:
             return self._proxy
         parts = urlsplit(url)
         return environment_proxy(parts.scheme, parts.hostname or "", parts.port)
+
+
+def server_root(endpoint: str) -> str:
+    """The server an OpenAI-style endpoint belongs to: the endpoint without a final `/v1` path
+    segment, e.g. "http://host:8000" for "http://host:8000/v1". The server's own paths (/health,
+    /metrics, the engines' info paths) are read from here. Only a whole last segment counts:
+    a host named v1-gpu, or /v1 earlier in the path, is left as it is."""
+    parts = urlsplit(endpoint)
+    path = parts.path.rstrip("/").removesuffix("/v1")
+    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 
 @functools.cache

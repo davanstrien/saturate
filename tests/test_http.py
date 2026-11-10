@@ -8,7 +8,7 @@ import pytest
 
 import saturate.http as http
 from saturate.engine import _get
-from saturate.http import HttpClient, TimedOut, Timeouts, TransportError, multipart
+from saturate.http import HttpClient, TimedOut, Timeouts, TransportError, multipart, server_root
 
 OK = b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 12\r\n\r\n{"ok": true}'
 
@@ -286,3 +286,22 @@ def test_a_multipart_file_goes_by_its_base_name_and_a_stream_is_not_rewound(tmp_
     body = run(go())
     assert b'filename="page.png"' in body and str(tmp_path).encode() not in body
     multipart(None, {"file": ("s.bin", io.BufferedReader(Stream()))})  # no seek on a stream
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "root"),
+    [
+        ("http://host:8000/v1", "http://host:8000"),
+        ("http://host:8000/v1/", "http://host:8000"),
+        ("http://host:8000", "http://host:8000"),
+        ("https://example.com/api/v1", "https://example.com/api"),  # behind a path prefix
+        ("http://v1-gpu:8000", "http://v1-gpu:8000"),  # /v1 inside the host is not a segment
+        ("http://v1-gpu:8000/v1", "http://v1-gpu:8000"),
+        ("http://v1", "http://v1"),
+        ("http://host/api/v1/proxy/v1", "http://host/api/v1/proxy"),  # the last segment only
+        ("http://host/v1beta/openai", "http://host/v1beta/openai"),  # v1beta is not v1
+        ("http://[::1]:8000/v1", "http://[::1]:8000"),
+    ],
+)
+def test_server_root_drops_a_final_v1_segment_only(endpoint, root):
+    assert server_root(endpoint) == root

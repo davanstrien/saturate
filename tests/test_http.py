@@ -333,7 +333,9 @@ def test_bytes_can_be_sent_twice_and_an_open_file_cannot(tmp_path):
     path.write_bytes(b"AUDIO")
     with path.open("rb") as f:
         assert not resendable({"file": f})
-        with pytest.raises(ValueError, match="closed file"):
+        # how the second send fails depends on the Python and aiohttp versions (a ValueError
+        # for the closed file, or a connection error from the half-built body); it always fails
+        with pytest.raises((ValueError, TransportError)):
             run(send_twice({"file": f}))
 
 

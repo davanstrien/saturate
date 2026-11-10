@@ -16,6 +16,14 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
   produce engine error logs. The SIGKILL sweep warning now says that its usual cause
   is harmless zombies.
 
+### Changed
+
+- A signal source that raises no longer ends the run. An unexpected exception from the
+  metrics scrape, or from a custom `signals=` object on `AdaptiveLimiter`, used to stop
+  the controller loop, and the run then failed with `FatalTransportError: controller loop
+  died`. That tick now runs without gauges (blind mode), and each different failure is
+  logged once as a warning. A failure in the controller itself still stops the run.
+
 ### Known issues
 
 - A process that exits soon after a Hub Parquet stream was stopped early, for example by

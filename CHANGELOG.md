@@ -25,8 +25,10 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
 
 ### Changed
 
-- An endpoint with `/v1` inside a longer segment (`.../v1beta/openai`) is no longer cut
-  there: its metrics path is looked up under the full endpoint, not at the host root.
+- An endpoint with `/v1` that is not its last path segment (`.../v1beta/openai`, or an
+  endpoint that already holds a route, `.../v1/chat/completions`) is no longer cut there:
+  its `/metrics`, `/health` and probe paths are read under the full endpoint, not at the
+  host root. `endpoint` is the API base; the route is given separately (`route=`).
 
 ### Known issues
 

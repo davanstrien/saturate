@@ -294,6 +294,8 @@ def test_a_multipart_file_goes_by_its_base_name_and_a_stream_is_not_rewound(tmp_
         ("http://host:8000/v1", "http://host:8000"),
         ("http://host:8000/v1/", "http://host:8000"),
         ("http://host:8000", "http://host:8000"),
+        ("http://host:8000/", "http://host:8000"),
+        ("http://host:8000/v1?api-version=1", "http://host:8000"),  # the query is dropped
         ("https://example.com/api/v1", "https://example.com/api"),  # behind a path prefix
         ("http://v1-gpu:8000", "http://v1-gpu:8000"),  # /v1 inside the host is not a segment
         ("http://v1-gpu:8000/v1", "http://v1-gpu:8000"),

@@ -120,7 +120,9 @@ def finish(proc: subprocess.Popen) -> dict:
 
 
 def wait_healthy(endpoint: str, deadline_s: float = 900) -> None:
-    base = endpoint.removesuffix("/v1")
+    from saturate.http import server_root
+
+    base = server_root(endpoint)
     end = time.time() + deadline_s
     while time.time() < end:
         try:

@@ -21,7 +21,7 @@ The `[hf]` extra adds `huggingface_hub` and `datasets`, for `hf://` outputs and 
 Plain `saturate` works with your own iterables and local output.
 
 > **Experimental.** The API and behaviour can change in any 0.x release, often with no
-> deprecation period. Pin an exact version (`saturate==0.3.0`) if you rely on how it behaves
+> deprecation period. Pin an exact version (`saturate==0.3.1`) if you rely on how it behaves
 > now, and read
 > [CHANGELOG.md](https://github.com/davanstrien/saturate/blob/main/CHANGELOG.md) before you
 > upgrade. See [Status](#status).

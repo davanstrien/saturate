@@ -6,9 +6,12 @@ All notable changes to saturate are listed here. The format follows
 
 saturate is experimental. Before 1.0, any minor release (0.x) can change the API, the
 defaults or the output layout, often with no deprecation period. Pin an exact version
-(for example `saturate==0.3.0`) if you depend on current behaviour.
+(for example `saturate==0.3.1`) if you depend on current behaviour.
 
-## [Unreleased]
+## [0.3.1] - 2026-11-10
+
+Fixes and small changes in behaviour from a code review of 0.3.0. Nothing changes in the
+output layout or in `pump()`'s arguments.
 
 ### Changed
 

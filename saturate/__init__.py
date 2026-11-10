@@ -30,7 +30,7 @@ from saturate.engine import Engine, wait_for_health
 from saturate.pipeline import through
 from saturate.settings import Setting
 from saturate.signals import CEILING_FLAG
-from saturate.sink import FileSink, ParquetSink, as_sink, read_output
+from saturate.sink import FileSink, ParquetSink, Shard, as_sink, read_output
 from saturate.source import (
     check_shard,
     content_id,
@@ -383,7 +383,7 @@ async def _pump(
     writer: asyncio.Task | None = None
     write_lines = hooks.write_telemetry
 
-    async def write_telemetry(write: Callable, snapshot: list[str]) -> None:
+    async def write_telemetry(write: Callable[[Shard, list[str]], None], snapshot: list[str]) -> None:
         try:  # a remote rewrite is a commit (seconds): never on the loop, never overlapping
             await asyncio.to_thread(write, shard, snapshot)
         except Exception as e:

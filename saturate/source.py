@@ -18,7 +18,7 @@ from collections import deque
 from collections.abc import Callable, Collection, Iterable, Iterator
 from concurrent.futures import Executor, ThreadPoolExecutor
 from functools import partial
-from typing import NoReturn
+from typing import NoReturn, cast
 
 from saturate.sink import ParquetSink, Resumable
 from saturate.stats import Stats
@@ -144,8 +144,9 @@ def skip_done(
     if isinstance(done, str):
         done = ParquetSink(done, create=False)  # a resume check reads; it never creates the output
     error_only: set[str] = set()
-    if isinstance(done, Resumable):  # anything with existing_ids()
-        sink, done = done, done.existing_ids(retry_errors=retry_errors)
+    if hasattr(done, "existing_ids"):  # a sink, or anything else that can say what it holds
+        sink = cast(Resumable, done)
+        done = sink.existing_ids(retry_errors=retry_errors)
         error_only = getattr(sink, "error_only_ids", set()) if not retry_errors else set()
     seen: set[str] = set()
     for id_, row in rows:

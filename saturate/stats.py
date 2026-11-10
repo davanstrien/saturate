@@ -1,5 +1,6 @@
-"""Stats: what one run counted. pump() returns it, drain() and skip_done() add to it, and its
-JSON is the run summary on storage and, in agent mode, the one line on stdout (CONTRACT §5, §7).
+"""Stats: what one run counted. pump() creates it, finishes it and returns it; skip_done() and
+drain() add their counts. Its JSON is the run summary on storage and, in agent mode, the one
+line on stdout (CONTRACT §5, §7).
 
 It imports nothing from saturate, so every stage can name it in its signature.
 """

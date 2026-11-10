@@ -107,8 +107,8 @@ away with it.
 **Fatal errors without cancelling drain.** The feeder runs in one task and the row tasks are
 its children; all of them run inside the run's own cancel scope. A stop or a fatal error cancels
 that scope only, and a stop that comes before the feeder has started holds too. A fatal error
-also closes the results queue and is recorded; drain keeps going until it has taken everything queued; `through()` raises the recorded
-error when the caller leaves the `async with`.
+also closes the results queue and is recorded; drain keeps going until it has taken everything
+queued; `through()` raises the recorded error when the caller leaves the `async with`.
 
 **Cancellation.** saturate runs under `asyncio.run`, so a Ctrl-C arrives as a native
 `CancelledError`, which anyio's shield does not stop. drain catches it and runs its cleanup as a

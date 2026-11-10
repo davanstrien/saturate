@@ -18,22 +18,26 @@ TEXTS = ["a", "b", "c"]
 
 
 @pytest.mark.parametrize(
-    "body, inputs",
+    "route, body, inputs",
     [
-        ({"input": "one text"}, 1),
-        ({"input": TEXTS}, 3),
-        ({"input": [101, 2023, 102]}, 1),  # one text, as token ids
-        ({"input": [[101, 102], [101, 103]]}, 2),  # two texts, as token ids
-        ({"input": []}, 1),
-        ({"inputs": TEXTS}, 3),  # /embed
-        ({"inputs": [["query", "text"], ["query", "other"]]}, 2),  # /predict
-        ({"query": "q", "texts": TEXTS}, 3),  # /rerank
-        ({"messages": [{"role": "user", "content": "hi"}]}, 1),
-        (None, 1),  # not a JSON body
+        ("/embeddings", {"input": "one text"}, 1),
+        ("/embeddings", {"input": TEXTS}, 3),
+        ("/embeddings", {"input": tuple(TEXTS)}, 3),  # a tuple goes on the wire as a JSON list
+        ("/embeddings", {"input": [101, 2023, 102]}, 1),  # one text, as token ids
+        ("/embeddings", {"input": [[101, 102], [101, 103]]}, 2),  # two texts, as token ids
+        ("/embeddings", {"input": []}, 1),
+        ("/embed", {"inputs": TEXTS}, 3),
+        ("/embed", {"inputs": ["two", "texts"]}, 2),
+        ("/predict", {"inputs": ["query", "text"]}, 1),  # one pair is one input to TEI
+        ("/predict", {"inputs": [["query", "text"], ["query", "other"]]}, 2),
+        ("/predict", {"inputs": ["a", "b", "c"]}, 3),
+        ("/rerank", {"query": "q", "texts": TEXTS}, 3),
+        ("/chat/completions", {"messages": [{"role": "user", "content": "hi"}]}, 1),
+        ("/embeddings", None, 1),  # not a JSON body
     ],
 )
-def test_tei_inputs_counts_one_per_input(body, inputs):
-    assert tei_inputs(body) == inputs
+def test_tei_inputs_counts_one_per_input(route, body, inputs):
+    assert tei_inputs(route, body) == inputs
 
 
 def _budget(total: int) -> _EngineBudget:
@@ -82,23 +86,21 @@ def test_a_cancelled_waiter_lets_those_behind_it_in():
     asyncio.run(scenario())
 
 
-def test_a_waiter_cancelled_just_before_units_are_released_raises_its_cancellation():
-    """The units come free in the same loop step as the cancel, before the waiting task runs
-    again: the waiter is skipped, it raises CancelledError (not an error from the queue), and
-    no unit is lost."""
+def test_a_waiter_cancelled_in_the_same_step_as_a_release_is_skipped():
+    """The units come free right after the cancel, before the waiting task runs again: the
+    release walks the queue with the cancelled waiter still in it. It is skipped, it raises
+    CancelledError, and no unit is lost."""
 
     async def scenario():
         budget, entered, release = _budget(4), [], asyncio.Event()
-        first = asyncio.create_task(_hold(budget, 4, entered, release, "first"))
+        await budget._take(4)
         waiter = asyncio.create_task(_hold(budget, 4, entered, release, "waiter"))
         await asyncio.sleep(0.01)
         waiter.cancel()
-        budget._give(0)  # a release in the same step: the queue is walked with the waiter cancelled
+        budget._give(4)  # same step: the waiter has not run since its cancel
         with pytest.raises(asyncio.CancelledError):
             await waiter
-        release.set()
-        await first
-        assert entered == ["first"] and budget.free == 4
+        assert entered == [] and budget.free == 4
 
     asyncio.run(scenario())
 
@@ -258,6 +260,6 @@ def test_fake_tei_rejects_as_tei_does():
 
             return sorted(await asyncio.gather(*(post() for _ in range(9))))
 
-    with FakeTEI(permits=32, service_s=0.2) as tei:
+    with FakeTEI(permits=32, service_s=1.0) as tei:  # long, so all nine are in before one ends
         statuses = asyncio.run(scenario(tei.endpoint))
     assert statuses == [200] * 8 + [429]

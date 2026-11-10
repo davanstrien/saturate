@@ -21,7 +21,7 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
   holds one per input (`input`, `inputs` or `texts`), so one client never asks TEI for more
   than it admits. The window still counts requests. A row with more inputs than TEI's
   limit fails at once with an error that says so. Not covered: two clients on one TEI
-  server, and `signal_source="none"`.
+  server, `signal_source="none"`, and TEI's `/similarity` and Vertex routes.
 
 ## [0.3.1] - 2026-11-10
 

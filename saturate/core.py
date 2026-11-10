@@ -395,7 +395,7 @@ class _EngineBudget:
 
     def units(self, req: Request) -> int:
         """How many units the engine takes for `req`."""
-        return self.units_of(req.json)
+        return self.units_of(req.route, req.json)
 
     @contextlib.asynccontextmanager
     async def hold(self, units: int) -> AsyncGenerator[None]:

@@ -398,24 +398,34 @@ CAPACITY_SOURCES: tuple[tuple[str, Callable[[object], int | None], str, bool], .
 )
 
 
-def tei_inputs(body: object) -> int:
+def tei_inputs(route: str, body: object) -> int:
     """How many of TEI's `max_concurrent_requests` permits a request takes: one per input, not
     one per request, and TEI rejects the whole request with a 429 when one is missing
     (router/src/http/server.rs; seen on a live 1.9.4). An input list is under `input`
     (/embeddings), `inputs` (/embed, /predict) or `texts` (/rerank); a list of token ids is one
-    text. Not covered: /similarity and the Vertex route, which count as one."""
+    text, and so is one /predict pair `["query", "text"]`. Not covered: /similarity and the
+    Vertex route, which count as one."""
     if not isinstance(body, dict):
         return 1
     for key in ("input", "inputs", "texts"):
         value = body.get(key)
-        if isinstance(value, list) and value and not all(type(item) is int for item in value):
-            return len(value)
+        if not isinstance(value, list | tuple) or not value:  # a tuple is sent as a JSON list
+            continue
+        if all(type(item) is int for item in value):
+            return 1  # token ids
+        if (
+            route.rstrip("/").endswith("/predict")
+            and len(value) == 2
+            and all(isinstance(v, str) for v in value)
+        ):
+            return 1  # one pair
+        return len(value)
     return 1
 
 
-# engines whose reported capacity counts something smaller than a request: JSON body -> how
-# many units of that capacity the request takes. An engine not listed counts requests.
-REQUEST_UNITS: dict[str, Callable[[object], int]] = {"tei": tei_inputs}
+# engines whose reported capacity counts something smaller than a request: (route, JSON body)
+# -> how many units of that capacity the request takes. An engine not listed counts requests.
+REQUEST_UNITS: dict[str, Callable[[str, object], int]] = {"tei": tei_inputs}
 
 PROBE_TIMEOUTS = Timeouts(read=2.0, connect=2.0, pool=2.0, write=2.0)  # a one-off read: fail fast
 

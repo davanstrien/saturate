@@ -8,6 +8,21 @@ saturate is experimental. Before 1.0, any minor release (0.x) can change the API
 defaults or the output layout, often with no deprecation period. Pin an exact version
 (for example `saturate==0.3.1`) if you depend on current behaviour.
 
+## [Unreleased]
+
+### Fixed
+
+- Rows that are batches of texts no longer fail on TEI. TEI's `max_concurrent_requests`
+  (512 by default) counts texts, not requests: it takes one permit per text and rejects a
+  request with a 429 when one is missing. saturate read it as a number of requests, so
+  with rows of 64 texts most rows ended as `http 429 after retries` error rows (70 of 313
+  succeeded on a live TEI 1.9.4), under `Auto()` and under a `Fixed` window above
+  limit / texts per row. The client now keeps its own count of TEI's permits and a request
+  holds one per input (`input`, `inputs` or `texts`), so one client never asks TEI for more
+  than it admits. The window still counts requests. A row with more inputs than TEI's
+  limit fails at once with an error that says so. Not covered: two clients on one TEI
+  server, and `signal_source="none"`.
+
 ## [0.3.1] - 2026-11-10
 
 Fixes and small changes in behaviour from a code review of 0.3.0. Nothing changes in the

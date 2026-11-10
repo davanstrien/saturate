@@ -182,6 +182,13 @@ the caller's unchanged configuration): above it by min(capacity, 2 × target_wai
 engine that queues the rest, so a waiting request refills a free slot; exactly there, and never
 above it, for TEI, which rejects the rest with 429s.
 
+TEI's number counts inputs, not requests: it takes one permit per text of a batch request, and
+rejects the request when one is missing. So for TEI the client also keeps its own copy of that
+count (`core._EngineBudget`, with `signals.tei_inputs`): a request holds one unit per input
+while it is with the engine, under a `Fixed` window as well as `Auto`. The window still counts
+requests. The copy counts this client only; a second client of the same server can still cause
+rejections, and without the probe (`signal_source="none"`) there is no copy.
+
 The scrape reads the probed engine's own metrics path. TensorRT-LLM's `/metrics` is JSON
 iteration stats that each read clears, so a scrape there would take them from every other
 reader: its Prometheus gauges are read at `/prometheus/metrics` instead. A TensorRT-LLM too old

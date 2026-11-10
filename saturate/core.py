@@ -13,19 +13,20 @@ through() — the pipeline itself — lives in saturate/pipeline.py (docs/pipeli
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import logging
 import statistics
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 
 import anyio
 
 from saturate import transport
 from saturate.controller import TICK_S, Auto, Fixed, Obs
 from saturate.http import HttpClient, Timeouts
-from saturate.signals import Gauges, HttpScrape, Null, SignalSource, probe
+from saturate.signals import REQUEST_UNITS, Capacity, Gauges, HttpScrape, Null, SignalSource, probe
 from saturate.telemetry import Tick, tick_record
 from saturate.transport import Attempt, Breaker, FatalTransportError, Request, call_endpoint, coerce_request
 
@@ -375,6 +376,65 @@ class AdaptiveLimiter:
         self._capacity.total_tokens = int(new_limit)  # the setter takes an int, never a float
 
 
+class _EngineBudget:
+    """The client's own copy of an engine's admission count, for an engine that rejects past
+    its capacity and counts something smaller than a request (TEI: one permit per input, so 512
+    permits admit eight requests of 64 texts, and reject the ninth). A request holds as many
+    units as the engine takes for it, so this client alone never asks the engine for more than
+    it admits. The window still counts requests.
+
+    Units are taken all or none, in arrival order: a large request is not overtaken for ever by
+    small ones. Another client of the same server is not counted, so its requests can still
+    cause rejections here."""
+
+    def __init__(self, capacity: Capacity):
+        self.engine, self.total = capacity.engine, capacity.requests
+        self.free = self.total
+        self.units_of = REQUEST_UNITS[capacity.engine]
+        self._waiters: deque[tuple[int, asyncio.Future[None]]] = deque()
+
+    def units(self, req: Request) -> int:
+        """How many units the engine takes for `req`."""
+        return self.units_of(req.json)
+
+    @contextlib.asynccontextmanager
+    async def hold(self, units: int) -> AsyncGenerator[None]:
+        """Hold `units` while a request is with the engine."""
+        await self._take(units)
+        try:
+            yield
+        finally:
+            self._give(units)
+
+    async def _take(self, units: int) -> None:
+        if not self._waiters and units <= self.free:
+            self.free -= units
+            return
+        entry = (units, asyncio.get_running_loop().create_future())
+        self._waiters.append(entry)
+        try:
+            await entry[1]
+        except BaseException:
+            if entry in self._waiters:  # cancelled while waiting: those behind may now fit
+                self._waiters.remove(entry)
+                self._wake()
+            elif entry[1].done() and not entry[1].cancelled():  # granted, then cancelled
+                self._give(units)
+            raise
+
+    def _give(self, units: int) -> None:
+        self.free += units
+        self._wake()
+
+    def _wake(self) -> None:
+        while self._waiters and self._waiters[0][0] <= self.free:
+            units, waiter = self._waiters.popleft()
+            if waiter.done():  # cancelled: its task removes nothing more and takes nothing
+                continue
+            self.free -= units
+            waiter.set_result(None)
+
+
 class AdaptiveClient:
     """AdaptiveLimiter + HTTP transport. `await client.post(request)` acquires a
     slot, runs the retry ladder + breaker, feeds the controller, and returns
@@ -408,6 +468,7 @@ class AdaptiveClient:
         self._headers, self._proxy = headers or {}, proxy
         self._signal_source, self._window, self._on_tick = signal_source, window, on_tick
         self._client, self.limiter, self.breaker = self._build()
+        self._budget: _EngineBudget | None = None  # set by the probe, for an engine that needs one
 
     def _build(self) -> tuple[HttpClient, AdaptiveLimiter, Breaker]:
         """A fresh HTTP client, limiter and breaker: the objects a run uses and leaves spent.
@@ -435,15 +496,20 @@ class AdaptiveClient:
         found = None if self._signal_source == "none" else await probe(self._client, self.base)
         if found is not None and isinstance(self.limiter.signals, HttpScrape):
             self.limiter.signals.identify(found)
+        capacity = found.capacity if found is not None else None
+        # an engine that rejects past a capacity it does not count in requests: any window,
+        # Fixed or Auto, must keep this client's requests within what the engine admits
+        counted = capacity is not None and not capacity.queues and capacity.engine in REQUEST_UNITS
+        self._budget = _EngineBudget(capacity) if capacity is not None and counted else None
         controller = self.limiter.controller
         if not isinstance(controller, Auto):
             return
-        capacity = found.capacity if found is not None else None
         controller.begin(capacity)
         self.limiter.set_limit(controller.initial)
         if capacity is not None:
+            what = "inputs (a request takes one per input)" if counted else "requests"
             log.info(
-                f"{capacity.engine} reports {capacity.requests} requests at once"
+                f"{capacity.engine} reports {capacity.requests} {what} at once"
                 f"{'' if capacity.queues else ' (and rejects the rest)'}: "
                 f"starting at {controller.initial}"
             )
@@ -468,9 +534,17 @@ class AdaptiveClient:
         prepared-body bound there: from then on the body is in flight, not waiting)."""
         req = coerce_request(request, route)
         await self.breaker.gate(self._client, f"{self.base}{req.route}", (req.json or {}).get("model"))
+        budget = self._budget
+        units = budget.units(req) if budget is not None else 0
+        if budget is not None and units > budget.total:  # the engine can never admit it: not sent
+            return None, (
+                f"request has {units} inputs, more than {budget.engine} admits at once "
+                f"({budget.total}): send fewer inputs per row, or raise the engine's limit"
+            )
         async with self.limiter.slot():
             if on_admit is not None:
                 on_admit()
-            return await call_endpoint(
-                self._client, self.base, req, self.breaker, self.limiter.observe, self.retry_budget_s
-            )
+            async with budget.hold(units) if budget is not None else contextlib.nullcontext():
+                return await call_endpoint(
+                    self._client, self.base, req, self.breaker, self.limiter.observe, self.retry_budget_s
+                )

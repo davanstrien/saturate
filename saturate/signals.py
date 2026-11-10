@@ -14,8 +14,9 @@ sgl-project/sglang#12618 was a collector-side dashboard fix, and vLLM's
 proposed flip was rejected (vllm-project/vllm#33824).
 
 Not every engine exposes the full set. TEI publishes queue depth only
-(`te_queue_size`) — no running/in-flight gauge, no KV — so `parse_gauges`
-returns a partial dict and the controller runs on the one real signal.
+(`te_queue_size`) — no running/in-flight gauge, no KV — and that queue is where every text
+waits for a GPU batch, not a sign of overload. So the metric names the engine and its value is
+not read: on TEI the controller runs on throughput and rejections.
 
 Not every engine publishes its gauges at /metrics either. trtllm-serve answers /metrics with
 JSON iteration stats and clears them on each read, so polling it would take them from every

@@ -7,7 +7,8 @@ exposed-Job proxy with auth headers.
 CORRECTION (2026-07-29, RESULTS.md §TEI gauge dialect): the "metrics live on a
 port the proxy doesn't carry" reasoning below was wrong. TEI serves /metrics on
 its MAIN port; the run was blind because there was no TEI dialect yet. There is
-one now (`te_queue_size` -> waiting), so a rerun would have queue-depth gauges.
+one now: `te_queue_size` names the engine. Its value is not read as a gauge (every
+text waits in that queue for a batch), so a rerun still runs without gauges.
 
 Run locally:  uv run --with datasets python spikes/tei_local.py <exposed-url>
 """

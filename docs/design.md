@@ -203,7 +203,8 @@ images live in host RAM.
   (RESULTS.md, TTS probe).
 - **SignalSource** — a scrape of the engine's metrics path (`HttpScrape`: `/metrics`, or the
   engine's own, `signals.METRICS_PATH`) or none (`Null`); the controller only ever sees an
-  `Obs`. The metrics table (`signals.METRICS`, one row per engine metric)
+  `Obs`. A source that raises leaves that tick without gauges (blind mode); it never ends the
+  run. The metrics table (`signals.METRICS`, one row per engine metric)
   matches both metric-name spellings per engine because the k8s Gateway API Inference Extension (GAIE) protocol fixes gauge *semantics* but
   not their names (see [why.md §7](why.md)). Dialects may be partial: TEI publishes
   queue depth (`te_queue_size`) and nothing else — no running gauge, no KV — so the

@@ -10,7 +10,6 @@ on the storage CONTRACT (CONTRACT.md). Every stage is importable on its own.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import importlib.metadata
 import inspect
 import json
@@ -42,6 +41,7 @@ from saturate.source import (
     stream,
 )
 from saturate.sources import bucket_rows, dataset_rows
+from saturate.stats import Stats
 from saturate.telemetry import advise, advise_input, bound_by_counts, cut_reasons
 from saturate.transport import (
     Attempt,
@@ -215,43 +215,6 @@ def _run(main: Coroutine[Any, Any, Stats]) -> Stats:
 
 class RowsLostError(RuntimeError):
     """A run ended with rows that were read but neither skipped nor written."""
-
-
-@dataclasses.dataclass
-class Stats:
-    rows_total: int = 0
-    rows_done_prior: int = 0
-    rows_errored_prior: int = 0  # of rows_done_prior: skipped rows whose only record is an error
-    rows_processed: int = 0
-    rows_failed: int = 0
-    rows_deduped: int = 0
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    elapsed_s: float = 0.0
-    final_limit: int = 0  # the window at the end (maybe mid-trial); Auto(initial=final_limit) starts near it
-    input_bound: bool = False
-    breaker_opens: int = 0
-    retries: int = 0  # retry attempts over the run (a row that failed three times and then succeeded: 3)
-    hints: list = dataclasses.field(default_factory=list)
-    cut_reasons: dict = dataclasses.field(default_factory=dict)  # window reductions by controller reason
-    bound_by: dict = dataclasses.field(default_factory=dict)  # ticks per bottleneck verdict (CONTRACT §6)
-
-    @property
-    def rows_unaccounted(self) -> int:
-        """Rows read but neither skipped nor handed to the sink; 0 after every run that ends
-        normally."""
-        accounted = self.rows_done_prior + self.rows_deduped + self.rows_processed + self.rows_failed
-        return self.rows_total - accounted
-
-    @property
-    def tokens_per_sec(self) -> float:
-        total = self.prompt_tokens + self.completion_tokens
-        return round(total / self.elapsed_s, 1) if self.elapsed_s else 0.0
-
-    def to_json(self) -> str:
-        d = dataclasses.asdict(self)
-        d["tokens_per_sec"] = self.tokens_per_sec
-        return json.dumps(d)
 
 
 def pump(

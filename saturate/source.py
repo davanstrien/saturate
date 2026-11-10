@@ -20,6 +20,8 @@ from concurrent.futures import Executor, ThreadPoolExecutor
 from functools import partial
 from typing import NoReturn
 
+from saturate.stats import Stats
+
 BYTE_FORMATS = ("B", "b", "c")  # memoryview formats whose items are single bytes
 BYTES_PREFIX = "bytes-v1:"  # starts the hashed text of a row that holds bytes
 
@@ -127,7 +129,7 @@ stream = normalize  # the README-facing name
 
 
 def skip_done(
-    rows: Iterable[tuple[str, dict]], done, retry_errors: bool = False, stats=None
+    rows: Iterable[tuple[str, dict]], done, retry_errors: bool = False, stats: Stats | None = None
 ) -> Iterator[tuple[str, dict]]:
     """Exact resume filter + within-run dedup (first admission wins).
 

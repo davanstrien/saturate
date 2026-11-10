@@ -22,6 +22,7 @@ import anyio
 
 from saturate.core import Done
 from saturate.sink import UNSTORABLE, error_row
+from saturate.stats import Stats
 from saturate.transport import usage_tokens
 
 log = logging.getLogger(__name__)
@@ -68,7 +69,9 @@ def sink_hooks(sink) -> SinkHooks:
     )
 
 
-async def drain(results: AsyncIterable[Done], sink, shard: tuple[int, int] = (0, 1), stats=None):
+async def drain(
+    results: AsyncIterable[Done], sink, shard: tuple[int, int] = (0, 1), stats: Stats | None = None
+) -> Stats:
     """Write every finished row to the sink; returns the run's Stats.
 
     However the run ends, the rows that already finished are written. If you cancel, drain
@@ -76,8 +79,6 @@ async def drain(results: AsyncIterable[Done], sink, shard: tuple[int, int] = (0,
     before the cancellation goes on (a second cancel stops waiting; the writing goes on by
     itself). If writing fails, drain stops reading at once and raises the write error.
     Completion markers are pump()'s job."""
-    from saturate import Stats  # local import: avoid cycle
-
     stats = stats if stats is not None else Stats()
     writer = _Writer(sink, stats)
     writer.start()
@@ -161,7 +162,7 @@ class _Writer:
     waiting and appends them in one call to the thread; when none arrive for the sink's flush
     interval, what the sink holds is flushed."""
 
-    def __init__(self, sink, stats):
+    def __init__(self, sink, stats: Stats):
         self.sink, self.stats = sink, stats
         self.hooks = sink_hooks(sink)
         self.failure: BaseException | None = None
@@ -283,7 +284,7 @@ class _Writer:
             _count_demoted(self.sink, self._demoted_before, self.stats)
 
 
-def _record(done: Done, probe, stats) -> dict:
+def _record(done: Done, probe, stats: Stats) -> dict:
     """The record one finished row leaves in the sink, with its counts added to `stats`."""
     if done.error is not None:
         stats.rows_failed += 1
@@ -308,7 +309,7 @@ def _record(done: Done, probe, stats) -> dict:
     return rec
 
 
-def _count_demoted(sink, demoted_before: int, stats) -> None:
+def _count_demoted(sink, demoted_before: int, stats: Stats) -> None:
     """Rows a flush demoted landed as error rows, not successes. Capped at what this drain
     counted: rows buffered before it started were never in these stats."""
     demoted = min(getattr(sink, "rows_demoted", 0) - demoted_before, stats.rows_processed)

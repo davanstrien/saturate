@@ -59,7 +59,7 @@ errored id is called healing; readers let the success win.
 | module | role |
 |---|---|
 | `controller.py` | pure `decide(obs, limit) -> new_limit`: `Fixed(n)` or `Auto` (below) |
-| `signals.py` | engine metrics scrape (`HttpScrape`: the `METRICS` table covers vLLM, SGLang, llama.cpp, TensorRT-LLM, and TEI queue depth only) or none (`Null`); the startup `probe` (engine, capacity, metrics on?) |
+| `signals.py` | engine metrics scrape (`HttpScrape`: the `METRICS` table covers vLLM, SGLang, llama.cpp and TensorRT-LLM; TEI's one metric only names the engine) or none (`Null`); the startup `probe` (engine, capacity, metrics on?) |
 | `http.py` | `HttpClient`: one pooled aiohttp session per client |
 | `transport.py` | typed `Request` (json ⊕ multipart), retry ladder, circuit breaker |
 | `core.py` | `AdaptiveLimiter` (slot/observe; the admission window is an anyio `CapacityLimiter` the controller resizes each tick) → `AdaptiveClient` (+HTTP) |
@@ -214,9 +214,10 @@ images live in host RAM.
   `Obs`. A source that raises leaves that tick without gauges (blind mode); it never ends the
   run. The metrics table (`signals.METRICS`, one row per engine metric)
   matches both metric-name spellings per engine because the k8s Gateway API Inference Extension (GAIE) protocol fixes gauge *semantics* but
-  not their names (see [why.md §7](why.md)). Dialects may be partial: TEI publishes
-  queue depth (`te_queue_size`) and nothing else — no running gauge, no KV — so the
-  controller runs the queue-band branches and skips the KV ones.
+  not their names (see [why.md §7](why.md)). TEI publishes
+  one gauge, its queue depth (`te_queue_size`), and the controller does not read it: every
+  text waits in that queue for a GPU batch, so it is deep on a healthy server and counts
+  texts, not requests. On TEI the controller runs on throughput and rejections alone.
 - **Sink** — one invariant: *an id returned by `existing_ids()` implies its record is
   durable; an id absent implies re-processing is safe.* `ParquetSink` carries the full
   CONTRACT; `FileSink` (one file per row, filesystem as manifest) is the second

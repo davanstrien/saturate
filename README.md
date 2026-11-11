@@ -178,7 +178,7 @@ timeouts, a growing queue). Otherwise it tries a wider or narrower window: it ke
 one when delivered throughput improves, and a narrower one when throughput holds
 ([docs/design.md](https://github.com/davanstrien/saturate/blob/main/docs/design.md), "The
 controller"). When the engine's metrics gauges are reachable (vLLM, SGLang, llama.cpp,
-TensorRT-LLM, and TEI's queue depth), they sharpen the decisions. Against opaque endpoints (a
+TensorRT-LLM), they sharpen the decisions. Against TEI and opaque endpoints (a
 hosted API, a proxy that drops `/metrics`), it works from errors, timeouts and delivered
 throughput alone. It grows only after the first completion arrives, and it freezes (and tells
 you) when your *source* is the bottleneck rather than the server.
@@ -519,7 +519,7 @@ job/endpoint ids — in [spikes/RESULTS.md](https://github.com/davanstrien/satur
 
 | surface | live receipt |
 |---|---|
-| engines | vLLM, SGLang, llama.cpp boot templates + gauge scrapes; TEI queue-depth gauge only (`te_queue_size` — no KV, no running gauge) |
+| engines | vLLM, SGLang, llama.cpp boot templates + gauge scrapes; TEI: its concurrency limit, no gauges |
 | serving arrangements | in-process `Engine` · exposed-Job proxy · laptop→Job · Inference Endpoints **including scale-to-zero cold start** (retry ladder + breaker ride the managed-wake 503s; 100/100 after one healing re-run) |
 | routes | `/chat/completions` · `/completions` · `/embeddings` (micro-batch rows) · `/audio/transcriptions` (multipart) · `/rerank` · `/classify` (Whisper, a reranker and a classifier on vLLM: every row ok, [bench/results/routes-*](https://github.com/davanstrien/saturate/tree/main/bench/results)) |
 | adaptivity | window self-ranged 8→376 with zero config; 1.2× the delivered tok/s of a hand-tuned fixed-64 bare-httpx client, same 10k rows (it discovered 272 was better than 64) |

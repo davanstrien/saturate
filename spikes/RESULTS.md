@@ -9,6 +9,9 @@ stack) · `embed_1job.py`/`embed_4job.py` (embeddings, single vs fan-out) · `ti
 
 # TEI gauge dialect — the queue-only engine (2026-07-29)
 
+> Later change: `te_queue_size` now only names the engine; its value is not read as `waiting`
+> (see CHANGELOG, Unreleased). The receipt below is as it was on its date.
+
 Two `cpu-upgrade` Jobs on `ghcr.io/huggingface/text-embeddings-inference:cpu-latest`
 (bge-small-en-v1.5, ONNX CPU backend — it forces `max_batch_requests=8`).
 

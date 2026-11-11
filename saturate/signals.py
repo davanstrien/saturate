@@ -103,8 +103,8 @@ METRICS: tuple[Metric, ...] = (
     Metric("trtllm", "num_requests_running", "running"),
     # TEI's queue is not a sign of overload: every text waits in it for a GPU batch, so it is
     # in the hundreds on a healthy server, and it counts texts, not requests. Read as `waiting`
-    # it cut the window on every run (20,000 single texts, live TEI 1.9.4: 268 texts/s against
-    # 298 without it). The metric still names the engine.
+    # it cut the window in each measured run (20,000 single texts, live TEI 1.9.4, bge-m3 on one
+    # A10G, 2 to 3 runs each: 268 texts/s against 297 without it). The metric still names the engine.
     Metric("tei", "queue_size", None),
 )
 

@@ -14,9 +14,10 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
 
 - On TEI, `Auto` no longer reads `te_queue_size` as requests waiting. Every text waits in
   that queue for a GPU batch, so it is deep on a healthy server, and the queue cut shrank
-  the window on every run: to about 20 on single-text rows, which cost about 10% (20,000
-  texts on a live TEI 1.9.4: 268 texts/s, against 298 with the gauge not read and 298 for
-  `Fixed(512)`). On TEI the window is now set by throughput and rejections alone.
+  the window: to about 20 on single-text rows, which was about 10% slower in the one setup
+  measured (20,000 texts, live TEI 1.9.4, bge-m3 on one A10G, 2 to 3 runs each: 268
+  texts/s, against 297 with the gauge not read and 297 for `Fixed(512)`). On TEI the
+  window is now set by throughput and rejections alone.
 
 ## [0.3.1] - 2026-11-10
 

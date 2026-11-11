@@ -380,8 +380,10 @@ class _EngineBudget:
     """The client's own copy of an engine's admission count, for an engine that rejects past
     its capacity and counts something smaller than a request (TEI: one permit per input, so 512
     permits admit eight requests of 64 texts, and reject the ninth). A request holds as many
-    units as the engine takes for it, so this client alone never asks the engine for more than
-    it admits. The window still counts requests.
+    units as the engine takes for it, for the whole row (its retries included), so this client
+    alone does not ask the engine for more than it admits. One exception: after a client-side
+    timeout the engine may still be working on the abandoned request, and can reject the retry.
+    The window still counts requests.
 
     Units are taken all or none, in arrival order: a large request is not overtaken for ever by
     small ones. Another client of the same server is not counted, so its requests can still
@@ -500,7 +502,9 @@ class AdaptiveClient:
         # an engine that rejects past a capacity it does not count in requests: any window,
         # Fixed or Auto, must keep this client's requests within what the engine admits
         counted = capacity is not None and not capacity.queues and capacity.engine in REQUEST_UNITS
-        self._budget = _EngineBudget(capacity) if capacity is not None and counted else None
+        self._budget = None
+        if capacity is not None and counted:
+            self._budget = _EngineBudget(capacity)
         controller = self.limiter.controller
         if not isinstance(controller, Auto):
             return
@@ -544,7 +548,11 @@ class AdaptiveClient:
         async with self.limiter.slot():
             if on_admit is not None:
                 on_admit()
-            async with budget.hold(units) if budget is not None else contextlib.nullcontext():
+            if budget is None:
+                return await call_endpoint(
+                    self._client, self.base, req, self.breaker, self.limiter.observe, self.retry_budget_s
+                )
+            async with budget.hold(units):  # for the whole row, its retries and their backoff included
                 return await call_endpoint(
                     self._client, self.base, req, self.breaker, self.limiter.observe, self.retry_budget_s
                 )

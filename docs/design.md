@@ -185,8 +185,8 @@ above it, for TEI, which rejects the rest with 429s.
 TEI's number counts inputs, not requests: it takes one permit per text of a batch request, and
 rejects the request when one is missing. So for TEI the client also keeps its own copy of that
 count (`core._EngineBudget`, with `signals.tei_inputs`): a request holds one unit per input
-while it is with the engine, under a `Fixed` window as well as `Auto`. The window still counts
-requests. The copy counts this client only; a second client of the same server can still cause
+for the whole row, retries and their backoff included, under a `Fixed` window as well as
+`Auto`. The window still counts requests. The copy counts this client only; a second client of the same server can still cause
 rejections, and without the probe (`signal_source="none"`) there is no copy.
 
 The scrape reads the probed engine's own metrics path. TensorRT-LLM's `/metrics` is JSON

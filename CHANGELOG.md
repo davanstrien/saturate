@@ -18,8 +18,9 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
   with rows of 64 texts most rows ended as `http 429 after retries` error rows (70 of 313
   succeeded on a live TEI 1.9.4), under `Auto()` and under a `Fixed` window above
   limit / texts per row. The client now keeps its own count of TEI's permits and a request
-  holds one per input (`input`, `inputs` or `texts`), so one client never asks TEI for more
-  than it admits. The window still counts requests. A row with more inputs than TEI's
+  holds one per input (`input`, `inputs` or `texts`) for the whole row, so one client does
+  not ask TEI for more than it admits (a retry after a client-side timeout can still be
+  rejected, while TEI finishes the abandoned request). The window still counts requests. A row with more inputs than TEI's
   limit fails at once with an error that says so. Not covered: two clients on one TEI
   server, `signal_source="none"`, and TEI's `/similarity` and Vertex routes.
 

@@ -12,6 +12,12 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
 
 ### Changed
 
+- Against a hosted API, the missing metrics endpoint is no longer logged as a warning. A
+  404 from `/metrics` on a server that the probe did not name now logs one info line: "no
+  engine metrics at ... (HTTP 404), as on a hosted API: the window adapts on throughput and
+  backpressure alone". The old line, "metrics scrape unavailable ... running blind", read
+  as a fault on runs where nothing was wrong. A named engine's 404 and every other miss
+  (unreachable, 5xx, no gauges in the reply) still warn as before.
 - On TEI, `Auto` no longer reads `te_queue_size` as requests waiting. Every text waits in
   that queue for a GPU batch, so it is deep on a healthy server, and the queue cut shrank
   the window: to about 20 on single-text rows, which was about 10% slower in the one setup

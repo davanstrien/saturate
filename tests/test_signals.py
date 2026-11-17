@@ -244,6 +244,32 @@ def test_blind_mode_says_why_the_reads_missed_and_names_the_engines_flag(caplog)
     assert scrape.reason == "no engine gauges in the reply"
 
 
+def test_a_404_from_an_unnamed_server_is_logged_as_a_hosted_api_not_a_fault(caplog):
+    """No engine named and no /metrics: a hosted API. One info line, no warning; the periodic
+    retry is unchanged. A named engine's 404, and any other miss, still warn."""
+    import logging
+
+    from saturate.signals import HttpScrape
+
+    client = _ScriptedClient({})
+    scrape = HttpScrape(cast(HttpClient, client), "http://x/v1", max_fails=5, retry_every=30)
+    with caplog.at_level(logging.INFO, logger="saturate"):
+        _reads(scrape, 40)
+    (record,) = [r for r in caplog.records if "metrics" in r.getMessage()]
+    assert record.levelno == logging.INFO
+    assert record.getMessage() == (
+        "no engine metrics at http://x/metrics (HTTP 404), as on a hosted API: the window adapts "
+        'on throughput and backpressure alone (signal_source="none" skips this check); '
+        "will retry periodically"
+    )
+    assert len(client.paths) == 6  # five misses, then one probe on read 35
+    caplog.clear()
+    scrape = HttpScrape(cast(HttpClient, _ScriptedClient({"/metrics": (500, "boom")})), "http://x/v1")
+    _reads(scrape, 6)
+    (record,) = [r for r in caplog.records if "metrics" in r.getMessage()]
+    assert record.levelno == logging.WARNING and "(HTTP 500) — running blind" in record.getMessage()
+
+
 def test_a_probe_of_vllm_or_a_hosted_api_names_no_engine():
     """JSON answers on every probed path that match no engine's shape name none: a hosted API's
     error bodies, and SGLang's own /server_info, which lacks disaggregated_params."""

@@ -78,7 +78,7 @@ What a run prints (a 10-page OCR smoke run on HF Jobs, LightOnOCR-2-1B on an A10
 
 The *window* is the limit on requests in flight. At the end of a run saturate can also print
 an *advisor* line when it measured that something other than the model limited throughput — slow input, slow
-request preparation, or a server cap — with what to change.
+request preparation, a server cap, or your own `max_limit` — with what to change.
 
 Output is append-only parquet, read back with `read_output` (or `load_dataset`, given a
 `schema=`); a failed row is a durable *error row*, not a gap (see [What you get](#what-you-get)).

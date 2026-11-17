@@ -258,8 +258,8 @@ def test_a_404_from_an_unnamed_server_is_logged_as_a_hosted_api_not_a_fault(capl
     (record,) = [r for r in caplog.records if "metrics" in r.getMessage()]
     assert record.levelno == logging.INFO
     assert record.getMessage() == (
-        "no engine metrics at http://x/metrics (HTTP 404), as on a hosted API: the window adapts "
-        'on throughput and backpressure alone (signal_source="none" skips this check); '
+        "no engine metrics at http://x/metrics (HTTP 404), as on a hosted API: running on "
+        'throughput and backpressure alone (signal_source="none" skips this check); '
         "will retry periodically"
     )
     assert len(client.paths) == 6  # five misses, then one probe on read 35

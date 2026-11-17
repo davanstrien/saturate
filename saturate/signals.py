@@ -282,8 +282,8 @@ class HttpScrape:
                 if self.reason == "HTTP 404" and not (self.engine or self.dialect):
                     # no engine named and no metrics path: what a hosted API looks like
                     log.info(
-                        f"no engine metrics at {self.url} (HTTP 404), as on a hosted API: the "
-                        "window adapts on throughput and backpressure alone "
+                        f"no engine metrics at {self.url} (HTTP 404), as on a hosted API: "
+                        "running on throughput and backpressure alone "
                         '(signal_source="none" skips this check); will retry periodically'
                     )
                 else:

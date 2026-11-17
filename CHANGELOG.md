@@ -14,7 +14,7 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
 
 - Against a hosted API, the missing metrics endpoint is no longer logged as a warning. A
   404 from `/metrics` on a server that the probe did not name now logs one info line: "no
-  engine metrics at ... (HTTP 404), as on a hosted API: the window adapts on throughput and
+  engine metrics at ... (HTTP 404), as on a hosted API: running on throughput and
   backpressure alone". The old line, "metrics scrape unavailable ... running blind", read
   as a fault on runs where nothing was wrong. A named engine's 404 and every other miss
   (unreachable, 5xx, no gauges in the reply) still warn as before.

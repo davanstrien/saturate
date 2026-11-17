@@ -164,3 +164,26 @@ def advise(
             f"{flag.format(n=mode * 2)}"
         ]
     return []
+
+
+def advise_window(telemetry: Telemetry, max_limit: int | None) -> list[str]:
+    """The caller's own cap as the limit, from Auto's own record: steady at `max_limit`, it
+    skipped every wider move (x2, x4, x1.5, x1.25) at least once because the cap left nothing
+    to try (`hold:ceiling` at `max_limit` itself; a backpressure ceiling holds the window an
+    eighth under where it was met, so its skips are at a lower window), and the window was at
+    `max_limit` for at least half the run. Auto skips a move only with an evidence window in
+    (a used window, rows completing), so a run with nothing more to admit gives no hint, and
+    neither does one where Auto tried `max_limit` and came back down. The run does not show
+    whether a wider window would be faster. `max_limit` is None when there is no cap of the
+    caller's to raise: a Fixed window, or an engine that rejects requests above a capacity."""
+    if max_limit is None or not telemetry:
+        return []
+    at_cap = [t for t in telemetry if t.get("limit", 0) >= max_limit]
+    skipped = sum(1 for t in at_cap if t.get("reason") == "hold:ceiling")
+    if skipped < 4 or len(at_cap) / len(telemetry) < 0.5:
+        return []
+    return [
+        f"WINDOW-CAP: the window was at max_limit={max_limit} for "
+        f"{100 * len(at_cap) // len(telemetry)}% of the run and Auto had no wider window to try "
+        f"({skipped} moves up skipped) — raise max_limit to find out whether a wider window is faster"
+    ]

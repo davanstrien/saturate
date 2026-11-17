@@ -42,7 +42,7 @@ from saturate.source import (
 )
 from saturate.sources import bucket_rows, dataset_rows
 from saturate.stats import Stats
-from saturate.telemetry import Tick, advise, advise_input, bound_by_counts, cut_reasons
+from saturate.telemetry import Tick, advise, advise_input, advise_window, bound_by_counts, cut_reasons
 from saturate.transport import (
     Attempt,
     FatalTransportError,
@@ -340,6 +340,15 @@ def pump(
     )
 
 
+def _own_cap(controller: object) -> int | None:
+    """Auto's `max_limit` when it is the caller's to raise; None for a Fixed window, and for
+    an engine that rejects requests above a capacity (its capacity, not `max_limit`, is the
+    limit to look at first)."""
+    if not isinstance(controller, Auto) or controller.hard_capacity:
+        return None
+    return controller.max
+
+
 async def _pump(
     rows,
     to_request,
@@ -441,6 +450,7 @@ async def _pump(
         await write_telemetry(write_lines, lines)  # final: the complete trajectory
     stats.hints = advise(limiter.ticks, dialect, stats.final_limit, CEILING_FLAG)
     stats.hints += advise_input(limiter.ticks, prepare_workers)
+    stats.hints += advise_window(limiter.ticks, _own_cap(getattr(limiter, "controller", None)))
     if stats.rows_errored_prior:
         stats.hints.append(
             f"RETRY-ERRORS: {stats.rows_errored_prior} rows were skipped because their "

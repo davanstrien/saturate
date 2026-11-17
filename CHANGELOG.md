@@ -10,6 +10,17 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
 
 ## [Unreleased]
 
+### Added
+
+- A run-end advisor line, `WINDOW-CAP`, for a run where `Auto` stayed at `max_limit`. It
+  prints when the window was at `max_limit` for at least half the run and `Auto` skipped
+  every wider move at least once because the cap left nothing to try. Such a run looks
+  healthy (a hosted API with `max_limit=64`: 0 errors, the window at 64 for 67% of the
+  run), and it cannot show whether a wider window would be faster: the line says to raise
+  `max_limit` to find out. There is no line when backpressure set the limit, when `Auto`
+  tried `max_limit` and settled lower, for a `Fixed` window, or for an engine that rejects
+  requests above a capacity of its own (TEI).
+
 ### Changed
 
 - On TEI, `Auto` no longer reads `te_queue_size` as requests waiting. Every text waits in

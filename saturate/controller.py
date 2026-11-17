@@ -359,6 +359,7 @@ class Auto:
         bounds included. The caller's `initial` otherwise wins; with neither, DEFAULT_INITIAL."""
         initial, min_limit, max_limit = self.config
         self.min, self.max = min_limit, max_limit
+        self.hard_capacity = capacity is not None and capacity.requests > 0 and not capacity.queues
         start = initial
         if capacity is not None and capacity.requests > 0:
             n = capacity.requests

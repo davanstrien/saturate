@@ -358,6 +358,28 @@ def test_a_slow_parse_reads_loop_bound(stub, tmp_path):
     assert stats.bound_by, stats.bound_by  # the control run did tick
 
 
+def test_a_run_held_at_its_own_max_limit_says_so(stub, tmp_path):
+    """Auto at a `max_limit` the stub could exceed: the window stays full at the cap with no
+    pushback, Auto skips every wider move more than once,
+    and the run ends with the WINDOW-CAP hint. A Fixed window of the same size is
+    the caller's choice: no hint."""
+    stub.latency_s = 0.05
+    for name, window, hinted in (("auto", Auto(max_limit=4), True), ("fixed", Fixed(4), False)):
+        stats = pump(
+            rows(300),
+            to_request,
+            parse,
+            endpoint=stub.endpoint,
+            output=str(tmp_path / name),
+            window=window,
+            signal_source="none",
+        )
+        assert stats.rows_processed == 300
+        assert any(h.startswith("WINDOW-CAP: ") and "max_limit=4" in h for h in stats.hints) == hinted, (
+            stats.hints
+        )
+
+
 @pytest.mark.parametrize("workers", [0, 2])
 def test_prepared_bodies_are_bounded_independently_of_the_feeder(stub, tmp_path, workers):
     """With Fixed(2), at most max(2*workers, 4) built bodies wait for a slot plus 2 in flight:

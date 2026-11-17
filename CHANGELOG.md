@@ -12,13 +12,14 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
 
 ### Added
 
-- A run-end advisor line, `WINDOW-CAP`, for a run that `Auto(max_limit=...)` held back. It
-  prints when the window was full and at or just under `max_limit` for at least half the
-  run, with no backpressure, no queue seen at the engine and no slow input. `Auto` cannot
-  try a wider window than `max_limit`, so such a run looks healthy and does not show that
-  the cap set its pace (a hosted API with `max_limit=64`: the window stayed at 56 to 64 for
-  the whole run). There is no line for a `Fixed` window, or when an engine that rejects
-  requests above its capacity set the cap.
+- A run-end advisor line, `WINDOW-CAP`, for a run where `Auto` stayed at `max_limit`. It
+  prints when the window was at `max_limit` for at least half the run and `Auto` skipped
+  every wider move at least once because the cap left nothing to try. Such a run looks
+  healthy (a hosted API with `max_limit=64`: 0 errors, the window at 64 for 67% of the
+  run), and it cannot show whether a wider window would be faster: the line says to raise
+  `max_limit` to find out. There is no line when backpressure set the limit, when `Auto`
+  tried `max_limit` and settled lower, for a `Fixed` window, or for an engine that rejects
+  requests above a capacity of its own (TEI).
 
 ### Changed
 

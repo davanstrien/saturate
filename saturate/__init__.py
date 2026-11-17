@@ -341,11 +341,12 @@ def pump(
 
 
 def _own_cap(controller: object) -> int | None:
-    """Auto's `max_limit` when it is the caller's to raise; None for a Fixed window, and when
-    an engine that rejects requests above its capacity lowered the cap to that capacity."""
-    if not isinstance(controller, Auto):
+    """Auto's `max_limit` when it is the caller's to raise; None for a Fixed window, and for
+    an engine that rejects requests above a capacity (its capacity, not `max_limit`, is the
+    limit to look at first)."""
+    if not isinstance(controller, Auto) or controller.hard_capacity:
         return None
-    return controller.max if controller.max == controller.config[2] else None
+    return controller.max
 
 
 async def _pump(

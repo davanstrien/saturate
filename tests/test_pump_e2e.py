@@ -360,12 +360,13 @@ def test_a_slow_parse_reads_loop_bound(stub, tmp_path):
 
 def test_a_run_held_at_its_own_max_limit_says_so(stub, tmp_path):
     """Auto at a `max_limit` the stub could exceed: the window stays full at the cap with no
-    pushback, and the run ends with the WINDOW-CAP hint. A Fixed window of the same size is
+    pushback, Auto skips every wider move more than once,
+    and the run ends with the WINDOW-CAP hint. A Fixed window of the same size is
     the caller's choice: no hint."""
     stub.latency_s = 0.05
     for name, window, hinted in (("auto", Auto(max_limit=4), True), ("fixed", Fixed(4), False)):
         stats = pump(
-            rows(120),
+            rows(300),
             to_request,
             parse,
             endpoint=stub.endpoint,
@@ -373,7 +374,7 @@ def test_a_run_held_at_its_own_max_limit_says_so(stub, tmp_path):
             window=window,
             signal_source="none",
         )
-        assert stats.rows_processed == 120
+        assert stats.rows_processed == 300
         assert any(h.startswith("WINDOW-CAP: ") and "max_limit=4" in h for h in stats.hints) == hinted, (
             stats.hints
         )

@@ -167,27 +167,23 @@ def advise(
 
 
 def advise_window(telemetry: Telemetry, max_limit: int | None) -> list[str]:
-    """The caller's own cap as the limit: for at least half the run the window was full and
-    within an eighth of `max_limit` (Auto tries x7/8 from the cap, so a run held at it moves
-    between the two), with no backpressure, no queue seen at the engine, and no slow input.
-    Auto cannot try a wider window than `max_limit`, so the run does not show whether one
-    would be faster. `max_limit` is None when there is no cap of the caller's to raise: a
-    Fixed window, or an engine that rejects requests above its own capacity."""
-    if max_limit is None or len(telemetry) < 5:
+    """The caller's own cap as the limit, from Auto's own record: steady at `max_limit`, it
+    skipped every wider move (x2, x4, x1.5, x1.25) at least once because the cap left nothing
+    to try (`hold:ceiling` at `max_limit` itself; a backpressure ceiling holds the window an
+    eighth under where it was met, so its skips are at a lower window), and the window was at
+    `max_limit` for at least half the run. Auto skips a move only with an evidence window in
+    (a used window, rows completing), so a run with nothing more to admit gives no hint, and
+    neither does one where Auto tried `max_limit` and came back down. The run does not show
+    whether a wider window would be faster. `max_limit` is None when there is no cap of the
+    caller's to raise: a Fixed window, or an engine that rejects requests above a capacity."""
+    if max_limit is None or not telemetry:
         return []
-    near = max_limit - max(1, max_limit // 8)
-    capped = 0
-    for t in telemetry:
-        limit = t.get("limit", 0)
-        at_cap = limit >= near and t.get("inflight", 0) >= 0.8 * limit
-        pressed = t.get("bp") or t.get("waiting") or t.get("input_bound")
-        if at_cap and not pressed and t.get("bound_by") in (None, "engine"):
-            capped += 1
-    if capped / len(telemetry) < 0.5:
+    at_cap = [t for t in telemetry if t.get("limit", 0) >= max_limit]
+    skipped = sum(1 for t in at_cap if t.get("reason") == "hold:ceiling")
+    if skipped < 4 or len(at_cap) / len(telemetry) < 0.5:
         return []
     return [
-        f"WINDOW-CAP: the window was full at or just under max_limit={max_limit} for "
-        f"{100 * capped // len(telemetry)}% of the run, with no backpressure and no queue seen "
-        "at the engine — Auto could not try a wider window, so raise max_limit to find out "
-        "whether one is faster"
+        f"WINDOW-CAP: the window was at max_limit={max_limit} for "
+        f"{100 * len(at_cap) // len(telemetry)}% of the run and Auto had no wider window to try "
+        f"({skipped} moves up skipped) — raise max_limit to find out whether a wider window is faster"
     ]

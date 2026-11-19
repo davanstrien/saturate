@@ -237,24 +237,29 @@ deprecation.
 
 `saturate.labs.compile_cache` keeps vLLM's or SGLang's start-up caches (compiled graphs,
 Triton and FlashInfer kernels, autotune results) as one archive in a Bucket, so the next Job
-on the same model, engine version and GPU skips that work:
+on the same model, engine version and GPU can reuse them:
 
 ```python
 from saturate.labs.compile_cache import compile_cache, default_key
 
-key = default_key("vllm", MODEL)  # engine/model/GPU/version: a coarse key on purpose
+key = default_key("vllm", MODEL, image=IMAGE)  # engine/model/GPU/version/image: coarse on purpose
 with compile_cache("hf://buckets/<you>/jobs-cache", engine="vllm", key=key) as cache:
     with Engine(MODEL, engine="vllm") as endpoint:
         cache.save()  # keep the boot's compiled kernels even if pump() fails later
         pump(...)
+print(cache.report.to_json())  # what was restored, refused, new, saved; errors as text
 ```
 
-It restores the archive before the engine starts (so it goes outside `Engine`) and saves a
-new one only when the run compiled something new. `[pump] compile_cache:` lines say what was
-restored and saved; `cache.to_dict()` has the numbers. It needs `saturate[hf]` and a token that
-can write to the bucket. To start cold again, delete the archive (`hf buckets rm`). The
-archive holds code (`.py`, `.so`, cubins) that the engine runs: keep it in your own private
-bucket.
+It restores the archive before the engine starts (so it goes outside `Engine`; any server
+works, and `cache.restore()` / `cache.save()` / `cache.close()` do the same without a with
+block). It uploads a new archive only when a cache file is new or changed size; whether the
+engine reuses a restored file is the engine's own decision. `skip={"ptx"}` leaves a group of
+folders out (groups: `compile`, `triton`, `flashinfer`, `deep_gemm`, `ptx`, and `jit` for
+SGLang). One writer per key at a time: the last save wins, with a warning. A failed download
+or upload is logged and recorded, never raised, and an archive that could not be read is never
+replaced. It needs `saturate[hf]` and a token that can write to the bucket; to start cold
+again, delete the archive (`hf buckets rm`). The archive holds code (`.py`, `.so`, cubins)
+that the engine runs: keep it in your own private bucket.
 
 ## The composable layer (for building on top)
 
@@ -546,6 +551,7 @@ job/endpoint ids — in [spikes/RESULTS.md](https://github.com/davanstrien/satur
 | surface | live receipt |
 |---|---|
 | engines | vLLM, SGLang, llama.cpp boot templates + gauge scrapes; TEI: its concurrency limit, no gauges |
+| compile cache (lab) | rtx-pro-6000, image cached, cold → warm server ready: Nemotron NVFP4 on vLLM 274 → 156 s (Jobs `6aff1176`, `6aff137c`), Unlimited-OCR-2 on SGLang 161 → 117 s with identical output (`6aff1182`, `6aff137f`); restore 1–2 s |
 | serving arrangements | in-process `Engine` · exposed-Job proxy · laptop→Job · Inference Endpoints **including scale-to-zero cold start** (retry ladder + breaker ride the managed-wake 503s; 100/100 after one healing re-run) |
 | routes | `/chat/completions` · `/completions` · `/embeddings` (micro-batch rows) · `/audio/transcriptions` (multipart) · `/rerank` · `/classify` (Whisper, a reranker and a classifier on vLLM: every row ok, [bench/results/routes-*](https://github.com/davanstrien/saturate/tree/main/bench/results)) |
 | adaptivity | window self-ranged 8→376 with zero config; 1.2× the delivered tok/s of a hand-tuned fixed-64 bare-httpx client, same 10k rows (it discovered 272 was better than 64) |

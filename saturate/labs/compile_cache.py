@@ -2,32 +2,38 @@
 deprecation.
 
 `compile_cache` keeps a serving engine's start-up caches (compiled graphs, Triton and FlashInfer
-kernels, autotune results) as one archive in a Bucket you own. Put it around the code that
-starts the engine:
+kernels, autotune results) as one archive in a Bucket you own, so the next Job on the same
+engine, model and GPU can reuse them. Put it around the code that starts the engine:
 
     from saturate import Engine, pump
     from saturate.labs.compile_cache import compile_cache, default_key
 
-    key = default_key("vllm", MODEL)
-    with compile_cache("hf://buckets/<you>/jobs-cache", engine="vllm", key=key):
+    key = default_key("vllm", MODEL, image=IMAGE)
+    with compile_cache("hf://buckets/<you>/jobs-cache", engine="vllm", key=key) as cache:
         with Engine(MODEL, engine="vllm") as endpoint:
+            cache.save()  # keep the boot's kernels even if the rest of the run fails
             pump(...)
+    print(cache.report.to_json())
 
-On enter, it sets the engine profile's environment variables (only those you have not set),
-downloads `<location>/<key>.tar` if it exists, and unpacks it into the engine's cache folders.
-A file that already exists is kept, not overwritten. On a clean exit, it lists the cache folders
-again (path and size of each file) and uploads a new archive of all of them only if a file is
-new or changed size. An exception in the block skips that save, so call `cache.save()` once the
-engine is ready to keep a cold boot's work even if the rest of the run fails. A failed download
-or upload logs a warning and the run goes on: the cache only saves time.
+Without a with block: `cache.restore()` before the server starts, `cache.save()` when you
+want, `cache.close()` at the end. Any server works; `Engine` is not required.
+
+`restore()` sets the profile's environment variables (only those you have not set), downloads
+`<location>/<key>.tar` if it exists and unpacks it into the engine's cache folders. A file that
+already exists is kept. `save()` lists the cache folders again (path and size of each file) and
+uploads a new archive of all of them only if a file is new or changed size since the last
+restore or save. Whether the engine reuses a restored file is the engine's decision: it keys
+its own cache folders by hashes this helper does not compute. A key that is too coarse costs a
+recompile and a larger archive, not wrong output.
+
+Failures do not stop the run: a failed download or upload logs a warning and is recorded in
+`cache.report`. After a failed restore of an archive that exists, nothing is saved, so a good
+archive is never replaced by a partial one. One writer per key at a time: when two Jobs save
+the same key, the last one wins and the other's new files are lost (a warning says so).
 
 The archive holds code that the engine loads and runs (.py, .so, cubins). Keep it in your own
 private bucket (a missing bucket is created private), and never restore an archive that other
 people can write to.
-
-The key is coarse on purpose (engine, version, model, GPU). Each engine keys its own cache
-folders by hashes that this helper does not compute. A key that is too coarse costs a
-recompile and a larger archive, not wrong output.
 """
 
 from __future__ import annotations
@@ -36,17 +42,17 @@ import dataclasses
 import fnmatch
 import getpass
 import importlib.metadata
+import json
 import logging
 import os
 import re
 import shutil
 import subprocess
-import sys
 import tarfile
 import tempfile
 import time
-from collections.abc import Generator, Iterable
-from contextlib import contextmanager
+import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import fsspec
@@ -56,96 +62,66 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Profile:
-    """What compile_cache does for one engine.
+    """What compile_cache archives for one engine.
 
-    folders: cache folders to archive when they exist. A path starts with `~` or `/`; `{user}`
-        is the user name, `{tmp}` the temporary folder (TMPDIR, as torch uses it), `{vllm}` and
-        `{sglang}` are the engines' cache roots (VLLM_CACHE_ROOT, SGLANG_CACHE_DIR, or their
-        defaults). Other variables that move a cache (FLASHINFER_WORKSPACE_BASE,
+    groups: named sets of cache folders; `compile_cache(skip=...)` leaves groups out. A folder
+        starts with `~` or `/`; `{user}` is the user name, `{tmp}` the temporary folder (TMPDIR,
+        as torch uses it), `{vllm}` and `{sglang}` the engines' cache roots (VLLM_CACHE_ROOT,
+        SGLANG_CACHE_DIR, or their defaults). `$NAME` is the folder in environment variable
+        NAME, when it is set. Other variables that move a cache (FLASHINFER_WORKSPACE_BASE,
         CUDA_CACHE_PATH, ...) are not followed: list the folder in a Profile of your own.
     never: files never archived or restored. A pattern without `/` is matched against every
         part of a file's path inside its folder (`*.lock`, `runs`); a pattern with `/` against
         the start of that path (`assets/*`).
-    env: environment variables set before the engine starts, unless already set. Their values
-        are folders, and are archived too.
-    log_lines: name -> regular expression; `scan_log` collects the lines that match in a log
-        you captured (Engine sends the server's output to stderr, not to this helper).
+    env: environment variables set before the engine starts, unless already set.
     """
 
-    folders: tuple[str, ...]
+    groups: dict[str, tuple[str, ...]]
     never: tuple[str, ...] = ()
     env: dict[str, str] = field(default_factory=dict)
-    log_lines: dict[str, str] = field(default_factory=dict)
 
 
 # Never in any archive: locks, temporary files, half-written staging folders.
-_COMMON_NEVER = ("*.lock", "*.tmp", "tmp.*", ".staging-*")
+_COMMON_NEVER = ("*.lock", "*.tmp", "tmp.*", ".staging-*", ".cc-*")
 
 VLLM = Profile(
-    folders=(
-        # Subfolders of the vLLM cache root, named one by one: the root also holds downloaded
-        # assets and, when configured there, media and LoRA caches.
-        "{vllm}/torch_compile_cache",
-        "{vllm}/torch_aot_compile",
-        "{vllm}/flashinfer_autotune_cache",
-        "{vllm}/deep_gemm",
-        "{vllm}/startup_plan",
-        "{vllm}/modelinfos",
-        "~/.triton",
-        "~/.cache/flashinfer",
-        "{tmp}/torchinductor_{user}",
-        "~/.nv/ComputeCache",
-    ),
+    # Subfolders of the vLLM cache root, named one by one: the root also holds downloaded
+    # assets and, when configured there, media and LoRA caches.
+    groups={
+        "compile": (
+            "{vllm}/torch_compile_cache",
+            "{vllm}/torch_aot_compile",
+            "{vllm}/startup_plan",
+            "{vllm}/modelinfos",
+            "{tmp}/torchinductor_{user}",
+        ),
+        "triton": ("~/.triton", "$TRITON_CACHE_DIR"),
+        "flashinfer": ("~/.cache/flashinfer", "{vllm}/flashinfer_autotune_cache"),
+        "deep_gemm": ("{vllm}/deep_gemm",),
+        # The CUDA driver's PTX JIT cache: the largest group, and it grows on warm runs; its
+        # gain is not measured yet.
+        "ptx": ("~/.nv/ComputeCache",),
+    },
     never=_COMMON_NEVER,
     # torch's first inductor autotuner otherwise points TRITON_CACHE_DIR at the inductor cache
     # of that moment, which moves between a cold and a warm run: the warm run then misses.
     env={"TRITON_CACHE_DIR": "~/.triton/cache"},
-    log_lines={
-        "aot_loaded": r"Directly load AOT compilation",
-        "aot_saved": r"[Ss]aved AOT",
-        "torch_compile_s": r"torch\.compile takes ([\d.]+) s in total",
-        "profiling_run_s": r"Initial profiling/warmup run took ([\d.]+) s",
-        "jit_warmup_s": r"JIT kernel warmup finished in ([\d.]+)",
-        "autotune_loaded": r"Loaded (\d+) configs",
-        "autotune_tuning": r"Tuning (\S+)",
-        "startup_plan": r"Applying persisted startup plan",
-        "graph_capture_s": r"Graph capturing finished in ([\d.]+) sec",
-        "engine_init_s": r"init engine .*? took ([\d.]+) s",
-        "cubin_reload_failed": r"Failed to reload cubin file",
-        "jit_during_inference": r"JIT compilation during inference",
-    },
 )
 
 SGLANG = Profile(
     # Subfolders of the SGLang cache root, named one by one: the root also holds files that
     # must never move to another machine (kernels.lock from the image, gpu_p2p_* per host,
-    # model_streamer, ple, paged_experts). The last five folders are where older images write.
-    folders=(
-        "{sglang}/jit",
-        "{sglang}/deep_gemm",
-        "{sglang}/cute_aot",
-        "{sglang}/triton",
-        "{sglang}/inductor",
-        "{sglang}/nv",
-        "{sglang}/.cache/flashinfer",
-        "{sglang}/flashinfer/autotune",
-        "{sglang}/torch_compile_cache",
-        "{sglang}/tilelang",
-        "{sglang}/humming/cache",
-        "~/.triton",
-        "~/.cache/flashinfer",
-        "~/.cache/deep_gemm",
-        "{tmp}/torchinductor_{user}",
-        "~/.nv/ComputeCache",
-    ),
+    # model_streamer, ple, paged_experts). The `~/...` folders are where older images write.
+    groups={
+        "compile": ("{sglang}/inductor", "{sglang}/torch_compile_cache", "{tmp}/torchinductor_{user}"),
+        "jit": ("{sglang}/jit", "{sglang}/cute_aot", "{sglang}/tilelang", "{sglang}/humming/cache"),
+        "triton": ("{sglang}/triton", "~/.triton"),
+        "flashinfer": ("{sglang}/.cache/flashinfer", "{sglang}/flashinfer/autotune", "~/.cache/flashinfer"),
+        "deep_gemm": ("{sglang}/deep_gemm", "~/.cache/deep_gemm"),
+        "ptx": ("{sglang}/nv", "~/.nv/ComputeCache"),
+    },
     never=(*_COMMON_NEVER, "gpu_p2p_access_cache_for_*", "locks", "runs"),
     env={},  # SGLang points its compilers into its cache root itself; moving it re-downloads FA3
-    log_lines={
-        "ready": r"The server is fired up and ready to roll",
-        "capture_s": r"Capture .*?elapsed[=:]\s*([\d.]+)",
-        "deep_gemm_jit": r"JIT Compiling",
-        "serving_compile": r"Triton kernel '(\S+)' took [\d.]+ s to compile after serving started",
-    },
 )
 
 PROFILES = {"vllm": VLLM, "sglang": SGLANG}
@@ -153,15 +129,21 @@ PROFILES = {"vllm": VLLM, "sglang": SGLANG}
 
 @dataclass
 class Report:
-    """What one compile_cache block did. Sizes in MB (10**6 bytes), times in seconds."""
+    """What one compile_cache did: recorded, never guessed. Sizes in MB (10**6 bytes), times in
+    seconds. `restore` is "missing" (no archive), "restored", "failed" or "not run".
+    `groups[name]` counts files per group: restored, new and changed (new/changed: since the
+    restore, over every save)."""
 
     archive: str
     folders: list[str]
-    env: dict[str, str]  # the variables this block set
+    skipped_groups: list[str]
+    env: dict[str, str]  # the variables this cache set
+    restore: str = "not run"
+    restore_error: str | None = None
     restored_files: int = 0
     restored_mb: float = 0.0
-    restore_s: float | None = None  # None: nothing restored
-    refused_files: int = 0  # archive members outside the profile's folders, or in `never`
+    restore_s: float | None = None
+    refused_files: int = 0  # archive members outside the folders, in `never`, or behind a link
     existing_files: int = 0  # archive members whose file already existed: kept, not overwritten
     new_files: int = 0
     changed_files: int = 0
@@ -169,134 +151,212 @@ class Report:
     saved_files: int = 0
     saved_mb: float = 0.0
     save_s: float | None = None
+    save_error: str | None = None
+    replaced_other_writer: bool = False  # the archive changed since this run read it
+    groups: dict[str, dict[str, int]] = field(default_factory=dict)
 
-    def save(self) -> None:
-        """Save now if a cache file is new or changed (e.g. right after the engine is ready).
-        The save at the end of the block then compares with this one."""
-        self._saver()
-
-    def _saver(self) -> None:  # replaced by the block that yields this report
-        raise RuntimeError("compile_cache: save() only works inside its with block")
-
-    def to_dict(self) -> dict:
-        return dataclasses.asdict(self)
+    def to_json(self) -> str:
+        return json.dumps(dataclasses.asdict(self))
 
 
-def compile_cache(location: str, engine: str | Profile, key: str, *, save: bool = True):
-    """Restore `<location>/<key>.tar` into the engine's cache folders on enter; on a clean exit,
-    save a new archive if a cache file is new or changed size. Yields a `Report`.
+def compile_cache(
+    location: str,
+    engine: str | Profile,
+    key: str,
+    *,
+    save: bool = True,
+    skip: Iterable[str] = (),
+) -> CompileCache:
+    """A `CompileCache` for `<location>/<key>.tar`; use it in a with block, or call `restore()`,
+    `save()` and `close()` yourself.
 
     location: `hf://buckets/<you>/<bucket>[/prefix]`, or any fsspec path (a local folder, a
         mounted bucket).
     engine: "vllm", "sglang", or a `Profile`.
     key: the archive name inside `location`, e.g. from `default_key`.
-    save: False restores only (and `Report.save()` does nothing).
+    save: False restores only; `save()` then does nothing.
+    skip: profile groups to leave out, e.g. {"ptx"}.
 
-    Put it outside `Engine`: the environment and the restore must come before the server
-    starts. Needs `saturate[hf]` and a token that can write to the bucket for `hf://`.
+    Restore before the server starts: the environment and the cache files must be there when
+    it boots. Needs `saturate[hf]` and a token that can write to the bucket for `hf://`.
     """
     profile = _profile(engine)
     if not key or key.startswith("/") or ".." in key.split("/"):
-        raise ValueError(f"compile_cache: key must be a relative name without '..', got {key!r}")
-    return _session(f"{location.rstrip('/')}/{key}.tar", profile, save)
+        raise ValueError(f"compile_cache() requires a relative key without '..', not {key!r}")
+    skip = sorted(set(skip))
+    unknown = [name for name in skip if name not in profile.groups]
+    if unknown:
+        raise ValueError(f"compile_cache() requires skip= names from {sorted(profile.groups)}, not {unknown}")
+    return CompileCache(f"{location.rstrip('/')}/{key}.tar", profile, save=save, skip=skip)
 
 
-@contextmanager
-def _session(archive: str, profile: Profile, save: bool) -> Generator[Report]:
-    set_here = {name: _expand(value) for name, value in profile.env.items() if not os.environ.get(name)}
-    os.environ.update(set_here)
-    try:
-        folders = _folders(profile)
-        report = Report(archive=archive, folders=folders, env=set_here)
-        for name in profile.env:
+class CompileCache:
+    """One archive's restore and saves. A with block calls `restore()` on enter and, on a clean
+    exit, `save()`; `close()` always runs."""
+
+    def __init__(self, archive: str, profile: Profile, *, save: bool = True, skip: Iterable[str] = ()):
+        self.archive, self.profile, self.save_enabled = archive, profile, save
+        self.skip = sorted(skip)
+        self.report = Report(archive=archive, folders=[], skipped_groups=self.skip, env={})
+        self._tmp: str | None = None
+        self._folders: dict[str, str] = {}  # folder -> group
+        self._baseline: dict[str, int] = {}  # path -> size at the last restore or save
+        self._remote: tuple | None = None  # the archive's size and stamp when last read or written
+
+    def __enter__(self) -> CompileCache:
+        self.restore()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        try:
+            if exc_type is None:  # an exception in the block skips the save
+                self.save()
+        finally:
+            self.close()
+
+    def restore(self) -> None:
+        """Set the environment, then download and unpack the archive if it exists."""
+        if self._tmp is not None:
+            raise RuntimeError("compile_cache: restore() requires a cache that is not open")
+        self._tmp = tempfile.mkdtemp(prefix="compile-cache-")
+        set_here = {
+            name: _expand(value) for name, value in self.profile.env.items() if not os.environ.get(name)
+        }
+        os.environ.update(set_here)
+        self.report.env = set_here
+        for name in self.profile.env:
             log.info(f"compile_cache: {name}={os.environ[name]}")
-        with tempfile.TemporaryDirectory(prefix="compile-cache-") as tmp:
-            _restore(archive, folders, profile.never, tmp, report)
-            baseline = _manifest(folders, profile.never)
+        self._folders = _folders(self.profile, self.skip)
+        self.report.folders = sorted(self._folders)
+        self._restore()
+        self._baseline = _manifest(self._folders, self.profile.never)
 
-            def save_now() -> None:
-                nonlocal baseline
-                if save:
-                    baseline = _save(archive, folders, profile.never, baseline, tmp, report)
+    def save(self) -> None:
+        """Save if a cache file is new or changed since the last restore or save (e.g. right
+        after the engine is ready; the save at the end then compares with this one)."""
+        if self._tmp is None:
+            raise RuntimeError("compile_cache: save() requires an open cache (inside its with block)")
+        if not self.save_enabled:
+            return
+        if self.report.restore == "failed":
+            log.warning(
+                f"compile_cache: not saving {self.archive}: it could not be read at the start, "
+                "and this run's files would replace it"
+            )
+            return
+        self._save()
 
-            report._saver = save_now  # ty: ignore[invalid-assignment]
-            yield report
-            save_now()
-    finally:
-        for name in set_here:
+    def close(self) -> None:
+        """Remove the temporary folder and the environment variables this cache set."""
+        if self._tmp is not None:
+            shutil.rmtree(self._tmp, ignore_errors=True)
+            self._tmp = None
+        for name in self.report.env:
             os.environ.pop(name, None)
 
-
-def _restore(archive: str, folders: list[str], never: tuple[str, ...], tmp: str, report: Report) -> None:
-    started = time.monotonic()
-    local = os.path.join(tmp, "restore.tar")
-    try:
-        fs, path = fsspec.url_to_fs(archive)
-        if not fs.exists(path):
-            log.info(f"compile_cache: no archive at {archive}; the engine compiles from scratch")
+    def _restore(self) -> None:
+        assert self._tmp is not None
+        started = time.monotonic()
+        local = os.path.join(self._tmp, "restore.tar")
+        try:
+            fs, path = fsspec.url_to_fs(self.archive)
+            if not fs.exists(path):
+                self.report.restore = "missing"
+                log.info(f"compile_cache: no archive at {self.archive}; the engine compiles from scratch")
+                return
+            self._remote = _stamp(fs, path)
+            fs.get_file(path, local)
+            download_s = time.monotonic() - started
+            size = os.path.getsize(local)
+            counts = _unpack(local, self._folders, self.profile.never)
+        except Exception as e:
+            self.report.restore = "failed"
+            self.report.restore_error = f"{type(e).__name__}: {e}"
+            log.warning(
+                f"compile_cache: could not restore {self.archive} ({self.report.restore_error}); "
+                "the engine compiles what is missing, and this run will not save"
+            )
             return
-        fs.get_file(path, local)
-        download_s = time.monotonic() - started
-        size = os.path.getsize(local)
-        files, refused, existing = _unpack(local, folders, never)
-    except Exception as e:
-        log.warning(
-            f"compile_cache: could not restore {archive} ({type(e).__name__}: {e}); "
-            "the engine compiles what is missing"
+        finally:
+            if os.path.exists(local):
+                os.remove(local)
+        report = self.report
+        report.restore = "restored"
+        report.restored_files, report.refused_files, report.existing_files = (
+            counts["written"],
+            counts["refused"],
+            counts["existing"],
         )
-        return
-    finally:
-        if os.path.exists(local):
-            os.remove(local)
-    report.restored_files, report.refused_files, report.existing_files = files, refused, existing
-    report.restored_mb = round(size / 1e6, 1)
-    report.restore_s = round(time.monotonic() - started, 1)
-    log.info(
-        f"compile_cache: restored {report.restored_mb:,.0f} MB, {files:,} files in "
-        f"{report.restore_s:.1f} s (download {download_s:.1f} s) from {archive}"
-    )
-    if refused:
-        log.warning(f"compile_cache: skipped {refused:,} archive members outside the cache folders")
-    if existing:
-        log.info(f"compile_cache: kept {existing:,} files that already existed")
+        for group, n in counts["by_group"].items():
+            report.groups.setdefault(group, _group_counts())["restored"] = n
+        report.restored_mb = round(size / 1e6, 1)
+        report.restore_s = round(time.monotonic() - started, 1)
+        log.info(
+            f"compile_cache: restored {report.restored_mb:,.0f} MB, {report.restored_files:,} files in "
+            f"{report.restore_s:.1f} s (download {download_s:.1f} s) from {self.archive}"
+        )
+        if report.refused_files:
+            log.warning(
+                f"compile_cache: refused {report.refused_files:,} archive members outside the cache folders"
+            )
+        if report.existing_files:
+            log.info(f"compile_cache: kept {report.existing_files:,} files that already existed")
+
+    def _save(self) -> None:
+        assert self._tmp is not None
+        after = _manifest(self._folders, self.profile.never)
+        new = [path for path in after if path not in self._baseline]
+        changed = [
+            path for path, size in after.items() if path in self._baseline and self._baseline[path] != size
+        ]
+        if not new and not changed:
+            log.info("compile_cache: no new or changed files in the cache folders; archive not saved")
+            return
+        started = time.monotonic()
+        local = os.path.join(self._tmp, "save.tar")
+        try:
+            _pack(after, local)
+            fs, path = fsspec.url_to_fs(self.archive)
+            if fs.exists(path) and _stamp(fs, path) != self._remote:
+                self.report.replaced_other_writer = True
+                log.warning(
+                    f"compile_cache: another run saved {self.archive} since this one read it; "
+                    "replacing it, so that run's new files are lost (one writer per key)"
+                )
+            _ensure_parent(fs, path)
+            _put(fs, local, path)
+            self._remote = _stamp(fs, path)
+        except Exception as e:
+            self.report.save_error = f"{type(e).__name__}: {e}"
+            log.warning(f"compile_cache: could not save {self.archive} ({self.report.save_error})")
+            return
+        finally:
+            size = os.path.getsize(local) if os.path.exists(local) else 0
+            if os.path.exists(local):
+                os.remove(local)
+        report = self.report
+        report.save_error = None
+        report.new_files += len(new)
+        report.changed_files += len(changed)
+        for kind, paths in (("new", new), ("changed", changed)):
+            for path in paths:
+                report.groups.setdefault(_group_of(path, self._folders), _group_counts())[kind] += 1
+        report.saved = True
+        report.saved_files = len(after)
+        report.saved_mb = round(size / 1e6, 1)
+        report.save_s = round(time.monotonic() - started, 1)
+        log.info(
+            f"compile_cache: saved {report.saved_mb:,.0f} MB, {len(after):,} files "
+            f"({len(new):,} new, {len(changed):,} changed) in {report.save_s:.1f} s to {self.archive}"
+        )
+        self._baseline = after
 
 
-def _save(
-    archive: str,
-    folders: list[str],
-    never: tuple[str, ...],
-    before: dict[str, int],
-    tmp: str,
-    report: Report,
-) -> dict[str, int]:
-    """Save if a file is new or changed since `before`; return what the next save compares with."""
-    after = _manifest(folders, never)
-    new = sum(1 for path in after if path not in before)
-    changed = sum(1 for path, size in after.items() if path in before and before[path] != size)
-    if not new and not changed:
-        log.info("compile_cache: no new or changed files in the cache folders; archive not saved")
-        return before
-    started = time.monotonic()
-    local = os.path.join(tmp, "save.tar")
-    try:
-        _pack(after, local)
-        fs, path = fsspec.url_to_fs(archive)
-        _ensure_parent(fs, path)
-        _put(fs, local, path)
-    except Exception as e:
-        log.warning(f"compile_cache: could not save {archive} ({type(e).__name__}: {e})")
-        return before
-    report.new_files += new
-    report.changed_files += changed
-    report.saved = True
-    report.saved_files = len(after)
-    report.saved_mb = round(os.path.getsize(local) / 1e6, 1)
-    report.save_s = round(time.monotonic() - started, 1)
-    log.info(
-        f"compile_cache: saved {report.saved_mb:,.0f} MB, {len(after):,} files "
-        f"({new:,} new, {changed:,} changed) in {report.save_s:.1f} s to {archive}"
-    )
-    return after
+def _group_counts() -> dict[str, int]:
+    return {"restored": 0, "new": 0, "changed": 0}
+
+
+# --- the bucket ---
 
 
 def _is_hf(fs) -> bool:
@@ -304,19 +364,34 @@ def _is_hf(fs) -> bool:
     return "hf" in protocols
 
 
+def _stamp(fs, path: str) -> tuple:
+    """What tells one version of the archive from another: its size and whichever time or
+    hash the filesystem reports."""
+    try:
+        info = fs.info(path)
+    except FileNotFoundError:
+        return ()
+    return tuple(str(info.get(k)) for k in ("size", "mtime", "last_modified", "created", "xet_hash", "etag"))
+
+
 def _put(fs, local: str, path: str) -> None:
     """An hf:// upload appears whole; elsewhere (a local folder, a mounted bucket) write a
-    temporary name and rename it, so another Job never reads half an archive."""
+    unique temporary name and rename it, so another run never reads half an archive."""
     if _is_hf(fs):
         fs.put_file(local, path)
         return
-    partial = f"{path}.tmp-{os.getpid()}"
-    fs.put_file(local, partial)
-    fs.mv(partial, path)
+    partial = f"{path}.cc-{uuid.uuid4().hex}"
+    try:
+        fs.put_file(local, partial)
+        fs.mv(partial, path)
+    finally:
+        if fs.exists(partial):
+            fs.rm(partial)
 
 
 def _ensure_parent(fs, path: str) -> None:
-    """A missing bucket is created private; a local folder is created."""
+    """A missing bucket is created private (as saturate.sink does for outputs); a local folder
+    is created."""
     if _is_hf(fs):
         parts = path.split("/")
         if parts[0] == "buckets" and len(parts) >= 3:
@@ -343,7 +418,7 @@ def _path(path: str) -> str:
 
 
 def _expand(template: str) -> str:
-    """A profile path: its `{...}` names filled in, then made absolute."""
+    """A profile folder: its `{...}` names filled in, then made absolute."""
     roots = {
         "user": _user(),
         "tmp": tempfile.gettempdir(),
@@ -357,22 +432,37 @@ def _within(path: str, folder: str) -> bool:
     return path == folder or path.startswith(folder.rstrip("/") + "/")
 
 
-def _folders(profile: Profile) -> list[str]:
-    """The profile's folders as absolute paths, a folder inside another listed once."""
-    paths = [_expand(p) for p in profile.folders]
-    paths += [_path(os.environ[name]) for name in profile.env if os.environ.get(name)]
-    kept: list[str] = []
-    for path in sorted(set(paths)):
+def _folders(profile: Profile, skip: Iterable[str] = ()) -> dict[str, str]:
+    """folder -> group for the profile's groups not skipped; a folder inside another is listed
+    once, under the outer folder's group."""
+    found: dict[str, str] = {}
+    for group, templates in profile.groups.items():
+        if group in skip:
+            continue
+        for template in templates:
+            if template.startswith("$"):
+                value = os.environ.get(template[1:])
+                if value:
+                    found.setdefault(_path(value), group)
+            else:
+                found.setdefault(_expand(template), group)
+    kept: dict[str, str] = {}
+    for path in sorted(found):
         if not any(_within(path, folder) for folder in kept):
-            kept.append(path)
+            kept[path] = found[path]
     return kept
+
+
+def _group_of(path: str, folders: dict[str, str]) -> str:
+    return next((group for folder, group in folders.items() if _within(path, folder)), "?")
 
 
 def _guarded() -> list[str]:
     """Folders never archived or restored, whatever the profile says: the Hugging Face cache
-    holds model weights and the token."""
-    homes = [os.environ.get("HF_HOME") or "~/.cache/huggingface", os.environ.get("HF_HUB_CACHE")]
-    return [os.path.normpath(os.path.expanduser(home)) for home in homes if home]
+    (model weights and the token), where it is by default and wherever HF_* moves it."""
+    names = ("HF_HOME", "HF_HUB_CACHE", "HF_XET_CACHE", "HF_ASSETS_CACHE", "HF_TOKEN_PATH")
+    homes = ["~/.cache/huggingface", *(os.environ.get(name) for name in names)]
+    return sorted({_path(home) for home in homes if home} | {os.path.realpath(_path(h)) for h in homes if h})
 
 
 def _skipped(rel: str, never: tuple[str, ...]) -> bool:
@@ -386,7 +476,7 @@ def _skipped(rel: str, never: tuple[str, ...]) -> bool:
     return False
 
 
-def _manifest(folders: list[str], never: tuple[str, ...]) -> dict[str, int]:
+def _manifest(folders: dict[str, str], never: tuple[str, ...]) -> dict[str, int]:
     """path -> size of every regular file in the folders (symbolic links are left out)."""
     guarded = _guarded()
     files: dict[str, int] = {}
@@ -424,21 +514,25 @@ def _target(arcname: str) -> str | None:
 
 
 def _pack(files: dict[str, int], tar_path: str) -> None:
+    """One tar of the files, in path order. A file removed since the listing is left out; any
+    other error (a file that shrinks while it is read) fails the whole save, because tarfile
+    would leave the archive cut short at that file."""
     with tarfile.open(tar_path, "w") as tar:
         for path in sorted(files):
-            try:
-                tar.add(path, arcname=_arcname(path), recursive=False)
-            except OSError:  # removed since the listing
+            if not os.path.exists(path):
                 continue
+            tar.add(path, arcname=_arcname(path), recursive=False)
 
 
-def _unpack(tar_path: str, folders: list[str], never: tuple[str, ...]) -> tuple[int, int, int]:
-    """Write the archive's regular files that belong in the folders; return (written, refused,
-    existing). Links, members outside the folders, `never` files and the Hugging Face cache are
-    refused. A file that already exists (e.g. one the image ships) is kept as it is. Each file is
-    written under a temporary name and renamed, so a broken archive leaves no partial file."""
+def _unpack(tar_path: str, folders: dict[str, str], never: tuple[str, ...]) -> dict:
+    """Write the archive's regular files that belong in the folders. Refused: links, members
+    outside the folders (also through a symbolic link on the way), `never` files and the
+    Hugging Face cache. A file that already exists (e.g. one the image ships) is kept. Each file
+    is written under a unique temporary name and renamed, so a broken archive leaves no partial
+    file. Returns counts: written, refused, existing, by_group."""
     guarded = _guarded()
-    written = refused = existing = 0
+    real_folders = {folder: os.path.realpath(folder) for folder in folders}
+    counts: dict = {"written": 0, "refused": 0, "existing": 0, "by_group": {}}
     with tarfile.open(tar_path) as tar:
         for member in tar:
             if member.isdir():
@@ -448,23 +542,25 @@ def _unpack(tar_path: str, folders: list[str], never: tuple[str, ...]) -> tuple[
             if (
                 target is None
                 or folder is None
-                or _skipped(os.path.relpath(target, folder), never)
-                or any(_within(target, g) for g in guarded)
-                or os.path.islink(target)
+                or not _allowed(target, folder, real_folders[folder], never, guarded)
             ):
-                refused += 1
+                counts["refused"] += 1
                 continue
-            if os.path.exists(target):
-                existing += 1
+            if os.path.lexists(target):
+                counts["existing"] += 1
                 continue
             source = tar.extractfile(member)
             if source is None:
-                refused += 1
+                counts["refused"] += 1
                 continue
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            partial = f"{target}.cc-partial"
+            parent = os.path.dirname(target)
+            os.makedirs(parent, exist_ok=True)
+            if not _within(os.path.realpath(parent), real_folders[folder]):  # a link made meanwhile
+                counts["refused"] += 1
+                continue
+            handle, partial = tempfile.mkstemp(prefix=".cc-", dir=parent)  # created exclusively
             try:
-                with source, open(partial, "wb") as out:
+                with source, os.fdopen(handle, "wb") as out:
                     shutil.copyfileobj(source, out)
                 os.chmod(partial, member.mode & 0o755)
                 os.utime(partial, (member.mtime, member.mtime))  # build tools (ninja) compare mtimes
@@ -472,8 +568,20 @@ def _unpack(tar_path: str, folders: list[str], never: tuple[str, ...]) -> tuple[
             finally:
                 if os.path.exists(partial):
                     os.remove(partial)
-            written += 1
-    return written, refused, existing
+            counts["written"] += 1
+            group = folders[folder]
+            counts["by_group"][group] = counts["by_group"].get(group, 0) + 1
+    return counts
+
+
+def _allowed(target: str, folder: str, real_folder: str, never: tuple[str, ...], guarded: list[str]) -> bool:
+    if _skipped(os.path.relpath(target, folder), never):
+        return False
+    if any(_within(target, g) for g in guarded):
+        return False
+    # the nearest existing parent must resolve inside the folder: no symbolic link out of it
+    real_parent = os.path.realpath(os.path.dirname(target))
+    return _within(real_parent, real_folder) and not any(_within(real_parent, g) for g in guarded)
 
 
 # --- the key ---
@@ -486,21 +594,24 @@ def default_key(
     revision: str | None = None,
     version: str | None = None,
     image: str | None = None,
+    gpu: str | None = None,
     extra: Iterable[str] = (),
 ) -> str:
     """A coarse archive key: `<engine>/<model>[@<revision>]/<gpu>/<engine>-<version>[/<image>]
     [/<extra>...]`, e.g. `vllm/Qwen--Qwen3-8B/NVIDIA-L4-sm89-x1/vllm-0.32.0`.
 
-    version: the engine's installed version. By default it is read from this Python, else
-        from the first `python3` on PATH that has the engine (as `Engine` finds SGLang). Pass
-        it when the engine lives in an environment of its own, or after installing a
-        different build (call this after the install).
-    image: the container image tag or digest; recommended when the engine came with the image.
-    extra: anything else that changes compiled code, e.g. "tp2" for tensor parallelism.
+    version: the engine's installed version. By default it is read from this Python; for
+        SGLang also from the first `python3` on PATH that has it (as `Engine` finds SGLang).
+        Pass it when the engine lives elsewhere (vLLM in a venv of its own), and call this
+        after installing a different build.
+    image: the container image tag or digest. Recommended: it covers the torch and FlashInfer
+        versions inside the image, and keeps archives for different images apart.
+    gpu: the GPU part; by default `<name>-sm<capability>-x<count>` from nvidia-smi.
+    extra: anything else to keep apart, e.g. "tp2" or "nvfp4".
     """
     version = version or _installed_version(engine)
     name = model + (f"@{revision}" if revision else "")
-    parts = [engine, _slug(name), _gpu(), f"{engine}-{_slug(version)}"]
+    parts = [engine, _slug(name), _slug(gpu) if gpu else _gpu(), f"{engine}-{_slug(version)}"]
     if image:
         parts.append(_slug(image))
     parts += [_slug(e) for e in extra]
@@ -512,7 +623,7 @@ def _slug(text: str) -> str:
 
 
 def _gpu() -> str:
-    """`<name>-sm<capability>-x<count>` of the visible GPUs, or `no-gpu`."""
+    """`<name>-sm<capability>-x<count>` of the visible GPUs."""
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,compute_cap", "--format=csv,noheader"],
@@ -522,12 +633,12 @@ def _gpu() -> str:
             check=True,
         ).stdout
     except (OSError, subprocess.SubprocessError) as e:
-        log.warning(f"compile_cache: nvidia-smi gave no GPU ({type(e).__name__}); the key says no-gpu")
-        return "no-gpu"
+        raise ValueError(
+            f"default_key() requires gpu= when nvidia-smi gives no GPU ({type(e).__name__})"
+        ) from e
     rows = [line.split(",") for line in out.splitlines() if line.strip()]
     if not rows or len(rows[0]) < 2:
-        log.warning(f"compile_cache: could not read nvidia-smi output {out[:80]!r}; the key says no-gpu")
-        return "no-gpu"
+        raise ValueError(f"default_key() requires gpu= when nvidia-smi gives no GPU (output {out[:80]!r})")
     name, capability = rows[0][0].strip(), rows[0][1].strip().replace(".", "")
     return f"{_slug(name)}-sm{capability}-x{len(rows)}"
 
@@ -536,49 +647,29 @@ _VERSION = "import importlib.metadata as m, sys; print(m.version(sys.argv[1]))"
 
 
 def _installed_version(engine: str) -> str:
-    if engine not in PROFILES:
-        raise ValueError(f"default_key: pass version= for engine {engine!r}")
     try:
         return importlib.metadata.version(engine)
     except importlib.metadata.PackageNotFoundError:
         pass
-    from saturate.engine import python_with
+    if engine == "sglang":  # the image's own Python, which Engine also starts SGLang with
+        from saturate.engine import python_with
 
-    python = python_with(engine)
-    if python != sys.executable:
         try:
             asked = subprocess.run(
-                [python, "-c", _VERSION, engine], capture_output=True, text=True, timeout=30
+                [python_with("sglang"), "-c", _VERSION, "sglang"], capture_output=True, text=True, timeout=30
             )
             if asked.returncode == 0 and asked.stdout.strip():
                 return asked.stdout.strip()
         except (OSError, subprocess.SubprocessError):
             pass
-    raise ValueError(f"default_key: no installed {engine} found; pass version=")
-
-
-# --- logs ---
-
-
-def scan_log(engine: str | Profile, lines: Iterable[str] | str) -> dict[str, list[str]]:
-    """The profile's log lines found in `lines`: name -> one entry per matching line (the
-    first group of the expression, or the whole match). Counts are the list lengths."""
-    profile = _profile(engine)
-    if isinstance(lines, str):
-        lines = lines.splitlines()
-    patterns = {name: re.compile(p) for name, p in profile.log_lines.items()}
-    found: dict[str, list[str]] = {name: [] for name in patterns}
-    for line in lines:
-        for name, pattern in patterns.items():
-            match = pattern.search(line)
-            if match:
-                found[name].append((match.group(1) if match.groups() else None) or match.group(0))
-    return found
+    raise ValueError(f"default_key() requires version= when {engine} is not installed in this Python")
 
 
 def _profile(engine: str | Profile) -> Profile:
     if isinstance(engine, Profile):
         return engine
     if engine not in PROFILES:
-        raise ValueError(f"compile_cache: no profile for engine {engine!r}; use one of {sorted(PROFILES)}")
+        raise ValueError(
+            f"compile_cache() requires engine= from {sorted(PROFILES)} or a Profile, not {engine!r}"
+        )
     return PROFILES[engine]

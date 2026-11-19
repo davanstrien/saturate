@@ -171,3 +171,34 @@ dispositions:
 | G1 no progress denominator · G4 items-per-row not in storage | **Wrapper layer** (`run.json` launch-spec sidecar: expected rows, world, items_per_row, written by the pipelines layer at launch — it's intent, not output; pumpjack stays a recorder of what happened). Spec belongs in the inference-pipelines design |
 | G2 dead-on-arrival shard (live case) | run.json's `world` covers it at launch time; stats-{n}.json covers it at completion |
 | G3 liveness (stalled vs slow) | **DEFERRED with tension named**: a heartbeat needs the CONTRACT to promise a telemetry flush cadence, which costs commits on dataset-repo sinks (free on buckets). Candidate: periodic telemetry flush (default ~60s, configurable), cadence advisory. Decide alongside the staged-output (bucket-hot) work — heartbeats and buckets want each other |
+
+## Lab helpers and `compile_cache` (2026-11-19)
+
+New surface, recorded per the decision-1 scope rule: the `saturate.labs` namespace and its
+first module, `compile_cache`.
+
+- **Why `labs`.** Some helpers are useful next to saturate but too young for the contract:
+  they follow engine internals that change every release. `saturate.labs.*` is outside
+  `__all__` and CONTRACT.md, may change or be removed in any release without deprecation, and
+  gives one `FutureWarning` on first import. The namespace is the marker: no decorator.
+- **Why not inside `Engine`.** `Engine` is an optional lifecycle helper and keeps its
+  signature. The cache wraps whatever starts the server (`Engine`, a recipe's own `vllm serve`,
+  anything), so it is a separate context manager with plain `restore()`/`save()`/`close()`.
+  Nothing in the core imports it, so it can be removed cleanly.
+- **Shape.** One uncompressed tar per coarse key (engine, model, GPU, engine version, image),
+  in the user's own private bucket. Measured on Jobs: one archive restores in 1–2 s; per-file
+  reads through a mount cost ~85 ms each and `hf buckets sync` ~8 ms each, so an archive wins
+  for caches of thousands of small files. Uncompressed, so Xet dedups re-saves (a warm re-save
+  uploaded about the bytes the tar grew by). Re-save when a (path, size) manifest shows new or
+  changed files; size, not mtime, because autotune files are rewritten every run. The engines
+  key their own folders by hashes this helper never computes; a coarse key costs size, not
+  correctness. Per-engine profiles name folder groups explicitly (`skip=` leaves a group out),
+  never-archive patterns and env vars (vLLM: `TRITON_CACHE_DIR` pinned, which removed a
+  warm-run Triton miss).
+- **Boundaries.** Warn and record, never raise, on bucket I/O; never replace an archive that
+  could not be read; last writer wins per key, with a warning. Out of scope: shared or
+  "official" caches (the archive is code), merging concurrent saves, pruning stale hash
+  folders, a restore-key fallback across models.
+- **Promotion / removal.** Promote (e.g. to an `Engine` option) only with receipts on more
+  engines and GPUs and a stable profile for a few engine releases; remove when the engines or
+  the platform persist these caches themselves.

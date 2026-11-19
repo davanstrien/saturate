@@ -8,6 +8,17 @@ saturate is experimental. Before 1.0, any minor release (0.x) can change the API
 defaults or the output layout, often with no deprecation period. Pin an exact version
 (for example `saturate==0.3.2`) if you depend on current behaviour.
 
+## [Unreleased]
+
+### Added
+
+- `saturate.labs`, for lab helpers: not part of the contract; they may change or be removed in
+  any release, without deprecation. The first import gives one `FutureWarning`.
+- `saturate.labs.compile_cache`: keeps vLLM's or SGLang's start-up caches as one archive in a
+  Bucket you own, restored before the engine starts and saved when cache files are new or
+  changed. On rtx-pro-6000, a warm start was 118 s sooner on vLLM (Nemotron NVFP4) and 44 s
+  sooner on SGLang (Unlimited-OCR-2), with identical output.
+
 ## [0.3.2] - 2026-11-18
 
 Two fixes for TEI. Nothing changes in the output layout or in `pump()`'s arguments.

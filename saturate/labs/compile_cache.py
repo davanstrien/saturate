@@ -45,7 +45,6 @@ import sys
 import tarfile
 import tempfile
 import time
-import warnings
 from collections.abc import Generator, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -183,21 +182,6 @@ class Report:
         return dataclasses.asdict(self)
 
 
-_warned = False
-
-
-def _warn_once() -> None:
-    global _warned
-    if not _warned:
-        _warned = True
-        warnings.warn(
-            "saturate.labs.compile_cache is a lab helper: not part of the contract; it may "
-            "change or be removed in any release, without deprecation",
-            FutureWarning,
-            stacklevel=3,
-        )
-
-
 def compile_cache(location: str, engine: str | Profile, key: str, *, save: bool = True):
     """Restore `<location>/<key>.tar` into the engine's cache folders on enter; on a clean exit,
     save a new archive if a cache file is new or changed size. Yields a `Report`.
@@ -211,7 +195,6 @@ def compile_cache(location: str, engine: str | Profile, key: str, *, save: bool 
     Put it outside `Engine`: the environment and the restore must come before the server
     starts. Needs `saturate[hf]` and a token that can write to the bucket for `hf://`.
     """
-    _warn_once()
     profile = _profile(engine)
     if not key or key.startswith("/") or ".." in key.split("/"):
         raise ValueError(f"compile_cache: key must be a relative name without '..', got {key!r}")

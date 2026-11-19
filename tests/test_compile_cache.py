@@ -1,12 +1,12 @@
 """saturate.labs.compile_cache on fake cache folders and a local folder as the bucket."""
 
 import os
+import subprocess
+import sys
 import tarfile
-import warnings
 
 import pytest
 
-import saturate
 from saturate.labs import compile_cache as cc
 
 
@@ -18,7 +18,6 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     for name in ("VLLM_CACHE_ROOT", "SGLANG_CACHE_DIR", "HF_HOME", "HF_HUB_CACHE", "TRITON_CACHE_DIR"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(cc, "_warned", True)  # the warning has its own test
     return home
 
 
@@ -315,12 +314,13 @@ def test_scan_log_counts_lines():
     assert found["aot_loaded"] == []
 
 
-def test_future_warning_once_and_not_exported(tmp_path, monkeypatch):
-    monkeypatch.setattr(cc, "_warned", False)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        cc.compile_cache(str(tmp_path), "vllm", "k")
-        cc.compile_cache(str(tmp_path), "vllm", "k")
-    assert [w.category for w in caught] == [FutureWarning]
-    assert "not part of the contract" in str(caught[0].message)
-    assert "compile_cache" not in saturate.__all__
+def test_labs_import_warns_once_and_is_not_exported():
+    code = (
+        "import warnings; warnings.simplefilter('always')\n"
+        "import saturate.labs.compile_cache, saturate.labs\n"
+        "import saturate; assert 'compile_cache' not in saturate.__all__"
+    )
+    run = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    assert run.returncode == 0, run.stderr
+    assert run.stderr.count("FutureWarning") == 1
+    assert "not part of the contract" in run.stderr

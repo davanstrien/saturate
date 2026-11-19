@@ -16,8 +16,9 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
   any release, without deprecation. The first import gives one `FutureWarning`.
 - `saturate.labs.compile_cache`: keeps vLLM's or SGLang's start-up caches as one archive in a
   Bucket you own, restored before the engine starts and saved when cache files are new or
-  changed. On rtx-pro-6000, a warm start was 118 s sooner on vLLM (Nemotron NVFP4) and 44 s
-  sooner on SGLang (Unlimited-OCR-2), with identical output.
+  changed. Measured warm against cold server-ready time: Qwen3.6-35B-A3B-FP8 on vLLM, h200,
+  449 → 150 s; Nemotron NVFP4 on vLLM, rtx-pro-6000, 274 → 156 s; Unlimited-OCR-2 on SGLang,
+  rtx-pro-6000, 161 → 117 s with identical output; LightOnOCR-3 on vLLM, a10g-small, 221 → 122 s.
 
 ## [0.3.2] - 2026-11-18
 

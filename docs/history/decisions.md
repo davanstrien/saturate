@@ -200,7 +200,14 @@ first module, `compile_cache`.
 - **Boundaries.** Warn and record, never raise, on bucket I/O; never replace an archive that
   could not be read; last writer wins per key, with a warning. Out of scope: shared or
   "official" caches (the archive is code), merging concurrent saves, pruning stale hash
-  folders, a restore-key fallback across models.
+  folders, a `keep=N` setting (old archives are deleted by hand; they are 25–120 MB).
+- **Version fallback: measured, not built.** Restoring an older engine version's archive when
+  the current key has none (GitHub Actions' restore-keys) helps only while torch stays the
+  same. LightOnOCR-3 on a10g-small: a vLLM 0.30 archive in 0.31 (same torch 2.13) cut server
+  ready 234 → 151 s, ~84% of a full warm gain; in 0.33 (torch 2.14) 237 → 235 s, nothing.
+  A changed serve flag (`--max-model-len`) kept ~94%: the engine recompiles its graph and
+  reuses the kernels. Build the fallback only if users upgrade often within one torch
+  version, and then only within it.
 - **Promotion / removal.** Promote (e.g. to an `Engine` option) only with receipts on more
   engines and GPUs and a stable profile for a few engine releases; remove when the engines or
   the platform persist these caches themselves.

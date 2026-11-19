@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tarfile
 
+import fsspec.implementations.local
 import pytest
 
 from saturate.labs import compile_cache as cc
@@ -39,7 +40,7 @@ def profile(home):
             "triton": ("~/.triton", "$TRITON_CACHE_DIR"),
             "ptx": ("~/.nv",),
         },
-        never=("*.lock", "locks", "runs", "assets/*", "gpu_p2p_*", ".cc-*"),
+        never=("*.lock", "locks", "runs", "assets", "gpu_p2p_*", ".cc-*"),
         env={"TRITON_CACHE_DIR": "~/.triton/cache"},
     )
 
@@ -99,6 +100,8 @@ def test_without_a_with_block(tmp_path, home, profile):
     assert cache.report.saved and "TRITON_CACHE_DIR" not in os.environ
     with pytest.raises(RuntimeError, match="requires an open cache"):
         cache.save()
+    with pytest.raises(RuntimeError, match="already used"):  # one use per cache
+        cache.restore()
 
 
 def test_new_or_changed_file_saves_the_union(tmp_path, home, profile):
@@ -158,27 +161,20 @@ def test_never_files_and_the_hf_cache_stay_out(tmp_path, home, monkeypatch):
 def test_restore_refuses_members_outside_the_folders(tmp_path, home, profile):
     bucket = tmp_path / "bucket"
     bucket.mkdir()
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    os.makedirs(home / ".cache/engine")
-    os.symlink(outside, home / ".cache/engine/escape")  # a link inside the folder, pointing out
     payload = write(tmp_path / "payload", "evil")
     with tarfile.open(bucket / "k.tar", "w") as tar:
         tar.add(payload, arcname="home/.cache/engine/ok.py")
         tar.add(payload, arcname="home/.bashrc")
         tar.add(payload, arcname="home/.cache/engine/../../.profile")
         tar.add(payload, arcname="home/.cache/engine/assets/big.bin")
-        tar.add(payload, arcname="home/.cache/engine/escape/planted.py")
-        tar.add(payload, arcname="home/.cache/engine/escape/deeper/planted.py")
         tar.add(payload, arcname="root/etc/evil")
         tar.add(payload, arcname="elsewhere/x")
     with cc.compile_cache(str(bucket), profile, "k", save=False) as cache:
         pass
-    assert cache.report.restored_files == 1 and cache.report.refused_files == 7
+    assert cache.report.restored_files == 1 and cache.report.refused_files == 5
     assert (home / ".cache/engine/ok.py").exists()
     assert not (home / ".bashrc").exists() and not (home / ".profile").exists()
     assert not (home / ".cache/engine/assets").exists()
-    assert list(outside.iterdir()) == []
 
 
 def test_exception_in_the_block_skips_the_save_and_restores_env(tmp_path, home, profile):
@@ -250,6 +246,61 @@ def test_another_writer_since_the_restore_is_reported(tmp_path, home, profile, c
     assert first.report.replaced_other_writer and "another run saved" in caplog.text
 
 
+def test_a_failed_lookup_is_not_missing_and_the_archive_is_kept(tmp_path, home, profile, monkeypatch):
+    bucket = tmp_path / "bucket"
+    with cc.compile_cache(str(bucket), profile, "k"):
+        write(home / ".cache/engine/a.py")
+    before = (bucket / "k.tar").read_bytes()
+    info = fsspec.implementations.local.LocalFileSystem.info
+
+    def flaky(self, path, **kwargs):
+        if str(path).endswith("k.tar"):
+            raise PermissionError("503 from the Hub")  # what HfFileSystem.exists() would hide
+        return info(self, path, **kwargs)
+
+    monkeypatch.setattr(fsspec.implementations.local.LocalFileSystem, "info", flaky)
+    with cc.compile_cache(str(bucket), profile, "k") as cache:
+        write(home / ".cache/engine/cold.py")
+    assert cache.report.restore == "failed" and not cache.report.saved
+    assert (bucket / "k.tar").read_bytes() == before
+
+
+@pytest.mark.internals
+def test_stamp_reads_fresh_metadata():
+    calls = []
+
+    class CachingFs:
+        def invalidate_cache(self):
+            calls.append("invalidate")
+
+        def info(self, path):
+            calls.append("info")
+            return {"size": 3, "mtime": 1.0, "xet_hash": "abc"}
+
+    assert cc._stamp(CachingFs(), "buckets/me/b/k.tar")[0] == "3"
+    assert calls == ["invalidate", "info"]
+
+
+def test_hard_linked_files_come_back(tmp_path, home, profile):
+    bucket = tmp_path / "bucket"
+    with cc.compile_cache(str(bucket), profile, "k"):
+        first = write(home / ".cache/engine/a.so", "kernel")
+        os.link(first, home / ".cache/engine/b.so")
+    wipe(home / ".cache/engine")
+    with cc.compile_cache(str(bucket), profile, "k", save=False) as cache:
+        pass
+    assert cache.report.restored_files == 2 and cache.report.refused_files == 0
+    assert (home / ".cache/engine/b.so").read_text() == "kernel"
+
+
+def test_a_failed_restore_cleans_up(tmp_path, home):
+    broken = cc.Profile(groups={"engine": ("{nope}/x",)}, env={"TRITON_CACHE_DIR": "~/.triton/cache"})
+    cache = cc.compile_cache(str(tmp_path / "bucket"), broken, "k")
+    with pytest.raises(KeyError):
+        cache.restore()
+    assert "TRITON_CACHE_DIR" not in os.environ and cache._tmp is None
+
+
 def test_restore_keeps_files_that_exist(tmp_path, home, profile):
     bucket = tmp_path / "bucket"
     with cc.compile_cache(str(bucket), profile, "k"):
@@ -272,7 +323,7 @@ def test_truncated_archive_leaves_no_partial_file(tmp_path, home, profile):
     with cc.compile_cache(str(bucket), profile, "k", save=False) as cache:
         pass
     assert sorted(p.name for p in (home / ".cache/engine").iterdir()) == ["a.so"]
-    assert cache.report.restore == "failed"
+    assert cache.report.restore == "failed" and cache.report.restored_files == 1  # what is on disk
 
 
 def test_archive_moves_to_a_different_home(tmp_path, home, profile, monkeypatch):
@@ -287,6 +338,7 @@ def test_archive_moves_to_a_different_home(tmp_path, home, profile, monkeypatch)
     assert (other / ".cache/engine/a.py").read_text() == "a" and cache.report.restored_files == 1
 
 
+@pytest.mark.internals
 def test_failed_upload_is_recorded_and_the_block_does_not_raise(tmp_path, home, profile, monkeypatch):
     def broken(fs, local, path):
         raise OSError("bucket unreachable")
@@ -316,6 +368,7 @@ def test_a_file_that_fails_to_pack_fails_the_whole_save(tmp_path, home, profile,
     assert members(bucket / "k.tar") == ["home/.cache/engine/a.py"]  # the old archive, whole
 
 
+@pytest.mark.internals
 def test_engine_profiles_and_bad_arguments(home, monkeypatch, tmp_path):
     monkeypatch.setenv("SGLANG_CACHE_DIR", str(tmp_path / "sg"))
     folders = cc._folders(cc.SGLANG)

@@ -70,9 +70,8 @@ class Profile:
         SGLANG_CACHE_DIR, or their defaults). `$NAME` is the folder in environment variable
         NAME, when it is set. Other variables that move a cache (FLASHINFER_WORKSPACE_BASE,
         CUDA_CACHE_PATH, ...) are not followed: list the folder in a Profile of your own.
-    never: files never archived or restored. A pattern without `/` is matched against every
-        part of a file's path inside its folder (`*.lock`, `runs`); a pattern with `/` against
-        the start of that path (`assets/*`).
+    never: files never archived or restored: a pattern matched against every part of a file's
+        path inside its folder (`*.lock`, `runs`).
     env: environment variables set before the engine starts, unless already set.
     """
 
@@ -201,7 +200,8 @@ class CompileCache:
         self._tmp: str | None = None
         self._folders: dict[str, str] = {}  # folder -> group
         self._baseline: dict[str, int] = {}  # path -> size at the last restore or save
-        self._remote: tuple | None = None  # the archive's size and stamp when last read or written
+        self._remote: tuple = ()  # the archive's stamp when last read or written; () = none there
+        self._used = False
 
     def __enter__(self) -> CompileCache:
         self.restore()
@@ -215,21 +215,26 @@ class CompileCache:
             self.close()
 
     def restore(self) -> None:
-        """Set the environment, then download and unpack the archive if it exists."""
-        if self._tmp is not None:
-            raise RuntimeError("compile_cache: restore() requires a cache that is not open")
+        """Set the environment, then download and unpack the archive if it exists. A cache is
+        used once: restore, save as often as you like, close."""
+        if self._used:
+            raise RuntimeError("compile_cache: restore() requires a new cache; this one was already used")
+        self._used = True
         self._tmp = tempfile.mkdtemp(prefix="compile-cache-")
-        set_here = {
-            name: _expand(value) for name, value in self.profile.env.items() if not os.environ.get(name)
-        }
-        os.environ.update(set_here)
-        self.report.env = set_here
-        for name in self.profile.env:
-            log.info(f"compile_cache: {name}={os.environ[name]}")
-        self._folders = _folders(self.profile, self.skip)
-        self.report.folders = sorted(self._folders)
-        self._restore()
-        self._baseline = _manifest(self._folders, self.profile.never)
+        try:
+            unset = {name: value for name, value in self.profile.env.items() if not os.environ.get(name)}
+            set_here = {name: _expand(value) for name, value in unset.items()}
+            os.environ.update(set_here)
+            self.report.env = set_here
+            for name in self.profile.env:
+                log.info(f"compile_cache: {name}={os.environ[name]}")
+            self._folders = _folders(self.profile, self.skip)
+            self.report.folders = sorted(self._folders)
+            self._restore()
+            self._baseline = _manifest(self._folders, self.profile.never)
+        except BaseException:  # a failed start must not leave the environment or files behind
+            self.close()
+            raise
 
     def save(self) -> None:
         """Save if a cache file is new or changed since the last restore or save (e.g. right
@@ -240,17 +245,18 @@ class CompileCache:
             return
         if self.report.restore == "failed":
             log.warning(
-                f"compile_cache: not saving {self.archive}: it could not be read at the start, "
-                "and this run's files would replace it"
+                f"compile_cache: not saving {self.archive}: it exists but could not be restored, and "
+                "this run's files would replace it (delete it to start cold)"
             )
             return
         self._save()
 
     def close(self) -> None:
         """Remove the temporary folder and the environment variables this cache set."""
-        if self._tmp is not None:
-            shutil.rmtree(self._tmp, ignore_errors=True)
-            self._tmp = None
+        if self._tmp is None:
+            return
+        shutil.rmtree(self._tmp, ignore_errors=True)
+        self._tmp = None
         for name in self.report.env:
             os.environ.pop(name, None)
 
@@ -258,37 +264,37 @@ class CompileCache:
         assert self._tmp is not None
         started = time.monotonic()
         local = os.path.join(self._tmp, "restore.tar")
+        counts: dict = {"written": 0, "refused": 0, "existing": 0, "by_group": {}}
+        report = self.report
         try:
             fs, path = fsspec.url_to_fs(self.archive)
-            if not fs.exists(path):
-                self.report.restore = "missing"
+            self._remote = _stamp(fs, path)  # any error but "not found" counts as failed
+            if not self._remote:
+                report.restore = "missing"
                 log.info(f"compile_cache: no archive at {self.archive}; the engine compiles from scratch")
                 return
-            self._remote = _stamp(fs, path)
             fs.get_file(path, local)
             download_s = time.monotonic() - started
             size = os.path.getsize(local)
-            counts = _unpack(local, self._folders, self.profile.never)
+            _unpack(local, self._folders, self.profile.never, counts)
+            report.restore = "restored"
         except Exception as e:
-            self.report.restore = "failed"
-            self.report.restore_error = f"{type(e).__name__}: {e}"
+            report.restore = "failed"
+            report.restore_error = f"{type(e).__name__}: {e}"
             log.warning(
-                f"compile_cache: could not restore {self.archive} ({self.report.restore_error}); "
+                f"compile_cache: could not restore {self.archive} ({report.restore_error}); "
                 "the engine compiles what is missing, and this run will not save"
             )
-            return
         finally:
             if os.path.exists(local):
                 os.remove(local)
-        report = self.report
-        report.restore = "restored"
-        report.restored_files, report.refused_files, report.existing_files = (
-            counts["written"],
-            counts["refused"],
-            counts["existing"],
-        )
+        # recorded even after a failure part-way: those files are on disk
+        report.restored_files, report.refused_files = counts["written"], counts["refused"]
+        report.existing_files = counts["existing"]
         for group, n in counts["by_group"].items():
             report.groups.setdefault(group, _group_counts())["restored"] = n
+        if report.restore != "restored":
+            return
         report.restored_mb = round(size / 1e6, 1)
         report.restore_s = round(time.monotonic() - started, 1)
         log.info(
@@ -297,7 +303,8 @@ class CompileCache:
         )
         if report.refused_files:
             log.warning(
-                f"compile_cache: refused {report.refused_files:,} archive members outside the cache folders"
+                f"compile_cache: refused {report.refused_files:,} archive members: outside this run's "
+                "folders (or in a skipped group), in `never`, or links"
             )
         if report.existing_files:
             log.info(f"compile_cache: kept {report.existing_files:,} files that already existed")
@@ -317,7 +324,8 @@ class CompileCache:
         try:
             _pack(after, local)
             fs, path = fsspec.url_to_fs(self.archive)
-            if fs.exists(path) and _stamp(fs, path) != self._remote:
+            remote = _stamp(fs, path)
+            if remote and remote != self._remote:
                 self.report.replaced_other_writer = True
                 log.warning(
                     f"compile_cache: another run saved {self.archive} since this one read it; "
@@ -365,13 +373,14 @@ def _is_hf(fs) -> bool:
 
 
 def _stamp(fs, path: str) -> tuple:
-    """What tells one version of the archive from another: its size and whichever time or
-    hash the filesystem reports."""
+    """What tells one version of the archive from another (size, time, hash), read fresh: () when
+    it is not there. Any other error is raised, so a failed lookup never reads as "missing"."""
+    fs.invalidate_cache()  # HfFileSystem answers info() from a listing it cached earlier
     try:
         info = fs.info(path)
     except FileNotFoundError:
         return ()
-    return tuple(str(info.get(k)) for k in ("size", "mtime", "last_modified", "created", "xet_hash", "etag"))
+    return tuple(str(info.get(k)) for k in ("size", "mtime", "created", "xet_hash", "uploaded_at"))
 
 
 def _put(fs, local: str, path: str) -> None:
@@ -459,21 +468,13 @@ def _group_of(path: str, folders: dict[str, str]) -> str:
 
 def _guarded() -> list[str]:
     """Folders never archived or restored, whatever the profile says: the Hugging Face cache
-    (model weights and the token), where it is by default and wherever HF_* moves it."""
-    names = ("HF_HOME", "HF_HUB_CACHE", "HF_XET_CACHE", "HF_ASSETS_CACHE", "HF_TOKEN_PATH")
-    homes = ["~/.cache/huggingface", *(os.environ.get(name) for name in names)]
-    return sorted({_path(home) for home in homes if home} | {os.path.realpath(_path(h)) for h in homes if h})
+    (model weights and the token), by default and where HF_HOME / HF_HUB_CACHE move it."""
+    homes = ["~/.cache/huggingface", os.environ.get("HF_HOME"), os.environ.get("HF_HUB_CACHE")]
+    return [_path(home) for home in homes if home]
 
 
 def _skipped(rel: str, never: tuple[str, ...]) -> bool:
-    parts = rel.split("/")
-    for pattern in never:
-        if "/" in pattern:
-            if fnmatch.fnmatchcase(rel, pattern) or fnmatch.fnmatchcase(rel, pattern + "/*"):
-                return True
-        elif any(fnmatch.fnmatchcase(part, pattern) for part in parts):
-            return True
-    return False
+    return any(fnmatch.fnmatchcase(part, pattern) for pattern in never for part in rel.split("/"))
 
 
 def _manifest(folders: dict[str, str], never: tuple[str, ...]) -> dict[str, int]:
@@ -514,25 +515,25 @@ def _target(arcname: str) -> str | None:
 
 
 def _pack(files: dict[str, int], tar_path: str) -> None:
-    """One tar of the files, in path order. A file removed since the listing is left out; any
-    other error (a file that shrinks while it is read) fails the whole save, because tarfile
-    would leave the archive cut short at that file."""
-    with tarfile.open(tar_path, "w") as tar:
+    """One tar of the files, in path order, each stored whole (a hard link would come back as a
+    link, which restore refuses). A file removed since the listing is left out; any other error
+    (a file that shrinks while it is read) fails the whole save, because tarfile would leave the
+    archive cut short at that file."""
+    with tarfile.open(tar_path, "w", dereference=True) as tar:
         for path in sorted(files):
-            if not os.path.exists(path):
+            try:
+                tar.add(path, arcname=_arcname(path), recursive=False)
+            except FileNotFoundError:  # raised before anything of this file is written
                 continue
-            tar.add(path, arcname=_arcname(path), recursive=False)
 
 
-def _unpack(tar_path: str, folders: dict[str, str], never: tuple[str, ...]) -> dict:
+def _unpack(tar_path: str, folders: dict[str, str], never: tuple[str, ...], counts: dict) -> None:
     """Write the archive's regular files that belong in the folders. Refused: links, members
-    outside the folders (also through a symbolic link on the way), `never` files and the
-    Hugging Face cache. A file that already exists (e.g. one the image ships) is kept. Each file
-    is written under a unique temporary name and renamed, so a broken archive leaves no partial
-    file. Returns counts: written, refused, existing, by_group."""
+    outside the folders, `never` files and the Hugging Face cache. A file that already exists
+    (e.g. one the image ships) is kept. Each file is written under a temporary name and renamed,
+    so a broken archive leaves no partial file. Counts go into `counts` (written, refused,
+    existing, by_group) as it goes, so they stay right when a broken archive stops it part-way."""
     guarded = _guarded()
-    real_folders = {folder: os.path.realpath(folder) for folder in folders}
-    counts: dict = {"written": 0, "refused": 0, "existing": 0, "by_group": {}}
     with tarfile.open(tar_path) as tar:
         for member in tar:
             if member.isdir():
@@ -542,7 +543,8 @@ def _unpack(tar_path: str, folders: dict[str, str], never: tuple[str, ...]) -> d
             if (
                 target is None
                 or folder is None
-                or not _allowed(target, folder, real_folders[folder], never, guarded)
+                or _skipped(os.path.relpath(target, folder), never)
+                or any(_within(target, g) for g in guarded)
             ):
                 counts["refused"] += 1
                 continue
@@ -555,10 +557,7 @@ def _unpack(tar_path: str, folders: dict[str, str], never: tuple[str, ...]) -> d
                 continue
             parent = os.path.dirname(target)
             os.makedirs(parent, exist_ok=True)
-            if not _within(os.path.realpath(parent), real_folders[folder]):  # a link made meanwhile
-                counts["refused"] += 1
-                continue
-            handle, partial = tempfile.mkstemp(prefix=".cc-", dir=parent)  # created exclusively
+            handle, partial = tempfile.mkstemp(prefix=".cc-", dir=parent)
             try:
                 with source, os.fdopen(handle, "wb") as out:
                     shutil.copyfileobj(source, out)
@@ -571,17 +570,6 @@ def _unpack(tar_path: str, folders: dict[str, str], never: tuple[str, ...]) -> d
             counts["written"] += 1
             group = folders[folder]
             counts["by_group"][group] = counts["by_group"].get(group, 0) + 1
-    return counts
-
-
-def _allowed(target: str, folder: str, real_folder: str, never: tuple[str, ...], guarded: list[str]) -> bool:
-    if _skipped(os.path.relpath(target, folder), never):
-        return False
-    if any(_within(target, g) for g in guarded):
-        return False
-    # the nearest existing parent must resolve inside the folder: no symbolic link out of it
-    real_parent = os.path.realpath(os.path.dirname(target))
-    return _within(real_parent, real_folder) and not any(_within(real_parent, g) for g in guarded)
 
 
 # --- the key ---
@@ -623,7 +611,8 @@ def _slug(text: str) -> str:
 
 
 def _gpu() -> str:
-    """`<name>-sm<capability>-x<count>` of the visible GPUs."""
+    """`<name>-sm<capability>-x<count>` of the GPUs nvidia-smi lists (it ignores
+    CUDA_VISIBLE_DEVICES; pass gpu= to default_key when that matters)."""
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,compute_cap", "--format=csv,noheader"],

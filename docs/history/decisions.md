@@ -194,7 +194,9 @@ first module, `compile_cache`.
   key their own folders by hashes this helper never computes; a coarse key costs size, not
   correctness. Per-engine profiles name folder groups explicitly (`skip=` leaves a group out),
   never-archive patterns and env vars (vLLM: `TRITON_CACHE_DIR` pinned, which removed a
-  warm-run Triton miss).
+  warm-run Triton miss). The CUDA driver's PTX cache is left out: on rtx-pro-6000, restoring
+  it did not change server-ready time on either engine, while it was 60–80% of each archive
+  and grew ~90 MB per warm run.
 - **Boundaries.** Warn and record, never raise, on bucket I/O; never replace an archive that
   could not be read; last writer wins per key, with a warning. Out of scope: shared or
   "official" caches (the archive is code), merging concurrent saves, pruning stale hash

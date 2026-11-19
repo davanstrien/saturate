@@ -83,6 +83,10 @@ class Profile:
 # Never in any archive: locks, temporary files, half-written staging folders.
 _COMMON_NEVER = ("*.lock", "*.tmp", "tmp.*", ".staging-*", ".cc-*")
 
+# Not archived: the CUDA driver's PTX JIT cache (~/.nv/ComputeCache; {sglang}/nv). Measured on
+# rtx-pro-6000 (2026-11-19), restoring it did not change server-ready time on vLLM or SGLang,
+# while it was 60-80% of each archive and grew by ~90 MB on every warm run. Add it in a
+# Profile of your own if a measurement says otherwise.
 VLLM = Profile(
     # Subfolders of the vLLM cache root, named one by one: the root also holds downloaded
     # assets and, when configured there, media and LoRA caches.
@@ -97,9 +101,6 @@ VLLM = Profile(
         "triton": ("~/.triton", "$TRITON_CACHE_DIR"),
         "flashinfer": ("~/.cache/flashinfer", "{vllm}/flashinfer_autotune_cache"),
         "deep_gemm": ("{vllm}/deep_gemm",),
-        # The CUDA driver's PTX JIT cache: the largest group, and it grows on warm runs; its
-        # gain is not measured yet.
-        "ptx": ("~/.nv/ComputeCache",),
     },
     never=_COMMON_NEVER,
     # torch's first inductor autotuner otherwise points TRITON_CACHE_DIR at the inductor cache
@@ -117,7 +118,6 @@ SGLANG = Profile(
         "triton": ("{sglang}/triton", "~/.triton"),
         "flashinfer": ("{sglang}/.cache/flashinfer", "{sglang}/flashinfer/autotune", "~/.cache/flashinfer"),
         "deep_gemm": ("{sglang}/deep_gemm", "~/.cache/deep_gemm"),
-        "ptx": ("{sglang}/nv", "~/.nv/ComputeCache"),
     },
     never=(*_COMMON_NEVER, "gpu_p2p_access_cache_for_*", "locks", "runs"),
     env={},  # SGLang points its compilers into its cache root itself; moving it re-downloads FA3
@@ -174,7 +174,7 @@ def compile_cache(
     engine: "vllm", "sglang", or a `Profile`.
     key: the archive name inside `location`, e.g. from `default_key`.
     save: False restores only; `save()` then does nothing.
-    skip: profile groups to leave out, e.g. {"ptx"}.
+    skip: profile groups to leave out, e.g. {"deep_gemm"}.
 
     Restore before the server starts: the environment and the cache files must be there when
     it boots. Needs `saturate[hf]` and a token that can write to the bucket for `hf://`.

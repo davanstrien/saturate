@@ -373,7 +373,8 @@ def test_engine_profiles_and_bad_arguments(home, monkeypatch, tmp_path):
     monkeypatch.setenv("SGLANG_CACHE_DIR", str(tmp_path / "sg"))
     folders = cc._folders(cc.SGLANG)
     assert folders[str(tmp_path / "sg/jit")] == "jit" and str(tmp_path / "sg") not in folders
-    assert str(tmp_path / "sg/nv") not in cc._folders(cc.SGLANG, skip={"ptx"})
+    assert str(tmp_path / "sg/deep_gemm") not in cc._folders(cc.SGLANG, skip={"deep_gemm"})
+    assert str(tmp_path / "sg/nv") not in folders  # the PTX cache is not archived
     with pytest.raises(ValueError, match="engine= from"):
         cc.compile_cache(str(tmp_path), "tgi", "k")
     with pytest.raises(ValueError, match="relative key"):

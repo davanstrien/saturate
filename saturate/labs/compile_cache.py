@@ -135,6 +135,7 @@ SGLANG = Profile(
         "ready": r"The server is fired up and ready to roll",
         "capture_s": r"Capture .*?elapsed[=:]\s*([\d.]+)",
         "deep_gemm_jit": r"JIT Compiling",
+        "serving_compile": r"Triton kernel '(\S+)' took [\d.]+ s to compile after serving started",
     },
 )
 

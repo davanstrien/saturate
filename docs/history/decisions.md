@@ -197,6 +197,11 @@ first module, `compile_cache`.
   warm-run Triton miss). The CUDA driver's PTX cache is left out: on rtx-pro-6000, restoring
   it did not change server-ready time on either engine, while it was 60–80% of each archive
   and grew 90–100 MB per warm run.
+- **Short form.** `compile_cache(engine=, model=)` defaults the location to
+  `hf://buckets/<you>/compile-cache` (a bucket of its own, private when created) and the key
+  to `default_key(engine, model)`. For that to work in a uv script, the vLLM version is read
+  from the Python the `vllm` command runs with, as `Engine` starts it; the image stays out of
+  the default key because the script cannot see it.
 - **Boundaries.** Warn and record, never raise, on bucket I/O; never replace an archive that
   could not be read; last writer wins per key, with a warning. Out of scope: shared or
   "official" caches (the archive is code), merging concurrent saves, pruning stale hash

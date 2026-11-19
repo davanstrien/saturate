@@ -6,14 +6,17 @@ kernels, autotune results) as one archive in a Bucket you own, so the next Job o
 engine, model and GPU can reuse them. Put it around the code that starts the engine:
 
     from saturate import Engine, pump
-    from saturate.labs.compile_cache import compile_cache, default_key
+    from saturate.labs.compile_cache import compile_cache
 
-    key = default_key("vllm", MODEL, version=VLLM_VERSION, image=IMAGE)
-    with compile_cache("hf://buckets/<you>/jobs-cache", engine="vllm", key=key) as cache:
+    with compile_cache(engine="vllm", model=MODEL) as cache:  # hf://buckets/<you>/compile-cache
         with Engine(MODEL, engine="vllm") as endpoint:
             cache.save()  # keep the boot's kernels even if the rest of the run fails
             pump(...)
     print(cache.report.to_json())
+
+The long form names the location and key, e.g. to add the image to the key:
+`compile_cache("hf://buckets/<you>/jobs-cache", engine="vllm", key=default_key("vllm", MODEL,
+image=IMAGE))`.
 
 Without a with block: `cache.restore()` before the server starts, `cache.save()` when you
 want, `cache.close()` at the end. Any server works; `Engine` is not required.
@@ -46,6 +49,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -159,20 +163,23 @@ class Report:
 
 
 def compile_cache(
-    location: str,
-    engine: str | Profile,
-    key: str,
+    location: str | None = None,
+    engine: str | Profile = "vllm",
+    key: str | None = None,
     *,
+    model: str | None = None,
     save: bool = True,
     skip: Iterable[str] = (),
 ) -> CompileCache:
     """A `CompileCache` for `<location>/<key>.tar`; use it in a with block, or call `restore()`,
-    `save()` and `close()` yourself.
+    `save()` and `close()` yourself. The short form is `compile_cache(engine=..., model=...)`.
 
     location: `hf://buckets/<you>/<bucket>[/prefix]`, or any fsspec path (a local folder, a
-        mounted bucket).
+        mounted bucket). By default `hf://buckets/<you>/compile-cache`, `<you>` from the token.
     engine: "vllm", "sglang", or a `Profile`.
     key: the archive name inside `location`, e.g. from `default_key`.
+    model: instead of key=, for `default_key(engine, model)`: the engine version installed and
+        the GPUs nvidia-smi lists. Pass key= to add the image, a revision or extra labels.
     save: False restores only; `save()` then does nothing.
     skip: profile groups to leave out, e.g. {"deep_gemm"}.
 
@@ -180,6 +187,14 @@ def compile_cache(
     it boots. Needs `saturate[hf]` and a token that can write to the bucket for `hf://`.
     """
     profile = _profile(engine)
+    if (key is None) == (model is None):
+        raise ValueError("compile_cache() requires key= or model=, not both or neither")
+    if model is not None:
+        if isinstance(engine, Profile):
+            raise ValueError("compile_cache() requires key= with a Profile")
+        key = default_key(engine, model)
+    if location is None:
+        location = f"hf://buckets/{_hub_user()}/compile-cache"
     if not key or key.startswith("/") or ".." in key.split("/"):
         raise ValueError(f"compile_cache() requires a relative key without '..', not {key!r}")
     skip = sorted(set(skip))
@@ -588,10 +603,10 @@ def default_key(
     """A coarse archive key: `<engine>/<model>[@<revision>]/<gpu>/<engine>-<version>[/<image>]
     [/<extra>...]`, e.g. `vllm/Qwen--Qwen3-8B/NVIDIA-L4-sm89-x1/vllm-0.32.0`.
 
-    version: the engine's installed version. By default it is read from this Python; for
-        SGLang also from the first `python3` on PATH that has it (as `Engine` finds SGLang).
-        Pass it when the engine lives elsewhere (vLLM in a venv of its own), and call this
-        after installing a different build.
+    version: the engine's installed version. By default it is read from this Python, else
+        from the Python `Engine` starts the engine with (for vLLM, the `vllm` command's).
+        Pass it when the engine lives elsewhere, and call this after installing a different
+        build.
     image: the container image tag or digest. Recommended: it covers the torch and FlashInfer
         versions inside the image, and keeps archives for different images apart.
     gpu: the GPU part; by default `<name>-sm<capability>-x<count>` from nvidia-smi.
@@ -640,18 +655,38 @@ def _installed_version(engine: str) -> str:
         return importlib.metadata.version(engine)
     except importlib.metadata.PackageNotFoundError:
         pass
-    if engine == "sglang":  # the image's own Python, which Engine also starts SGLang with
-        from saturate.engine import python_with
-
+    python = _engine_python(engine)
+    if python:
         try:
             asked = subprocess.run(
-                [python_with("sglang"), "-c", _VERSION, "sglang"], capture_output=True, text=True, timeout=30
+                [*python, "-c", _VERSION, engine], capture_output=True, text=True, timeout=30
             )
             if asked.returncode == 0 and asked.stdout.strip():
                 return asked.stdout.strip()
         except (OSError, subprocess.SubprocessError):
             pass
     raise ValueError(f"default_key() requires version= when {engine} is not installed in this Python")
+
+
+def _engine_python(engine: str) -> list[str] | None:
+    """The Python that `Engine` starts this engine with: for SGLang the first `python3` that
+    has it, for vLLM the one the `vllm` command on PATH runs with (its #! line)."""
+    if engine == "sglang":
+        from saturate.engine import python_with
+
+        return [python_with("sglang")]
+    command = shutil.which(engine) if engine == "vllm" else None
+    if command is None:
+        return None
+    with open(command, "rb") as script:
+        first = script.readline().decode(errors="replace")
+    return shlex.split(first[2:]) if first.startswith("#!") else None
+
+
+def _hub_user() -> str:
+    from huggingface_hub import HfApi
+
+    return HfApi().whoami()["name"]
 
 
 def _profile(engine: str | Profile) -> Profile:

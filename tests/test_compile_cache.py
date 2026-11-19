@@ -479,8 +479,33 @@ def test_default_key(monkeypatch):
     )
 
 
-def test_default_key_without_a_version_raises(monkeypatch):
+def test_short_form_uses_the_default_location_and_key(monkeypatch):
+    monkeypatch.setattr(cc, "_hub_user", lambda: "me")
+    monkeypatch.setattr(cc, "_gpu", lambda: "gpu")
+    monkeypatch.setattr(cc, "_installed_version", lambda engine: "1.0")
+    cache = cc.compile_cache(engine="sglang", model="org/m")
+    assert cache.archive == "hf://buckets/me/compile-cache/sglang/org--m/gpu/sglang-1.0.tar"
+    assert cc.compile_cache("/b", model="org/m").archive == "/b/vllm/org--m/gpu/vllm-1.0.tar"
+    with pytest.raises(ValueError, match="key= or model="):
+        cc.compile_cache("/b", "vllm", "k", model="org/m")
+    with pytest.raises(ValueError, match="key= or model="):
+        cc.compile_cache("/b", "vllm")
+
+
+def test_vllm_version_from_the_python_of_the_vllm_command(tmp_path, monkeypatch):
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\necho 0.99.0\n")
+    vllm = tmp_path / "vllm"
+    vllm.write_text(f"#!{python}\nprint('the vllm entry point')\n")
+    python.chmod(0o755)
+    vllm.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert cc.default_key("vllm", "m", gpu="gpu") == "vllm/m/gpu/vllm-0.99.0"
+
+
+def test_default_key_without_a_version_raises(monkeypatch, tmp_path):
     monkeypatch.setattr("saturate.engine.python_with", lambda module: "/nonexistent/python3")
+    monkeypatch.setenv("PATH", str(tmp_path))  # no vllm command
     with pytest.raises(ValueError, match="requires version="):
         cc.default_key("vllm", "m", gpu="gpu")
     with pytest.raises(ValueError, match="requires version="):

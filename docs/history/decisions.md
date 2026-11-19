@@ -186,7 +186,7 @@ first module, `compile_cache`.
   anything), so it is a separate context manager with plain `restore()`/`save()`/`close()`.
   Nothing in the core imports it, so it can be removed cleanly.
 - **Shape.** One uncompressed tar per coarse key (engine, model, GPU, engine version, image),
-  in the user's own private bucket. Measured on Jobs: one archive restores in 1–2 s; per-file
+  in the user's own private bucket. Measured on Jobs: one archive restores in 1–3 s; per-file
   reads through a mount cost ~85 ms each and `hf buckets sync` ~8 ms each, so an archive wins
   for caches of thousands of small files. Uncompressed, so Xet dedups re-saves (a warm re-save
   uploaded about the bytes the tar grew by). Re-save when a (path, size) manifest shows new or
@@ -196,18 +196,17 @@ first module, `compile_cache`.
   never-archive patterns and env vars (vLLM: `TRITON_CACHE_DIR` pinned, which removed a
   warm-run Triton miss). The CUDA driver's PTX cache is left out: on rtx-pro-6000, restoring
   it did not change server-ready time on either engine, while it was 60–80% of each archive
-  and grew ~90 MB per warm run.
+  and grew 90–100 MB per warm run.
 - **Boundaries.** Warn and record, never raise, on bucket I/O; never replace an archive that
   could not be read; last writer wins per key, with a warning. Out of scope: shared or
   "official" caches (the archive is code), merging concurrent saves, pruning stale hash
   folders, a `keep=N` setting (old archives are deleted by hand; they are 25–120 MB).
 - **Version fallback: measured, not built.** Restoring an older engine version's archive when
-  the current key has none (GitHub Actions' restore-keys) helps only while torch stays the
-  same. LightOnOCR-3 on a10g-small: a vLLM 0.30 archive in 0.31 (same torch 2.13) cut server
+  the current key has none (GitHub Actions' restore-keys) helped in these tests only while
+  torch stayed the same. LightOnOCR-3 on a10g-small: a vLLM 0.30 archive in 0.31 (same torch 2.13) cut server
   ready 234 → 151 s, ~84% of a full warm gain; in 0.33 (torch 2.14) 237 → 235 s, nothing.
   A changed serve flag (`--max-model-len`) kept ~94%: the engine recompiles its graph and
-  reuses the kernels. Build the fallback only if users upgrade often within one torch
-  version, and then only within it.
+  reuses the kernels.
 - **Promotion / removal.** Promote (e.g. to an `Engine` option) only with receipts on more
   engines and GPUs and a stable profile for a few engine releases; remove when the engines or
   the platform persist these caches themselves.

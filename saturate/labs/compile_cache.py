@@ -8,7 +8,7 @@ engine, model and GPU can reuse them. Put it around the code that starts the eng
     from saturate import Engine, pump
     from saturate.labs.compile_cache import compile_cache, default_key
 
-    key = default_key("vllm", MODEL, image=IMAGE)
+    key = default_key("vllm", MODEL, version=VLLM_VERSION, image=IMAGE)
     with compile_cache("hf://buckets/<you>/jobs-cache", engine="vllm", key=key) as cache:
         with Engine(MODEL, engine="vllm") as endpoint:
             cache.save()  # keep the boot's kernels even if the rest of the run fails
@@ -85,7 +85,7 @@ _COMMON_NEVER = ("*.lock", "*.tmp", "tmp.*", ".staging-*", ".cc-*")
 
 # Not archived: the CUDA driver's PTX JIT cache (~/.nv/ComputeCache; {sglang}/nv). Measured on
 # rtx-pro-6000 (2026-11-19), restoring it did not change server-ready time on vLLM or SGLang,
-# while it was 60-80% of each archive and grew by ~90 MB on every warm run. Add it in a
+# while it was 60-80% of each archive and grew by 90-100 MB on every warm run. Add it in a
 # Profile of your own if a measurement says otherwise.
 VLLM = Profile(
     # Subfolders of the vLLM cache root, named one by one: the root also holds downloaded

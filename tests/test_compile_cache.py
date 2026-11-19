@@ -177,6 +177,26 @@ def test_restore_refuses_members_outside_the_folders(tmp_path, home, profile):
     assert not (home / ".cache/engine/assets").exists()
 
 
+def test_save_false_never_writes(tmp_path, home, profile):
+    bucket = tmp_path / "bucket"
+    with cc.compile_cache(str(bucket), profile, "k", save=False) as cache:
+        write(home / ".cache/engine/a.py")
+        cache.save()
+    assert not cache.report.saved and not (bucket / "k.tar").exists()
+
+
+def test_a_skipped_group_is_not_restored(tmp_path, home, profile):
+    bucket = tmp_path / "bucket"
+    with cc.compile_cache(str(bucket), profile, "k"):
+        write(home / ".cache/engine/a.py")
+        write(home / ".nv/ComputeCache/big.bin")
+    wipe(home / ".cache", home / ".nv")
+    with cc.compile_cache(str(bucket), profile, "k", skip={"ptx"}, save=False) as cache:
+        pass
+    assert (home / ".cache/engine/a.py").exists() and not (home / ".nv/ComputeCache/big.bin").exists()
+    assert cache.report.restored_files == 1 and cache.report.refused_files == 1
+
+
 def test_exception_in_the_block_skips_the_save_and_restores_env(tmp_path, home, profile):
     bucket = tmp_path / "bucket"
     with pytest.raises(RuntimeError), cc.compile_cache(str(bucket), profile, "k"):
@@ -414,7 +434,7 @@ def test_local_upload_leaves_no_partial_on_failure(tmp_path, monkeypatch):
 
 
 @pytest.mark.internals
-def test_missing_bucket_is_created_private(monkeypatch):
+def test_hf_missing_bucket_is_created_private(monkeypatch):  # test_hf_: CI's no-[hf] job skips it
     made = []
 
     class FakeApi:

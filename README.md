@@ -230,6 +230,46 @@ acceptance is **alive-only**: any response below 500, including 404, counts, bec
 proves the API path parses requests. To gate readiness on your actual workload, pass
 `ready_route=`/`ready_payload=` and `ready_accept=lambda r: r.status_code == 200`.
 
+### Lab: keep the engine's compile cache in a Bucket
+
+Lab helpers: not part of the contract; may change or be removed in any release, without
+deprecation.
+
+`saturate.labs.compile_cache` keeps vLLM's or SGLang's start-up caches (compiled graphs,
+Triton and FlashInfer kernels, autotune results) as one archive in a Bucket, so the next Job
+on the same model, engine version and GPU can reuse them:
+
+```python
+from saturate.labs.compile_cache import compile_cache
+
+with compile_cache(engine="vllm", model=MODEL) as cache:
+    with Engine(MODEL, engine="vllm") as endpoint:
+        cache.save()  # keep the boot's compiled kernels even if pump() fails later
+        pump(...)
+print(cache.report.to_json())  # what was restored, refused, new, saved; errors as text
+```
+
+The short form keeps the archive in `hf://buckets/<you>/compile-cache` (`<you>` from the
+token) under `default_key(engine, model)`: the engine, the model, the GPUs and the engine
+version installed. The long form names both, e.g. to add the image to the key (coarse on
+purpose; the engine checks its own hashes):
+`compile_cache("hf://buckets/<you>/jobs-cache", engine="vllm", key=default_key("vllm", MODEL, image=IMAGE))`.
+
+It restores the archive before the engine starts (so it goes outside `Engine`; any server
+works, and `cache.restore()` / `cache.save()` / `cache.close()` do the same without a with
+block). It uploads a new archive only when a cache file is new or changed size; whether the
+engine reuses a restored file is the engine's own decision. `skip={"deep_gemm"}` leaves a group of
+folders out (groups: `compile`, `triton`, `flashinfer`, `deep_gemm`, and `jit` for SGLang).
+The CUDA driver's PTX cache is not archived: restoring it gave no measured gain and it grew
+the archive on every run. Archives measured 25–120 MB; the warm runs that saved found
+nothing new or one changed file.
+Each engine version gets its own archive; delete old ones by hand (`hf buckets rm`), which is
+also how to start cold again. One writer per key at a time: the last save wins, with a
+warning. A failed download or upload is logged and recorded, never raised, and an archive that
+could not be read is never replaced. It needs `saturate[hf]` and a token that can write to the
+bucket. The archive holds code (`.py`, `.so`, cubins) that the engine runs: keep it in your
+own private bucket.
+
 ## The composable layer (for building on top)
 
 `pump()` is a composition of four small stages. The middle one, `through()`, is **a stream of
@@ -520,6 +560,7 @@ job/endpoint ids — in [spikes/RESULTS.md](https://github.com/davanstrien/satur
 | surface | live receipt |
 |---|---|
 | engines | vLLM, SGLang, llama.cpp boot templates + gauge scrapes; TEI: its concurrency limit, no gauges |
+| compile cache (lab) | rtx-pro-6000, image cached, cold → warm server ready: Nemotron NVFP4 on vLLM 274 → 156 s (Jobs `6aff1176`, `6aff137c`), Unlimited-OCR-2 on SGLang 161 → 117 s with identical output (`6aff1182`, `6aff137f`; repeat `6aff2212`: 118 s); LightOnOCR-3 on vLLM via `Engine`, a10g-small, 221 → 122 s (`6aff2219`, `6aff23ad`); Qwen3.6-35B-A3B-FP8 on vLLM, h200, 449 → 150 s (`6aff25da`, `6aff27f8`); warm repeats without the PTX cache (as shipped): Nemotron 156 s (`6aff220e`), Unlimited-OCR-2 117 s (`6aff2215`); short form `compile_cache(engine="vllm", model=...)`, no `version=`, Qwen3-0.6B on a10g-small, 99 → 49 s (`6aff56c2`, `6aff58f7`); restore 1–3 s |
 | serving arrangements | in-process `Engine` · exposed-Job proxy · laptop→Job · Inference Endpoints **including scale-to-zero cold start** (retry ladder + breaker ride the managed-wake 503s; 100/100 after one healing re-run) |
 | routes | `/chat/completions` · `/completions` · `/embeddings` (micro-batch rows) · `/audio/transcriptions` (multipart) · `/rerank` · `/classify` (Whisper, a reranker and a classifier on vLLM: every row ok, [bench/results/routes-*](https://github.com/davanstrien/saturate/tree/main/bench/results)) |
 | adaptivity | window self-ranged 8→376 with zero config; 1.2× the delivered tok/s of a hand-tuned fixed-64 bare-httpx client, same 10k rows (it discovered 272 was better than 64) |

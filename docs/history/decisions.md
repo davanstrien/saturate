@@ -171,3 +171,47 @@ dispositions:
 | G1 no progress denominator · G4 items-per-row not in storage | **Wrapper layer** (`run.json` launch-spec sidecar: expected rows, world, items_per_row, written by the pipelines layer at launch — it's intent, not output; pumpjack stays a recorder of what happened). Spec belongs in the inference-pipelines design |
 | G2 dead-on-arrival shard (live case) | run.json's `world` covers it at launch time; stats-{n}.json covers it at completion |
 | G3 liveness (stalled vs slow) | **DEFERRED with tension named**: a heartbeat needs the CONTRACT to promise a telemetry flush cadence, which costs commits on dataset-repo sinks (free on buckets). Candidate: periodic telemetry flush (default ~60s, configurable), cadence advisory. Decide alongside the staged-output (bucket-hot) work — heartbeats and buckets want each other |
+
+## Lab helpers and `compile_cache` (2026-11-19)
+
+New surface, recorded per the decision-1 scope rule: the `saturate.labs` namespace and its
+first module, `compile_cache`.
+
+- **Why `labs`.** Some helpers are useful next to saturate but too young for the contract:
+  they follow engine internals that change every release. `saturate.labs.*` is outside
+  `__all__` and CONTRACT.md, may change or be removed in any release without deprecation, and
+  gives one `FutureWarning` on first import. The namespace is the marker: no decorator.
+- **Why not inside `Engine`.** `Engine` is an optional lifecycle helper and keeps its
+  signature. The cache wraps whatever starts the server (`Engine`, a recipe's own `vllm serve`,
+  anything), so it is a separate context manager with plain `restore()`/`save()`/`close()`.
+  Nothing in the core imports it, so it can be removed cleanly.
+- **Shape.** One uncompressed tar per coarse key (engine, model, GPU, engine version, image),
+  in the user's own private bucket. Measured on Jobs: one archive restores in 1–3 s; per-file
+  reads through a mount cost ~85 ms each and `hf buckets sync` ~8 ms each, so an archive wins
+  for caches of thousands of small files. Uncompressed, so Xet dedups re-saves (a warm re-save
+  uploaded about the bytes the tar grew by). Re-save when a (path, size) manifest shows new or
+  changed files; size, not mtime, because autotune files are rewritten every run. The engines
+  key their own folders by hashes this helper never computes; a coarse key costs size, not
+  correctness. Per-engine profiles name folder groups explicitly (`skip=` leaves a group out),
+  never-archive patterns and env vars (vLLM: `TRITON_CACHE_DIR` pinned, which removed a
+  warm-run Triton miss). The CUDA driver's PTX cache is left out: on rtx-pro-6000, restoring
+  it did not change server-ready time on either engine, while it was 60–80% of each archive
+  and grew 90–100 MB per warm run.
+- **Short form.** `compile_cache(engine=, model=)` defaults the location to
+  `hf://buckets/<you>/compile-cache` (a bucket of its own, private when created) and the key
+  to `default_key(engine, model)`. For that to work in a uv script, the vLLM version is read
+  from the Python the `vllm` command runs with, as `Engine` starts it; the image stays out of
+  the default key because the script cannot see it.
+- **Boundaries.** Warn and record, never raise, on bucket I/O; never replace an archive that
+  could not be read; last writer wins per key, with a warning. Out of scope: shared or
+  "official" caches (the archive is code), merging concurrent saves, pruning stale hash
+  folders, a `keep=N` setting (old archives are deleted by hand; they are 25–120 MB).
+- **Version fallback: measured, not built.** Restoring an older engine version's archive when
+  the current key has none (GitHub Actions' restore-keys) helped in these tests only while
+  torch stayed the same. LightOnOCR-3 on a10g-small: a vLLM 0.30 archive in 0.31 (same torch 2.13) cut server
+  ready 234 → 151 s, ~84% of a full warm gain; in 0.33 (torch 2.14) 237 → 235 s, nothing.
+  A changed serve flag (`--max-model-len`) kept ~94%: the engine recompiles its graph and
+  reuses the kernels.
+- **Promotion / removal.** Promote (e.g. to an `Engine` option) only with receipts on more
+  engines and GPUs and a stable profile for a few engine releases; remove when the engines or
+  the platform persist these caches themselves.

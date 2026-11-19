@@ -245,8 +245,8 @@ class CompileCache:
             return
         if self.report.restore == "failed":
             log.warning(
-                f"compile_cache: not saving {self.archive}: it exists but could not be restored, and "
-                "this run's files would replace it (delete it to start cold)"
+                f"compile_cache: not saving {self.archive}: it could not be read at the start, and "
+                "this run's files could replace it (if it is broken, delete it to start cold)"
             )
             return
         self._save()

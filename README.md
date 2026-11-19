@@ -230,6 +230,28 @@ acceptance is **alive-only**: any response below 500, including 404, counts, bec
 proves the API path parses requests. To gate readiness on your actual workload, pass
 `ready_route=`/`ready_payload=` and `ready_accept=lambda r: r.status_code == 200`.
 
+### Lab: keep the engine's compile cache in a Bucket
+
+Lab helpers: not part of the contract; may change or be removed in any release, without
+deprecation.
+
+`saturate.labs.compile_cache` keeps vLLM's or SGLang's start-up caches (compiled graphs,
+Triton and FlashInfer kernels, autotune results) as one archive in a Bucket, so the next Job
+on the same model, engine version and GPU skips that work:
+
+```python
+from saturate.labs.compile_cache import compile_cache, default_key
+
+key = default_key("vllm", MODEL)  # engine/model/GPU/version: a coarse key on purpose
+with compile_cache("hf://buckets/<you>/jobs-cache", engine="vllm", key=key):
+    with Engine(MODEL, engine="vllm") as endpoint:
+        pump(...)
+```
+
+It restores the archive before the engine starts and saves a new one only when the run
+compiled something new. The archive holds code (`.py`, `.so`, cubins) that the engine runs:
+keep it in your own private bucket.
+
 ## The composable layer (for building on top)
 
 `pump()` is a composition of four small stages. The middle one, `through()`, is **a stream of

@@ -15,10 +15,11 @@ starts the engine:
 
 On enter, it sets the engine profile's environment variables (only those you have not set),
 downloads `<location>/<key>.tar` if it exists, and unpacks it into the engine's cache folders.
-On a clean exit, it lists the cache folders again (path and size of each file) and uploads a
-new archive of all of them only if a file is new or changed size. An exception in the block
-skips the save. A failed download or upload logs a warning and the run goes on: the cache only
-saves time.
+A file that already exists is kept, not overwritten. On a clean exit, it lists the cache folders
+again (path and size of each file) and uploads a new archive of all of them only if a file is
+new or changed size. An exception in the block skips that save, so call `cache.save()` once the
+engine is ready to keep a cold boot's work even if the rest of the run fails. A failed download
+or upload logs a warning and the run goes on: the cache only saves time.
 
 The archive holds code that the engine loads and runs (.py, .so, cubins). Keep it in your own
 private bucket (a missing bucket is created private), and never restore an archive that other
@@ -59,14 +60,17 @@ class Profile:
     """What compile_cache does for one engine.
 
     folders: cache folders to archive when they exist. A path starts with `~` or `/`; `{user}`
-        is the user name, `{vllm}` and `{sglang}` are the engines' cache roots
-        (VLLM_CACHE_ROOT, SGLANG_CACHE_DIR, or their defaults).
+        is the user name, `{tmp}` the temporary folder (TMPDIR, as torch uses it), `{vllm}` and
+        `{sglang}` are the engines' cache roots (VLLM_CACHE_ROOT, SGLANG_CACHE_DIR, or their
+        defaults). Other variables that move a cache (FLASHINFER_WORKSPACE_BASE,
+        CUDA_CACHE_PATH, ...) are not followed: list the folder in a Profile of your own.
     never: files never archived or restored. A pattern without `/` is matched against every
         part of a file's path inside its folder (`*.lock`, `runs`); a pattern with `/` against
         the start of that path (`assets/*`).
     env: environment variables set before the engine starts, unless already set. Their values
         are folders, and are archived too.
-    log_lines: name -> regular expression; `scan_log` collects the lines that match.
+    log_lines: name -> regular expression; `scan_log` collects the lines that match in a log
+        you captured (Engine sends the server's output to stderr, not to this helper).
     """
 
     folders: tuple[str, ...]
@@ -80,14 +84,20 @@ _COMMON_NEVER = ("*.lock", "*.tmp", "tmp.*", ".staging-*")
 
 VLLM = Profile(
     folders=(
-        # torch_compile_cache, torch_aot_compile, flashinfer_autotune_cache, deep_gemm, startup_plan
-        "{vllm}",
+        # Subfolders of the vLLM cache root, named one by one: the root also holds downloaded
+        # assets and, when configured there, media and LoRA caches.
+        "{vllm}/torch_compile_cache",
+        "{vllm}/torch_aot_compile",
+        "{vllm}/flashinfer_autotune_cache",
+        "{vllm}/deep_gemm",
+        "{vllm}/startup_plan",
+        "{vllm}/modelinfos",
         "~/.triton",
         "~/.cache/flashinfer",
-        "/tmp/torchinductor_{user}",
+        "{tmp}/torchinductor_{user}",
         "~/.nv/ComputeCache",
     ),
-    never=(*_COMMON_NEVER, "assets/*"),
+    never=_COMMON_NEVER,
     # torch's first inductor autotuner otherwise points TRITON_CACHE_DIR at the inductor cache
     # of that moment, which moves between a cold and a warm run: the warm run then misses.
     env={"TRITON_CACHE_DIR": "~/.triton/cache"},
@@ -126,7 +136,7 @@ SGLANG = Profile(
         "~/.triton",
         "~/.cache/flashinfer",
         "~/.cache/deep_gemm",
-        "/tmp/torchinductor_{user}",
+        "{tmp}/torchinductor_{user}",
         "~/.nv/ComputeCache",
     ),
     never=(*_COMMON_NEVER, "gpu_p2p_access_cache_for_*", "locks", "runs"),
@@ -153,12 +163,21 @@ class Report:
     restored_mb: float = 0.0
     restore_s: float | None = None  # None: nothing restored
     refused_files: int = 0  # archive members outside the profile's folders, or in `never`
+    existing_files: int = 0  # archive members whose file already existed: kept, not overwritten
     new_files: int = 0
     changed_files: int = 0
     saved: bool = False
     saved_files: int = 0
     saved_mb: float = 0.0
     save_s: float | None = None
+
+    def save(self) -> None:
+        """Save now if a cache file is new or changed (e.g. right after the engine is ready).
+        The save at the end of the block then compares with this one."""
+        self._saver()
+
+    def _saver(self) -> None:  # replaced by the block that yields this report
+        raise RuntimeError("compile_cache: save() only works inside its with block")
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -187,7 +206,10 @@ def compile_cache(location: str, engine: str | Profile, key: str, *, save: bool 
         mounted bucket).
     engine: "vllm", "sglang", or a `Profile`.
     key: the archive name inside `location`, e.g. from `default_key`.
-    save: False restores only.
+    save: False restores only (and `Report.save()` does nothing).
+
+    Put it outside `Engine`: the environment and the restore must come before the server
+    starts. Needs `saturate[hf]` and a token that can write to the bucket for `hf://`.
     """
     _warn_once()
     profile = _profile(engine)
@@ -207,10 +229,16 @@ def _session(archive: str, profile: Profile, save: bool) -> Generator[Report]:
             log.info(f"compile_cache: {name}={os.environ[name]}")
         with tempfile.TemporaryDirectory(prefix="compile-cache-") as tmp:
             _restore(archive, folders, profile.never, tmp, report)
-            before = _manifest(folders, profile.never)
+            baseline = _manifest(folders, profile.never)
+
+            def save_now() -> None:
+                nonlocal baseline
+                if save:
+                    baseline = _save(archive, folders, profile.never, baseline, tmp, report)
+
+            report._saver = save_now  # ty: ignore[invalid-assignment]
             yield report
-            if save:
-                _save(archive, folders, profile.never, before, tmp, report)
+            save_now()
     finally:
         for name in set_here:
             os.environ.pop(name, None)
@@ -227,7 +255,7 @@ def _restore(archive: str, folders: list[str], never: tuple[str, ...], tmp: str,
         fs.get_file(path, local)
         download_s = time.monotonic() - started
         size = os.path.getsize(local)
-        files, refused = _unpack(local, folders, never)
+        files, refused, existing = _unpack(local, folders, never)
     except Exception as e:
         log.warning(
             f"compile_cache: could not restore {archive} ({type(e).__name__}: {e}); "
@@ -237,7 +265,7 @@ def _restore(archive: str, folders: list[str], never: tuple[str, ...], tmp: str,
     finally:
         if os.path.exists(local):
             os.remove(local)
-    report.restored_files, report.refused_files = files, refused
+    report.restored_files, report.refused_files, report.existing_files = files, refused, existing
     report.restored_mb = round(size / 1e6, 1)
     report.restore_s = round(time.monotonic() - started, 1)
     log.info(
@@ -246,6 +274,8 @@ def _restore(archive: str, folders: list[str], never: tuple[str, ...], tmp: str,
     )
     if refused:
         log.warning(f"compile_cache: skipped {refused:,} archive members outside the cache folders")
+    if existing:
+        log.info(f"compile_cache: kept {existing:,} files that already existed")
 
 
 def _save(
@@ -255,38 +285,56 @@ def _save(
     before: dict[str, int],
     tmp: str,
     report: Report,
-) -> None:
+) -> dict[str, int]:
+    """Save if a file is new or changed since `before`; return what the next save compares with."""
     after = _manifest(folders, never)
-    report.new_files = sum(1 for path in after if path not in before)
-    report.changed_files = sum(1 for path, size in after.items() if path in before and before[path] != size)
-    if not report.new_files and not report.changed_files:
+    new = sum(1 for path in after if path not in before)
+    changed = sum(1 for path, size in after.items() if path in before and before[path] != size)
+    if not new and not changed:
         log.info("compile_cache: no new or changed files in the cache folders; archive not saved")
-        return
+        return before
     started = time.monotonic()
     local = os.path.join(tmp, "save.tar")
     try:
         _pack(after, local)
         fs, path = fsspec.url_to_fs(archive)
         _ensure_parent(fs, path)
-        fs.put_file(local, path)
+        _put(fs, local, path)
     except Exception as e:
         log.warning(f"compile_cache: could not save {archive} ({type(e).__name__}: {e})")
-        return
+        return before
+    report.new_files += new
+    report.changed_files += changed
     report.saved = True
     report.saved_files = len(after)
     report.saved_mb = round(os.path.getsize(local) / 1e6, 1)
     report.save_s = round(time.monotonic() - started, 1)
     log.info(
         f"compile_cache: saved {report.saved_mb:,.0f} MB, {len(after):,} files "
-        f"({report.new_files:,} new, {report.changed_files:,} changed) in {report.save_s:.1f} s "
-        f"to {archive}"
+        f"({new:,} new, {changed:,} changed) in {report.save_s:.1f} s to {archive}"
     )
+    return after
+
+
+def _is_hf(fs) -> bool:
+    protocols = fs.protocol if isinstance(fs.protocol, tuple) else (fs.protocol,)
+    return "hf" in protocols
+
+
+def _put(fs, local: str, path: str) -> None:
+    """An hf:// upload appears whole; elsewhere (a local folder, a mounted bucket) write a
+    temporary name and rename it, so another Job never reads half an archive."""
+    if _is_hf(fs):
+        fs.put_file(local, path)
+        return
+    partial = f"{path}.tmp-{os.getpid()}"
+    fs.put_file(local, partial)
+    fs.mv(partial, path)
 
 
 def _ensure_parent(fs, path: str) -> None:
     """A missing bucket is created private; a local folder is created."""
-    protocols = fs.protocol if isinstance(fs.protocol, tuple) else (fs.protocol,)
-    if "hf" in protocols:
+    if _is_hf(fs):
         parts = path.split("/")
         if parts[0] == "buckets" and len(parts) >= 3:
             from huggingface_hub import HfApi
@@ -307,13 +355,19 @@ def _user() -> str:
         return "root"
 
 
-def _expand(path: str) -> str:
+def _path(path: str) -> str:
+    return os.path.normpath(os.path.abspath(os.path.expanduser(path)))
+
+
+def _expand(template: str) -> str:
+    """A profile path: its `{...}` names filled in, then made absolute."""
     roots = {
         "user": _user(),
+        "tmp": tempfile.gettempdir(),
         "vllm": os.environ.get("VLLM_CACHE_ROOT") or "~/.cache/vllm",
         "sglang": os.environ.get("SGLANG_CACHE_DIR") or "~/.cache/sglang",
     }
-    return os.path.normpath(os.path.expanduser(path.format(**roots)))
+    return _path(template.format(**roots))
 
 
 def _within(path: str, folder: str) -> bool:
@@ -323,7 +377,7 @@ def _within(path: str, folder: str) -> bool:
 def _folders(profile: Profile) -> list[str]:
     """The profile's folders as absolute paths, a folder inside another listed once."""
     paths = [_expand(p) for p in profile.folders]
-    paths += [_expand(os.environ[name]) for name in profile.env if os.environ.get(name)]
+    paths += [_path(os.environ[name]) for name in profile.env if os.environ.get(name)]
     kept: list[str] = []
     for path in sorted(set(paths)):
         if not any(_within(path, folder) for folder in kept):
@@ -395,11 +449,13 @@ def _pack(files: dict[str, int], tar_path: str) -> None:
                 continue
 
 
-def _unpack(tar_path: str, folders: list[str], never: tuple[str, ...]) -> tuple[int, int]:
-    """Write the archive's regular files that belong in the folders; return (written, refused).
-    Links, members outside the folders, `never` files and the Hugging Face cache are refused."""
+def _unpack(tar_path: str, folders: list[str], never: tuple[str, ...]) -> tuple[int, int, int]:
+    """Write the archive's regular files that belong in the folders; return (written, refused,
+    existing). Links, members outside the folders, `never` files and the Hugging Face cache are
+    refused. A file that already exists (e.g. one the image ships) is kept as it is. Each file is
+    written under a temporary name and renamed, so a broken archive leaves no partial file."""
     guarded = _guarded()
-    written = refused = 0
+    written = refused = existing = 0
     with tarfile.open(tar_path) as tar:
         for member in tar:
             if member.isdir():
@@ -415,17 +471,26 @@ def _unpack(tar_path: str, folders: list[str], never: tuple[str, ...]) -> tuple[
             ):
                 refused += 1
                 continue
-            os.makedirs(os.path.dirname(target), exist_ok=True)
+            if os.path.exists(target):
+                existing += 1
+                continue
             source = tar.extractfile(member)
             if source is None:
                 refused += 1
                 continue
-            with source, open(target, "wb") as out:
-                shutil.copyfileobj(source, out)
-            os.chmod(target, member.mode & 0o755)
-            os.utime(target, (member.mtime, member.mtime))  # build tools (ninja) compare mtimes
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            partial = f"{target}.cc-partial"
+            try:
+                with source, open(partial, "wb") as out:
+                    shutil.copyfileobj(source, out)
+                os.chmod(partial, member.mode & 0o755)
+                os.utime(partial, (member.mtime, member.mtime))  # build tools (ninja) compare mtimes
+                os.replace(partial, target)
+            finally:
+                if os.path.exists(partial):
+                    os.remove(partial)
             written += 1
-    return written, refused
+    return written, refused, existing
 
 
 # --- the key ---
@@ -473,10 +538,12 @@ def _gpu() -> str:
             timeout=30,
             check=True,
         ).stdout
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as e:
+        log.warning(f"compile_cache: nvidia-smi gave no GPU ({type(e).__name__}); the key says no-gpu")
         return "no-gpu"
     rows = [line.split(",") for line in out.splitlines() if line.strip()]
     if not rows or len(rows[0]) < 2:
+        log.warning(f"compile_cache: could not read nvidia-smi output {out[:80]!r}; the key says no-gpu")
         return "no-gpu"
     name, capability = rows[0][0].strip(), rows[0][1].strip().replace(".", "")
     return f"{_slug(name)}-sm{capability}-x{len(rows)}"

@@ -166,13 +166,115 @@ def test_engine_profiles_and_bad_keys(home, monkeypatch, tmp_path):
         cc.compile_cache(str(tmp_path), "vllm", "../k")
 
 
-def test_vllm_profile_pins_triton_and_skips_assets(home):
+def test_vllm_profile_pins_triton_and_names_subfolders(home, monkeypatch, tmp_path):
+    (tmp_path / "scratch").mkdir()  # gettempdir() skips a TMPDIR that does not exist
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "scratch"))
+    monkeypatch.setattr(cc.tempfile, "tempdir", None)  # gettempdir() reads TMPDIR again
     folders = cc._folders(cc.VLLM)
-    assert str(home / ".cache/vllm") in folders
+    assert str(home / ".cache/vllm/torch_compile_cache") in folders
+    assert str(home / ".cache/vllm") not in folders  # its assets folder stays out
     assert str(home / ".triton/cache") not in folders  # inside ~/.triton, listed once
+    assert str(tmp_path / "scratch" / f"torchinductor_{cc._user()}") in folders
     assert cc.VLLM.env == {"TRITON_CACHE_DIR": "~/.triton/cache"}
-    assert cc._skipped("assets/audio/x.wav", cc.VLLM.never)
-    assert not cc._skipped("torch_compile_cache/abc/rank_0_0/x.py", cc.VLLM.never)
+
+
+def test_save_inside_the_block_survives_a_later_exception(tmp_path, home, profile):
+    bucket = tmp_path / "bucket"
+    with pytest.raises(RuntimeError), cc.compile_cache(str(bucket), profile, "k") as cache:
+        write(home / ".cache/engine/boot.py")  # compiled while the engine booted
+        cache.save()
+        write(home / ".cache/engine/later.py")
+        raise RuntimeError("pump failed")
+    assert members(bucket / "k.tar") == ["home/.cache/engine/boot.py"]
+    assert cache.saved and cache.new_files == 1
+
+
+def test_exit_save_compares_with_the_save_inside_the_block(tmp_path, home, profile):
+    bucket = tmp_path / "bucket"
+    with cc.compile_cache(str(bucket), profile, "k") as cache:
+        write(home / ".cache/engine/boot.py")
+        cache.save()
+    assert cache.new_files == 1  # the exit found nothing new: one save
+    with cc.compile_cache(str(bucket), profile, "k") as cache:
+        cache.save()
+        write(home / ".cache/engine/inference.py")  # compiled while serving
+    assert cache.new_files == 1
+    assert len(members(bucket / "k.tar")) == 2
+
+
+def test_restore_keeps_files_that_exist(tmp_path, home, profile):
+    bucket = tmp_path / "bucket"
+    with cc.compile_cache(str(bucket), profile, "k"):
+        write(home / ".cache/engine/shipped.so", "from the archive")
+    write(home / ".cache/engine/shipped.so", "from the image")
+    with cc.compile_cache(str(bucket), profile, "k", save=False) as cache:
+        pass
+    assert (home / ".cache/engine/shipped.so").read_text() == "from the image"
+    assert cache.existing_files == 1 and cache.restored_files == 0
+
+
+def test_truncated_archive_leaves_no_partial_file(tmp_path, home, profile):
+    bucket = tmp_path / "bucket"
+    with cc.compile_cache(str(bucket), profile, "k"):
+        write(home / ".cache/engine/a.so", "a" * 2000)
+        write(home / ".cache/engine/b.so", "b" * 20000)
+    archive = bucket / "k.tar"
+    archive.write_bytes(archive.read_bytes()[:8000])  # ends inside b.so's data
+    for path in (home / ".cache/engine").iterdir():
+        path.unlink()
+    with cc.compile_cache(str(bucket), profile, "k", save=False):
+        pass
+    assert sorted(p.name for p in (home / ".cache/engine").iterdir()) == ["a.so"]
+
+
+def test_archive_moves_to_a_different_home(tmp_path, home, profile, monkeypatch):
+    bucket = tmp_path / "bucket"
+    with cc.compile_cache(str(bucket), profile, "k"):
+        write(home / ".cache/engine/a.py", "a")
+    other = tmp_path / "other-home"
+    other.mkdir()
+    monkeypatch.setenv("HOME", str(other))
+    with cc.compile_cache(str(bucket), profile, "k", save=False) as cache:
+        pass
+    assert (other / ".cache/engine/a.py").read_text() == "a" and cache.restored_files == 1
+
+
+def test_failed_upload_warns_and_the_block_does_not_raise(tmp_path, home, profile, monkeypatch, caplog):
+    def broken(fs, local, path):
+        raise OSError("bucket unreachable")
+
+    monkeypatch.setattr(cc, "_put", broken)
+    with cc.compile_cache(str(tmp_path / "bucket"), profile, "k") as cache:
+        write(home / ".cache/engine/a.py")
+    assert not cache.saved and "could not save" in caplog.text
+
+
+def test_missing_bucket_is_created_private(monkeypatch):
+    made = []
+
+    class FakeApi:
+        def create_bucket(self, repo_id, private, exist_ok):
+            made.append((repo_id, private, exist_ok))
+
+    class FakeHfFs:
+        protocol = ("hf",)
+
+        def invalidate_cache(self):
+            made.append("invalidated")
+
+    monkeypatch.setattr("huggingface_hub.HfApi", FakeApi)
+    cc._ensure_parent(FakeHfFs(), "buckets/me/jobs-cache/vllm/m/gpu/v.tar")
+    assert made == [("me/jobs-cache", True, True), "invalidated"]
+
+
+def test_gpu_name_capability_and_count(monkeypatch):
+    class Done:
+        stdout = "NVIDIA H200, 9.0\nNVIDIA H200, 9.0\n"
+
+    monkeypatch.setattr(cc.subprocess, "run", lambda *a, **k: Done())
+    assert cc._gpu() == "NVIDIA-H200-sm90-x2"
+    Done.stdout = "garbage\n"
+    assert cc._gpu() == "no-gpu"
 
 
 def test_default_key(monkeypatch):

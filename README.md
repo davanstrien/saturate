@@ -243,14 +243,18 @@ on the same model, engine version and GPU skips that work:
 from saturate.labs.compile_cache import compile_cache, default_key
 
 key = default_key("vllm", MODEL)  # engine/model/GPU/version: a coarse key on purpose
-with compile_cache("hf://buckets/<you>/jobs-cache", engine="vllm", key=key):
+with compile_cache("hf://buckets/<you>/jobs-cache", engine="vllm", key=key) as cache:
     with Engine(MODEL, engine="vllm") as endpoint:
+        cache.save()  # keep the boot's compiled kernels even if pump() fails later
         pump(...)
 ```
 
-It restores the archive before the engine starts and saves a new one only when the run
-compiled something new. The archive holds code (`.py`, `.so`, cubins) that the engine runs:
-keep it in your own private bucket.
+It restores the archive before the engine starts (so it goes outside `Engine`) and saves a
+new one only when the run compiled something new. `[pump] compile_cache:` lines say what was
+restored and saved; `cache.to_dict()` has the numbers. It needs `saturate[hf]` and a token that
+can write to the bucket. To start cold again, delete the archive (`hf buckets rm`). The
+archive holds code (`.py`, `.so`, cubins) that the engine runs: keep it in your own private
+bucket.
 
 ## The composable layer (for building on top)
 

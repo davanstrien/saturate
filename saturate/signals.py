@@ -236,7 +236,9 @@ class HttpScrape:
     consecutive misses the controller runs blind (metrics are opt-in on SGLang, llama.cpp and
     TRT-LLM, and an exporter can come up after /health does), but one probe every `retry_every`
     reads keeps the door open; the skipped reads cost no request. The blind-mode warning says
-    why the last read missed and, for a known engine, the flag that turns its gauges on."""
+    why the last read missed and, for a known engine, the flag that turns its gauges on. A 404
+    from a server that no probe or gauge has named is what a hosted API gives: that case is
+    logged at info level, as no fault."""
 
     def __init__(self, client: HttpClient, endpoint: str, max_fails: int = 5, retry_every: int = 30):
         self.base = server_root(endpoint)
@@ -277,10 +279,18 @@ class HttpScrape:
             if not self._blind:
                 self._blind = True
                 self._skipped = 0
-                log.warning(
-                    f"metrics scrape unavailable at {self.url} ({self.reason}) — "
-                    f"running blind; {self._hint()}will retry periodically"
-                )
+                if self.reason == "HTTP 404" and not (self.engine or self.dialect):
+                    # no engine named and no metrics path: what a hosted API looks like
+                    log.info(
+                        f"no engine metrics at {self.url} (HTTP 404), as on a hosted API: "
+                        "running on throughput and backpressure alone "
+                        '(signal_source="none" skips this check); will retry periodically'
+                    )
+                else:
+                    log.warning(
+                        f"metrics scrape unavailable at {self.url} ({self.reason}) — "
+                        f"running blind; {self._hint()}will retry periodically"
+                    )
             self._skipped += 1
             if self._skipped < self.retry_every:
                 return None

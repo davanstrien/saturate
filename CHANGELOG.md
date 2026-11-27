@@ -21,6 +21,15 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
   449 → 150 s; Nemotron NVFP4 on vLLM, rtx-pro-6000, 274 → 156 s; Unlimited-OCR-2 on SGLang,
   rtx-pro-6000, 161 → 117 s with identical output; LightOnOCR-3 on vLLM, a10g-small, 221 → 122 s.
 
+### Changed
+
+- Against a hosted API, the missing metrics endpoint is no longer logged as a warning. A
+  404 from `/metrics` on a server that the probe did not name now logs one info line: "no
+  engine metrics at ... (HTTP 404), as on a hosted API: running on throughput and
+  backpressure alone". The old line, "metrics scrape unavailable ... running blind", read
+  as a fault on runs where nothing was wrong. A named engine's 404 and every other miss
+  (unreachable, 5xx, no gauges in the reply) still warn as before.
+
 ### Fixed
 
 - `Auto` no longer starves of evidence when request latency exceeds `MAX_SAMPLES` ticks (~32 s).

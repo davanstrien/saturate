@@ -47,6 +47,36 @@ def test_accept_validator_gates_readiness(monkeypatch):
     wait_for_health("http://x/v1", timeout_s=5, poll_interval=0.05)
 
 
+def test_engine_readiness_probe_uses_configured_model(monkeypatch):
+    """Engine passes its model to the default readiness probe (so a healthy vLLM server answers
+    200 instead of logging a 404 for 'readiness-probe'), while honoring an explicit ready_payload."""
+    import saturate.engine as engmod
+
+    seen = []
+
+    class DummyProc:
+        pid = 12345
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(engmod, "_port_in_use", lambda port: False)
+    monkeypatch.setattr(engmod.subprocess, "Popen", lambda *a, **k: DummyProc())
+    monkeypatch.setattr(engmod, "wait_for_health", lambda *a, **k: seen.append(k["payload"]))
+
+    eng = Engine(model="org/my-model", cmd=["true"], port=59997)
+    eng.__enter__()
+    assert seen[-1]["model"] == "org/my-model"
+
+    custom = {"input": "hi"}
+    eng_custom = Engine(model="org/my-model", cmd=["true"], port=59997, ready_payload=custom)
+    eng_custom.__enter__()
+    assert seen[-1] is custom
+
+
 def test_group_members_killed_when_leader_exits():
     """The leader exits immediately, leaving a SIGTERM-ignoring child in the
     group — teardown must sweep the group, not just wait on the leader."""

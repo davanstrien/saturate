@@ -23,6 +23,10 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
 
 ### Fixed
 
+- `Engine` now passes its configured `model` to the default readiness probe instead of
+  `"readiness-probe"`, avoiding a spurious 404 error in server logs on every healthy boot while
+  still honoring an explicit `ready_payload`. `wait_for_health` also uses `time.monotonic()` for
+  its boot deadline.
 - `Auto` no longer starves of evidence when request latency exceeds `MAX_SAMPLES` ticks (~32 s).
   Keeping only the last 16 ticks dropped completions faster than a slow window could accumulate
   `limit` of them, which froze slow runs (long generations, heavy OCR/video pages, slow TEI) at

@@ -238,7 +238,7 @@ class CompileCache:
         self._tmp = tempfile.mkdtemp(prefix="compile-cache-")
         try:
             unset = {name: value for name, value in self.profile.env.items() if not os.environ.get(name)}
-            set_here = {name: _expand(value) for name, value in unset.items()}
+            set_here = {name: _expand_env(value) for name, value in unset.items()}
             os.environ.update(set_here)
             self.report.env = set_here
             for name in self.profile.env:
@@ -441,15 +441,29 @@ def _path(path: str) -> str:
     return os.path.normpath(os.path.abspath(os.path.expanduser(path)))
 
 
-def _expand(template: str) -> str:
-    """A profile folder: its `{...}` names filled in, then made absolute."""
-    roots = {
+def _roots() -> dict[str, str]:
+    return {
         "user": _user(),
         "tmp": tempfile.gettempdir(),
         "vllm": os.environ.get("VLLM_CACHE_ROOT") or "~/.cache/vllm",
         "sglang": os.environ.get("SGLANG_CACHE_DIR") or "~/.cache/sglang",
     }
-    return _path(template.format(**roots))
+
+
+def _expand(template: str) -> str:
+    """A profile folder: its `{...}` names filled in, then made absolute."""
+    return _path(template.format(**_roots()))
+
+
+def _expand_env(value: str) -> str:
+    """An env value: path templates (`~`, `/` or `{vllm}`/`{sglang}`/`{tmp}`...) expand like
+    a profile folder; other values (e.g. "1" for a flag) are kept verbatim."""
+    if value.startswith(("~", "/")):
+        return _expand(value)
+    if any(value.startswith(f"{{{name}}}") for name in ("vllm", "sglang", "tmp", "user")):
+        expanded = value.format(**_roots())
+        return _path(expanded) if expanded.startswith(("~", "/")) else expanded
+    return value
 
 
 def _within(path: str, folder: str) -> bool:
@@ -678,9 +692,12 @@ def _engine_python(engine: str) -> list[str] | None:
     command = shutil.which(engine) if engine == "vllm" else None
     if command is None:
         return None
-    with open(command, "rb") as script:
-        first = script.readline().decode(errors="replace")
-    return shlex.split(first[2:]) if first.startswith("#!") else None
+    try:
+        with open(command, "rb") as script:
+            first = script.readline().decode(errors="replace")
+        return shlex.split(first[2:]) if first.startswith("#!") else None
+    except (OSError, ValueError):
+        return None
 
 
 def _hub_user() -> str:

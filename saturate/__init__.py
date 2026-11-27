@@ -10,6 +10,7 @@ on the storage CONTRACT (CONTRACT.md). Every stage is importable on its own.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.metadata
 import inspect
 import json
@@ -18,7 +19,7 @@ import math
 import numbers
 import os
 import time
-from collections.abc import Callable, Coroutine, Iterable, Mapping
+from collections.abc import AsyncGenerator, Callable, Coroutine, Iterable, Mapping
 from decimal import Decimal
 from fractions import Fraction
 from typing import Any
@@ -50,7 +51,7 @@ from saturate.transport import (
     make_json_request,
     make_multipart_request,
 )
-from saturate.writer import Sink, drain, sink_hooks
+from saturate.writer import Sink, SinkHooks, drain, sink_hooks
 
 log = logging.getLogger(__name__)
 _logs.install()  # [pump] lines on stderr until the caller configures logging
@@ -340,6 +341,44 @@ def pump(
     )
 
 
+@contextlib.asynccontextmanager
+async def _periodic_telemetry(
+    hooks: SinkHooks, shard: Shard
+) -> AsyncGenerator[tuple[Callable[[Tick], None], Callable[[], Coroutine[Any, Any, None]]], None]:
+    """Collect ticks and rewrite the telemetry file periodically off the event loop;
+    on exit (normal or error), await any in-flight periodic write so no writer outlives the run."""
+    lines: list[str] = []  # one JSON line per tick, serialised once (a run is many ticks)
+    every = hooks.telemetry_every_ticks
+    next_at = every
+    writer: asyncio.Task | None = None
+    write_lines = hooks.write_telemetry
+
+    async def write_telemetry(write: Callable[[Shard, list[str]], None], snapshot: list[str]) -> None:
+        try:  # a remote rewrite is a commit (seconds): never on the loop, never overlapping
+            await asyncio.to_thread(write, shard, snapshot)
+        except Exception as e:
+            log.warning(f"telemetry write failed (non-fatal): {e}")
+
+    def on_tick(rec: Tick) -> None:  # periodically the trajectory so far lands on storage, so a
+        nonlocal writer, next_at  # reader sees a partial run, not only a finished one (CONTRACT §6)
+        lines.append(json.dumps(rec))
+        if len(lines) >= next_at and write_lines is not None and (writer is None or writer.done()):
+            writer = asyncio.get_running_loop().create_task(write_telemetry(write_lines, lines[:]))
+            # every rewrite re-sends the whole trajectory: stretch the cadence with the run
+            # (a quarter of its length so far) so total bytes stay under ~5x the final file
+            next_at = len(lines) + max(every, len(lines) // 4)
+
+    async def flush() -> None:
+        if lines and write_lines is not None:
+            await write_telemetry(write_lines, lines)  # final: the complete trajectory
+
+    try:
+        yield on_tick, flush
+    finally:
+        if writer is not None:
+            await writer  # never two writers on one file, even when exiting on error
+
+
 async def _pump(
     rows,
     to_request,
@@ -377,29 +416,10 @@ async def _pump(
     hooks = sink_hooks(sink)
     if hooks.begin_run is not None:
         hooks.begin_run(shard)  # this run's telemetry gets its own file, whatever the last run did
-    lines: list[str] = []  # one JSON line per tick, serialised once (a run is many ticks)
-    every = hooks.telemetry_every_ticks
-    next_at = every
-    writer: asyncio.Task | None = None
-    write_lines = hooks.write_telemetry
 
-    async def write_telemetry(write: Callable[[Shard, list[str]], None], snapshot: list[str]) -> None:
-        try:  # a remote rewrite is a commit (seconds): never on the loop, never overlapping
-            await asyncio.to_thread(write, shard, snapshot)
-        except Exception as e:
-            log.warning(f"telemetry write failed (non-fatal): {e}")
-
-    def on_tick(rec: Tick) -> None:  # periodically the trajectory so far lands on storage, so a
-        nonlocal writer, next_at  # reader sees a partial run, not only a finished one (CONTRACT §6)
-        lines.append(json.dumps(rec))
-        if len(lines) >= next_at and write_lines is not None and (writer is None or writer.done()):
-            writer = asyncio.get_running_loop().create_task(write_telemetry(write_lines, lines[:]))
-            # every rewrite re-sends the whole trajectory: stretch the cadence with the run
-            # (a quarter of its length so far) so total bytes stay under ~5x the final file
-            next_at = len(lines) + max(every, len(lines) // 4)
-
-    try:
-        async with AdaptiveClient(
+    async with (
+        _periodic_telemetry(hooks, shard) as (on_tick, flush_telemetry),
+        AdaptiveClient(
             endpoint,
             window=window,
             headers=hdrs,
@@ -409,23 +429,21 @@ async def _pump(
             retry_budget_s=retry_budget_s,
             timeouts=timeouts,
             proxy=proxy,
-        ) as client:
-            async with through(
-                client,
-                pending,
-                to_request,
-                parse,
-                route=route,
-                prepare_workers=prepare_workers,
-                fail_fast=0 if retry_errors else fail_fast,
-            ) as results:
-                await drain(results, sink, shard=shard, stats=stats)
-            limiter = client.limiter
-            dialect = client.dialect
-            stats.breaker_opens = client.breaker.opens
-    finally:
-        if writer is not None:
-            await writer  # never two writers on one file, even when exiting on error
+        ) as client,
+    ):
+        async with through(
+            client,
+            pending,
+            to_request,
+            parse,
+            route=route,
+            prepare_workers=prepare_workers,
+            fail_fast=0 if retry_errors else fail_fast,
+        ) as results:
+            await drain(results, sink, shard=shard, stats=stats)
+        limiter = client.limiter
+        dialect = client.dialect
+        stats.breaker_opens = client.breaker.opens
     if stats.rows_unaccounted:  # a lost row is a bug: the run must not certify itself complete
         raise RowsLostError(
             f"{stats.rows_unaccounted} of {stats.rows_total} rows were read but "
@@ -438,8 +456,7 @@ async def _pump(
     stats.bound_by = bound_by_counts(limiter.ticks)
     stats.input_bound = any(t.get("input_bound") for t in limiter.ticks)  # CONTRACT §7: from the ticks
     stats.cut_reasons = cut_reasons(limiter.ticks)
-    if lines and write_lines is not None:
-        await write_telemetry(write_lines, lines)  # final: the complete trajectory
+    await flush_telemetry()
     stats.hints = advise(limiter.ticks, dialect, stats.final_limit, CEILING_FLAG)
     stats.hints += advise_input(limiter.ticks, prepare_workers)
     if stats.rows_errored_prior:

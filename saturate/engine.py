@@ -129,7 +129,7 @@ class Engine:
                 self.boot_timeout,
                 proc=self.proc,
                 route=self.ready_route,
-                payload=self.ready_payload,
+                payload=self.ready_payload if self.ready_payload is not None else probe_body(self.model),
                 accept=self.ready_accept,
             )
         except BaseException:
@@ -193,9 +193,9 @@ def wait_for_health(
     `lambda r: r.status_code == 200`) — readiness then requires YOUR route to
     answer the way you expect."""
     base = server_root(endpoint)
-    deadline = time.time() + timeout_s
+    deadline = time.monotonic() + timeout_s
     ok_streak = 0
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         if proc is not None and proc.poll() is not None:
             raise RuntimeError(f"engine died during boot (exit {proc.returncode})")
         try:

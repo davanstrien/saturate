@@ -62,6 +62,16 @@ def test_callable_ids(tmp_path):
     assert [rid for rid, _ in rows] == ["p1.png", "p2.png", "p3.png"]
 
 
+def test_callable_ids_none_or_empty_raises(tmp_path):
+    """Returning None or "" from ids= raises instead of colliding every row on "None"."""
+    root = make_tree(tmp_path)
+    with pytest.raises(ValueError, match="produced no id"):
+        list(bucket_rows(f"{root}/**/*.png", ids=lambda p: None, read=False))
+    with pytest.raises(ValueError, match="produced no id"):
+        list(bucket_rows(f"{root}/**/*.png", ids=lambda p: "", read=False))
+    assert ids_of(f"{root}/vol1/p1.png", ids=lambda p: 0) == ["0"]  # 0 is a valid id
+
+
 def test_empty_glob_yields_nothing(tmp_path):
     (tmp_path / "empty").mkdir()
     assert list(bucket_rows(f"{tmp_path}/empty/*.png")) == []

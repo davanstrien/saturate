@@ -32,6 +32,9 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
 
 ### Fixed
 
+- `bucket_rows(..., ids=callable)` and `stream`/`normalize` with `(id, row)` tuples now raise
+  `ValueError` when an id is `None` or empty, matching `dataset_rows` and dict rows instead of
+  silently colliding rows on `"None"` or `""`.
 - `Engine` now passes its configured `model` to the default readiness probe instead of
   `"readiness-probe"`, avoiding a spurious 404 error in server logs on every healthy boot while
   still honoring an explicit `ready_payload`. `wait_for_health` also uses `time.monotonic()` for

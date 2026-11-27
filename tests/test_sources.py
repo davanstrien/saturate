@@ -150,7 +150,12 @@ def test_a_none_or_empty_id_raises_instead_of_collapsing_rows():
         list(normalize([{"k": None, "x": 1}], id_key="k"))
     with pytest.raises(ValueError, match="non-empty id"):
         list(normalize([{"x": 1}], id_fn=lambda row: ""))
+    with pytest.raises(ValueError, match="non-empty id"):
+        list(normalize([(None, {"x": 1})]))
+    with pytest.raises(ValueError, match="non-empty id"):
+        list(normalize([("", {"x": 1})]))
     assert [i for i, _ in normalize([{"k": 0}, {"k": "a"}], id_key="k")] == ["0", "a"]  # 0 is an id
+    assert [i for i, _ in normalize([(0, {"x": 1}), ("a", {"x": 2})])] == ["0", "a"]
 
 
 def test_id_key_with_id_carrying_tuples_raises_instead_of_being_ignored():

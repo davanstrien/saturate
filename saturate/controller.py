@@ -22,7 +22,8 @@ if TYPE_CHECKING:  # the controller stays free of I/O imports at run time
 
 TICK_S = 2.0  # nominal tick period: the loop sleeps this long, and tick-count floors are multiples of it
 BP_CEILING_RELEASE_S = 300.0  # backpressure-free seconds before the backpressure ceiling is released
-MAX_SAMPLES = 16  # throughput samples kept: the most recent ticks only
+MAX_SAMPLES = 16  # minimum recent ticks kept; slow windows keep more, up to MAX_EVIDENCE_TICKS
+MAX_EVIDENCE_TICKS = 512  # cap on ticks kept for one evidence window (~17 min at 2 s/tick)
 
 
 @dataclasses.dataclass
@@ -161,6 +162,7 @@ class State:
     ceiling: Ceiling | None = None
     seen_ceiling: Ceiling | None = None  # the last ceiling, kept after it is released
     samples: tuple[Sample, ...] = ()  # evidence since the last change: one per used tick
+    acked: int = 0  # completions across used ticks since the last sample clear
     latency_s: float | None = None  # the last request latency seen (timeouts report none)
     acked_ever: bool = False  # queue gauges mean nothing before the first completion ever
     silent_s: float = 0.0  # seconds of a full window with nothing completing
@@ -392,6 +394,7 @@ class Auto:
             state,
             phase=Settling(state.clock, state.clock + hold, then),
             samples=(),
+            acked=0,
             silent_s=0.0,
             stall_armed=False,
         )
@@ -412,13 +415,18 @@ class Auto:
         return new, reason, self.settle(state, obs, then)
 
     def evidence(self, state: State, limit: int) -> Reading | None:
-        """Mean throughput once `limit` completions and two samples are in, over the samples
-        kept (the most recent MAX_SAMPLES ticks) but the first: the first after a change still
-        describes the old window. A settled trial's samples still include some from before it
-        settled, which dilutes a small gain at short latencies; judging on post-settle samples
-        alone measured worse (more latency, a slower ramp), so this is a trade-off."""
-        if sum(x.completions for x in state.samples) < limit or len(state.samples) < 2:
-            return None  # `limit` completions within the samples kept, not before them
+        """Mean throughput once `limit` completions and two samples are in, over the kept
+        samples (at least the most recent MAX_SAMPLES ticks, more when requests take longer so a
+        slow window does not starve, capped at MAX_EVIDENCE_TICKS) except the first: the first
+        after a change still describes the old window. Returns None when the most recent
+        MAX_SAMPLES ticks delivered nothing (an earlier burst cannot qualify a silent window). A
+        settled trial's samples still include some from before it settled, which dilutes a small
+        gain at short latencies; judging on post-settle samples alone measured worse (more
+        latency, a slower ramp), so this is a trade-off."""
+        if state.acked < limit or len(state.samples) < 2:
+            return None
+        if not any(x.completions for x in state.samples[-MAX_SAMPLES:]):
+            return None
         samples = state.samples[1:]
         rows = sum(x.rows_s for x in samples) / len(samples)
         has_tokens = all(x.tok_s is not None for x in samples)
@@ -427,6 +435,19 @@ class Auto:
 
 
 # --- per-tick bookkeeping ----------------------------------------------------------------------------
+
+
+def _keep_samples(samples: tuple[Sample, ...], limit: int) -> tuple[Sample, ...]:
+    """Keep at least MAX_SAMPLES recent ticks, and enough ticks to hold `limit` completions
+    (capped at MAX_EVIDENCE_TICKS) so slow requests (> ~32 s) do not starve evidence()."""
+    if len(samples) <= MAX_SAMPLES:
+        return samples
+    start = max(0, len(samples) - MAX_EVIDENCE_TICKS)
+    total = sum(x.completions for x in samples[start:])
+    while len(samples) - start > MAX_SAMPLES and total - samples[start].completions >= limit:
+        total -= samples[start].completions
+        start += 1
+    return samples[start:]
 
 
 def _observe(auto: Auto, state: State, obs: Obs, limit: int) -> State:
@@ -458,7 +479,7 @@ def _observe(auto: Auto, state: State, obs: Obs, limit: int) -> State:
         age = state.clock - state.phase.since
         draining = obs.oldest_s is not None and obs.oldest_s > age and age <= auto.patience_s(obs)
         if state.clock <= state.phase.until or draining:
-            return replace(state, silent_s=0.0, samples=())  # the old window is not evidence
+            return replace(state, silent_s=0.0, samples=(), acked=0)  # the old window is not evidence
         state = replace(state, phase=state.phase.then)  # drained
     silent = obs.inflight >= limit and obs.successes == 0
     state = replace(
@@ -468,7 +489,11 @@ def _observe(auto: Auto, state: State, obs: Obs, limit: int) -> State:
     )
     if not obs.input_bound and obs.inflight >= int(limit * 0.8):  # only a used window is evidence
         sample = Sample(state.clock, obs.tok_s, obs.successes / tick, obs.successes)
-        state = replace(state, samples=(state.samples + (sample,))[-MAX_SAMPLES:])
+        state = replace(
+            state,
+            samples=_keep_samples(state.samples + (sample,), limit),
+            acked=state.acked + obs.successes,
+        )
     return state
 
 
@@ -604,7 +629,7 @@ def judge_trial(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
     kept = ratio >= auto.improve if up else ratio * auto.improve >= 1
     if kept:  # a gain starts MOVES over; a kept move down tries down again, against the same anchor
         steady = Steady() if up else Steady(move=trial.move, anchor=trial.ref)
-        return limit, "hold:kept", replace(state, phase=steady, samples=())
+        return limit, "hold:kept", replace(state, phase=steady, samples=(), acked=0)
     then = Steady(backoff=min(auto.MAX_BACKOFF, trial.backoff * 2), move=trial.move + 1)
     return auto.clamp(state, trial.origin), "revert", auto.settle(state, obs, then)
 
@@ -626,7 +651,9 @@ def open_trial(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
         new = min(new, _above(seen.limit))  # a released ceiling: probe past it by an eighth
     at_ceiling = state.ceiling is not None and limit >= _below(state.ceiling.limit)
     if new == limit or (factor < 1 and at_ceiling):  # nothing to try this way: the next move
-        skipped = replace(state, phase=replace(phase, waits=0, move=phase.move + 1, jitter=None), samples=())
+        skipped = replace(
+            state, phase=replace(phase, waits=0, move=phase.move + 1, jitter=None), samples=(), acked=0
+        )
         at_floor = factor < 1 and not at_ceiling
         return limit, "hold:floor" if at_floor else "hold:ceiling", skipped
     ref = phase.anchor if new < limit and phase.anchor is not None else reading
@@ -639,7 +666,7 @@ def open_trial(auto: Auto, state: State, obs: Obs, limit: int) -> Decision:
         backoff=phase.backoff,
         latency_s=state.latency_s or 0.0,
     )
-    return new, "trial:up" if new > limit else "trial:down", replace(state, phase=trial, samples=())
+    return new, "trial:up" if new > limit else "trial:down", replace(state, phase=trial, samples=(), acked=0)
 
 
 def _wait_for_trial(auto: Auto, state: State, limit: int) -> Decision | None:
@@ -649,7 +676,7 @@ def _wait_for_trial(auto: Auto, state: State, limit: int) -> Decision | None:
     assert isinstance(phase, Steady)
     if phase.waits + 1 < phase.backoff:
         waiting = replace(phase, waits=phase.waits + 1)
-        return limit, "hold:plateau", replace(state, phase=waiting, samples=())
+        return limit, "hold:plateau", replace(state, phase=waiting, samples=(), acked=0)
     jitter = phase.jitter
     if jitter is None:  # due: draw this trial's jitter
         jitter = auto.rng.randint(0, auto.JITTER_TICKS) if phase.backoff > 1 else 0

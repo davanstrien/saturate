@@ -15,12 +15,14 @@ from sim_engine import (
     SGLANG_LIKE,
     Engine,
     failed_share,
+    latency_inflation,
     run,
     share_of_best,
     share_past_useful,
 )
 
 from saturate.controller import Auto, _above
+from saturate.signals import Capacity
 
 ENGINES: dict[str, dict[str, Any]] = {  # Engine keyword arguments by name
     "sglang-like": dict(curve=SGLANG_LIKE, cap=256),
@@ -240,3 +242,36 @@ def test_an_engine_that_does_not_count_preemptions_is_still_cut_on_a_full_kv_cac
     halves the window (cut:kv), as before."""
     ticks = run(Auto(seed=0), kv_engine(0, counts_preempts=False), 300)
     assert any(t.reason == "cut:kv" for t in ticks)
+
+
+@pytest.mark.parametrize("gauges", [True, False], ids=["gauges", "blind"])
+@pytest.mark.parametrize("rate", [5.5, 4.0], ids=["46s", "64s"])
+def test_slow_requests_scale_past_the_initial_window(rate, gauges):
+    """Long generations or heavy OCR pages (45–65 s per request, capacity 256): at initial=64,
+    MAX_SAMPLES ticks (32 s) deliver fewer than 64 completions, yet Auto must still collect a
+    window of evidence and scale to the engine's capacity instead of freezing at 25%."""
+    engine = Engine(curve=[(256, rate)], cap=256, gauges=gauges, noise=0.05, seed=0)
+    ticks = run(Auto(seed=0), engine, 600)
+    assert share_of_best(ticks[250:], engine) >= 0.90, [t.limit for t in ticks[-12:]]
+
+
+def test_slow_overshooting_trial_reverts_instead_of_starving():
+    """Blind engine capped at 64 (2.5 rows/s -> 25.6 s at 64, 51.2 s after doubling to 128):
+    once doubled past 32 s latency, Auto must still judge and revert the trial instead of
+    sitting at 128 (2x latency) for the rest of the run."""
+    engine = Engine(curve=[(64, 2.5)], cap=64, gauges=False, noise=0.05, seed=0)
+    ticks = run(Auto(seed=0), engine, 600)
+    assert latency_inflation(ticks[200:]) <= 1.5, [t.limit for t in ticks[-12:]]
+    assert ticks[-1].limit <= 72
+
+
+def test_slow_tei_trims_excess_window_after_capacity_start():
+    """TEI has no waiting gauge and starts at its reported permit limit (512). On slow or
+    batched inputs (~10 rows/s -> 51 s for 512 completions), Auto must still gather evidence
+    and trim the window instead of holding 512 in hold:ack."""
+    ctrl = Auto(seed=0)
+    ctrl.begin(Capacity(512, queues=False, engine="tei"))
+    engine = Engine(curve=[(64, 10.0)], cap=512, gauges=False, noise=0.05, seed=0)
+    ticks = run(ctrl, engine, 600)
+    assert ticks[-1].limit < 256, [t.limit for t in ticks[-12:]]
+    assert share_of_best(ticks[200:], engine) >= 0.95

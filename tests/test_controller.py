@@ -833,9 +833,8 @@ def test_a_queue_cut_steps_down_by_the_excess_within_bounds():
 
 
 def test_evidence_counts_only_the_completions_of_the_samples_kept():
-    """Samples beyond the most recent MAX_SAMPLES ticks are dropped, and so are their
-    completions: a burst long before cannot qualify an evidence window whose kept ticks
-    delivered nothing."""
+    """A burst followed by MAX_SAMPLES silent ticks cannot qualify an evidence window whose
+    recent ticks delivered nothing."""
     from saturate.controller import MAX_SAMPLES
 
     ctrl = Auto(target_waiting=8, initial=64, step=STEP)
@@ -845,6 +844,35 @@ def test_evidence_counts_only_the_completions_of_the_samples_kept():
     for _ in range(MAX_SAMPLES + 2):  # then nothing completes
         ctrl.decide(healthy(limit, successes=0, tok_s=0.0, **slow), limit)
     assert ctrl.evidence(ctrl.state, limit) is None
+
+
+def test_slow_requests_accumulate_evidence_past_max_samples():
+    """Requests slower than MAX_SAMPLES ticks (~32 s) still complete a full window of `limit`
+    rows across more ticks, so Auto opens a trial instead of starving in hold:ack."""
+    ctrl = Auto(target_waiting=8, initial=64, step=STEP)
+    slow = healthy(64, waiting=0, successes=2, tok_s=200.0, latency_s=64.0)  # 32 ticks for 64 acks
+    traj, reasons = drive(ctrl, 64, [slow] * 32)
+    assert reasons[:-1] == ["hold:ack"] * 31
+    assert reasons[-1] == "trial:up" and traj[-1] == 128
+
+
+def test_slow_overshooting_trial_still_judges_and_reverts():
+    """When a widening trial pushes latency past MAX_SAMPLES ticks (~32 s), judge_trial still
+    collects `limit` completions and reverts an unproductive overshoot instead of staying stuck
+    in Trial forever."""
+    ctrl = Auto(target_waiting=8, initial=64, max_limit=512, step=STEP)
+    limit = 64
+    for _ in range(10):
+        limit = ctrl.decide(healthy(limit, waiting=None, successes=10, tok_s=1000.0, latency_s=12.8), limit)
+        if ctrl.last_reason == "trial:up":
+            break
+    assert limit == 128 and isinstance(ctrl.state.phase, Trial)
+    # 3 completions/tick at limit=128 (~42 s latency -> only 48 completions per 16 ticks) and lower tok/s
+    traj, reasons = drive(
+        ctrl, limit, [healthy(128, waiting=None, successes=3, tok_s=300.0, latency_s=42.0)] * 60
+    )
+    assert "revert" in reasons, reasons
+    assert traj[-1] == 64
 
 
 FULL = dict(kv=0.99, hits=0.0)  # a full KV cache, unique prompts

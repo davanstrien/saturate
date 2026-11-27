@@ -672,3 +672,23 @@ def test_input_split_by_shard_select_runs_every_row_of_the_shard(stub, tmp_path)
     )
     assert mine and stats.rows_processed == len(mine)
     assert (tmp_path / "__saturate" / "completions" / "shard-1.done").exists()
+
+
+def test_auto_widens_on_requests_slower_than_max_samples_ticks(stub, tmp_path, monkeypatch):
+    """End-to-end over HTTP: when each request takes longer than MAX_SAMPLES controller ticks
+    (here latency 0.9 s vs 16 * 0.04 s = 0.64 s, scaling ~45 s requests at TICK_S=2 s), Auto
+    still accumulates a window of completions and widens past initial."""
+    monkeypatch.setattr(saturate.core, "TICK_S", 0.04)
+    stub.latency_s = 0.9
+    stats = pump(
+        rows(36),
+        to_request,
+        parse,
+        endpoint=stub.endpoint,
+        output=str(tmp_path),
+        window=Auto(initial=4, max_limit=16, seed=0),
+    )
+    assert (stats.rows_processed, stats.rows_failed) == (36, 0)
+    ticks = read_ticks(tmp_path)
+    assert any(t["reason"] == "trial:up" for t in ticks), [t["reason"] for t in ticks]
+    assert max(t["limit"] for t in ticks) > 4

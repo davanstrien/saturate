@@ -80,6 +80,15 @@ SCENARIOS.append(
 )
 SCENARIOS.append(("blind, 32 s requests", dict(curve=[(256, 8.0)], cap=256, gauges=False, noise=0.05)))
 SCENARIOS.append(
+    ("gauges, 45 s requests (cap 256)", dict(curve=[(256, 5.5)], cap=256, gauges=True, noise=0.05))
+)
+SCENARIOS.append(
+    ("blind, 45 s requests (cap 256)", dict(curve=[(256, 5.5)], cap=256, gauges=False, noise=0.05))
+)
+SCENARIOS.append(
+    ("blind, 45 s overshoot (cap 64)", dict(curve=[(64, 2.5)], cap=64, gauges=False, noise=0.05))
+)
+SCENARIOS.append(
     (
         "blind, 12 s requests, 60 s timeout",
         dict(curve=[(100, 8.0)], cap=100, gauges=False, noise=0.05, read_timeout_s=60),

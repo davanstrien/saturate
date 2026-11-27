@@ -32,6 +32,8 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
 
 ### Fixed
 
+- `pump()` now awaits any in-flight periodic telemetry write before propagating an error, so a
+  background writer thread cannot outlive a failed run or race a subsequent run on the same sink.
 - `bucket_rows(..., ids=callable)` and `stream`/`normalize` with `(id, row)` tuples now raise
   `ValueError` when an id is `None` or empty, matching `dataset_rows` and dict rows instead of
   silently colliding rows on `"None"` or `""`.

@@ -338,8 +338,8 @@ def test_bytes_can_be_sent_twice_and_an_open_file_cannot(tmp_path):
             async with RawServer(ok) as server, HttpClient() as client:
                 await client.post(f"{server.url}/v1/upload", form=multipart(None, {"file": f}))
                 # aiohttp schedules f.close() via run_in_executor without awaiting it
-                # (IOBasePayload._close); wait for that close before resending, as a retry's
-                # backoff does, so the second send never races ahead of the first send's cleanup
+                # (IOBasePayload._close); wait for that close so the second send never races
+                # ahead of the first send's cleanup
                 deadline = asyncio.get_running_loop().time() + 5.0
                 while not f.closed and asyncio.get_running_loop().time() < deadline:
                     await asyncio.sleep(0.005)

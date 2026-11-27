@@ -398,33 +398,34 @@ async def _pump(
             # (a quarter of its length so far) so total bytes stay under ~5x the final file
             next_at = len(lines) + max(every, len(lines) // 4)
 
-    async with AdaptiveClient(
-        endpoint,
-        window=window,
-        headers=hdrs,
-        read_timeout=read_timeout,
-        signal_source=signal_source,
-        on_tick=on_tick,
-        retry_budget_s=retry_budget_s,
-        timeouts=timeouts,
-        proxy=proxy,
-    ) as client:
-        async with through(
-            client,
-            pending,
-            to_request,
-            parse,
-            route=route,
-            prepare_workers=prepare_workers,
-            fail_fast=0 if retry_errors else fail_fast,
-        ) as results:
-            await drain(results, sink, shard=shard, stats=stats)
-        limiter = client.limiter
-        dialect = client.dialect
-        stats.breaker_opens = client.breaker.opens
-
-    if writer is not None:
-        await writer  # never two writers on one file
+    try:
+        async with AdaptiveClient(
+            endpoint,
+            window=window,
+            headers=hdrs,
+            read_timeout=read_timeout,
+            signal_source=signal_source,
+            on_tick=on_tick,
+            retry_budget_s=retry_budget_s,
+            timeouts=timeouts,
+            proxy=proxy,
+        ) as client:
+            async with through(
+                client,
+                pending,
+                to_request,
+                parse,
+                route=route,
+                prepare_workers=prepare_workers,
+                fail_fast=0 if retry_errors else fail_fast,
+            ) as results:
+                await drain(results, sink, shard=shard, stats=stats)
+            limiter = client.limiter
+            dialect = client.dialect
+            stats.breaker_opens = client.breaker.opens
+    finally:
+        if writer is not None:
+            await writer  # never two writers on one file, even when exiting on error
     if stats.rows_unaccounted:  # a lost row is a bug: the run must not certify itself complete
         raise RowsLostError(
             f"{stats.rows_unaccounted} of {stats.rows_total} rows were read but "

@@ -179,3 +179,74 @@ def test_pump_periodic_telemetry_failure_is_not_fatal(tmp_path, monkeypatch, cap
     )
     assert stats.rows_processed == 0 and (tmp_path / "__saturate" / "completions" / "shard-0.done").exists()
     assert caplog.text.count("telemetry write failed (non-fatal)") == 2  # periodic + final
+
+
+@pytest.mark.internals
+def test_pump_awaits_in_flight_telemetry_writer_on_error(tmp_path, monkeypatch):
+    """If the run aborts while a periodic telemetry write is running in a background thread,
+    _pump awaits that write before propagating the error so no orphaned writer outlives the run."""
+    import threading
+    import time
+
+    captured = {}
+    write_started = threading.Event()
+    write_finished = threading.Event()
+
+    class FakeClient:
+        def __init__(self, endpoint, on_tick=None, **kw):
+            captured["on_tick"] = on_tick
+            self.limiter = StubLimiter(16)
+            self.dialect = None
+            self.breaker = type("B", (), {"opens": 0})()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            pass
+
+    @contextlib.asynccontextmanager
+    async def failing_through(client, rows, *a, **kw):
+        for i in range(30):
+            captured["on_tick"]({"t": 2 * i})
+        await asyncio.sleep(0.02)  # let the periodic writer task enter the worker thread
+        raise RuntimeError("run aborted")
+        yield no_rows()
+
+    class SlowSink(ParquetSink):
+        def write_telemetry(self, shard, lines):
+            write_started.set()
+            time.sleep(0.15)
+            super().write_telemetry(shard, lines)
+            write_finished.set()
+
+    monkeypatch.setattr(saturate, "AdaptiveClient", FakeClient)
+    monkeypatch.setattr(saturate, "through", failing_through)
+
+    async def run():
+        with pytest.raises(RuntimeError, match="run aborted"):
+            await saturate._pump(
+                [],
+                lambda r: r,
+                lambda r: r,
+                "http://x",
+                SlowSink(str(tmp_path)),
+                None,
+                (0, 1),
+                10,
+                1.0,
+                "/chat/completions",
+                None,
+                False,
+                None,
+                None,
+                "none",
+            )
+        # checked inside the event loop, before asyncio.run() shuts down its executor
+        assert write_started.is_set()
+        assert write_finished.is_set()
+
+    asyncio.run(run())
+    files = list(tmp_path.glob("__saturate/telemetry/telemetry-shard0-*.jsonl"))
+    assert len(files) == 1
+    assert len(files[0].read_text().splitlines()) == 30

@@ -10,7 +10,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 from test_controller import REASONS
 
-from saturate.controller import Auto, Steady, _below
+from saturate.controller import Auto, Steady, Trial, _below
 from saturate.signals import Capacity
 
 maybe_count = st.one_of(st.none(), st.integers(0, 2000))
@@ -290,3 +290,60 @@ def test_any_configuration_is_refused_up_front_or_runs(data):
 def test_a_setting_that_cannot_work_is_refused(kwargs):
     with pytest.raises(ValueError):
         Auto(**kwargs)
+
+
+@given(
+    initial=st.integers(4, 256),
+    latency_s=st.floats(1.0, 180.0),
+    trial_gain=st.sampled_from([0.5, 1.0, 1.5]),
+    seed=st.integers(0, 2**16),
+)
+def test_a_trial_always_terminates_while_completions_arrive(initial, latency_s, trial_gain, seed):
+    """Liveness: whatever the window size or request latency (well past MAX_SAMPLES * TICK_S),
+    steady completions open a trial and always judge it (keep or revert) within bounded ticks —
+    Auto never starves permanently in hold:ack."""
+    auto = Auto(initial=initial, min_limit=2, max_limit=512, seed=seed)
+    limit = auto.initial
+    rate = limit / latency_s  # rows/s at the initial window
+    carry = 0.0
+    max_open = int(latency_s / 2.0) + 20
+    for _ in range(max_open):
+        carry += rate * 2.0
+        ok, carry = int(carry), carry - int(carry)
+        obs = dict(
+            waiting=None,
+            inflight=limit,
+            successes=ok,
+            tok_s=rate * 100.0,
+            latency_s=latency_s,
+            tick_s=2.0,
+        )
+        limit = auto.decide(obs, limit)
+        if isinstance(auto.state.phase, Trial):
+            break
+    assert isinstance(auto.state.phase, Trial), (initial, latency_s, auto.last_reason)
+
+    # Now at the trial window, throughput is rate * trial_gain (and latency scales by Little's law)
+    trial_rate = rate * trial_gain
+    trial_latency = limit / trial_rate
+    carry = 0.0
+    # Settling takes 2 * latency_s * widen; collecting `limit` acks takes trial_latency.
+    max_judge = int(max(2 * latency_s * auto.state.phase.widen, trial_latency) / 2.0) + 40
+    for _ in range(max_judge):
+        carry += trial_rate * 2.0
+        ok, carry = int(carry), carry - int(carry)
+        obs = dict(
+            waiting=None,
+            inflight=limit,
+            successes=ok,
+            tok_s=trial_rate * 100.0,
+            latency_s=trial_latency,
+            tick_s=2.0,
+        )
+        limit = auto.decide(obs, limit)
+        if not isinstance(auto.state.phase, Trial):
+            return
+    raise AssertionError(
+        f"Trial stuck after {max_judge} ticks: initial={initial}, limit={limit}, "
+        f"latency_s={latency_s:.1f}, trial_latency={trial_latency:.1f}, phase={auto.state.phase}"
+    )

@@ -1,6 +1,6 @@
 [project]
 name = "saturate"
-version = "0.3.1"
+version = "0.3.2"
 description = "Adaptive batch-inference client: dataset in, any OpenAI-compatible endpoint, resumable parquet out"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -43,6 +43,8 @@ packages = ["saturate"]
 [tool.pytest.ini_options]
 # a deadlock fails one test instead of hanging the suite
 timeout = 120
+# the lab warning fires once at import; tests/test_compile_cache.py checks it in a subprocess
+filterwarnings = ["ignore:saturate.labs holds lab helpers:FutureWarning"]
 markers = [
     "slow: long sweeps (many seeds, many clients); skipped unless `pytest --runslow` (SATURATE_DEEP=1 also deepens the Hypothesis runs); run before a release and for any controller change",
     "internals: reaches into internals (AdaptiveLimiter, through()'s hooks, tick timing); `-m 'not internals'` is the public-surface suite",

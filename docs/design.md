@@ -74,6 +74,7 @@ errored id is called healing; readers let the success win.
 | `settings.py` | range checks for the numbers `pump()` and `Auto` take |
 | `_logs.py` | the `[pump]` stderr fallback while the caller has no logging handler |
 | `stats.py` | `Stats`: what one run counted (imports nothing from saturate, so every stage can name it) |
+| `labs/` | lab helpers outside the contract (`compile_cache`: an engine's start-up caches as one archive in a Bucket); nothing in the core imports them |
 | `__init__.py` | `pump()` = the composition of the above; agent-mode stdout contract |
 
 ### The controller (`Auto`)

@@ -22,7 +22,8 @@ if TYPE_CHECKING:  # the controller stays free of I/O imports at run time
 
 TICK_S = 2.0  # nominal tick period: the loop sleeps this long, and tick-count floors are multiples of it
 BP_CEILING_RELEASE_S = 300.0  # backpressure-free seconds before the backpressure ceiling is released
-MAX_SAMPLES = 16  # throughput samples kept: the most recent ticks only
+MAX_SAMPLES = 16  # minimum recent ticks kept; slow windows keep more, up to MAX_EVIDENCE_TICKS
+MAX_EVIDENCE_TICKS = 1024  # cap on ticks kept for one evidence window (~34 min at 2 s/tick)
 
 
 @dataclasses.dataclass
@@ -412,13 +413,18 @@ class Auto:
         return new, reason, self.settle(state, obs, then)
 
     def evidence(self, state: State, limit: int) -> Reading | None:
-        """Mean throughput once `limit` completions and two samples are in, over the samples
-        kept (the most recent MAX_SAMPLES ticks) but the first: the first after a change still
-        describes the old window. A settled trial's samples still include some from before it
-        settled, which dilutes a small gain at short latencies; judging on post-settle samples
-        alone measured worse (more latency, a slower ramp), so this is a trade-off."""
+        """Mean throughput once `limit` completions and two samples are in, over the kept
+        samples (at least the most recent MAX_SAMPLES ticks, more when requests take longer so a
+        slow window does not starve, capped at MAX_EVIDENCE_TICKS) except the first: the first
+        after a change still describes the old window. Returns None when the most recent
+        MAX_SAMPLES ticks delivered nothing (an earlier burst cannot qualify a silent window). A
+        settled trial's samples still include some from before it settled, which dilutes a small
+        gain at short latencies; judging on post-settle samples alone measured worse (more
+        latency, a slower ramp), so this is a trade-off."""
         if sum(x.completions for x in state.samples) < limit or len(state.samples) < 2:
-            return None  # `limit` completions within the samples kept, not before them
+            return None
+        if not any(x.completions for x in state.samples[-MAX_SAMPLES:]):
+            return None
         samples = state.samples[1:]
         rows = sum(x.rows_s for x in samples) / len(samples)
         has_tokens = all(x.tok_s is not None for x in samples)
@@ -427,6 +433,19 @@ class Auto:
 
 
 # --- per-tick bookkeeping ----------------------------------------------------------------------------
+
+
+def _keep_samples(samples: tuple[Sample, ...], limit: int) -> tuple[Sample, ...]:
+    """Keep at least MAX_SAMPLES recent ticks, and enough ticks to hold `limit` completions
+    (capped at MAX_EVIDENCE_TICKS) so slow requests (> ~32 s) do not starve evidence()."""
+    if len(samples) <= MAX_SAMPLES:
+        return samples
+    start = max(0, len(samples) - MAX_EVIDENCE_TICKS)
+    total = sum(x.completions for x in samples[start:])
+    while len(samples) - start > MAX_SAMPLES and total - samples[start].completions >= limit:
+        total -= samples[start].completions
+        start += 1
+    return samples[start:]
 
 
 def _observe(auto: Auto, state: State, obs: Obs, limit: int) -> State:
@@ -468,7 +487,7 @@ def _observe(auto: Auto, state: State, obs: Obs, limit: int) -> State:
     )
     if not obs.input_bound and obs.inflight >= int(limit * 0.8):  # only a used window is evidence
         sample = Sample(state.clock, obs.tok_s, obs.successes / tick, obs.successes)
-        state = replace(state, samples=(state.samples + (sample,))[-MAX_SAMPLES:])
+        state = replace(state, samples=_keep_samples(state.samples + (sample,), limit))
     return state
 
 

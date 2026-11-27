@@ -6,9 +6,20 @@ All notable changes to saturate are listed here. The format follows
 
 saturate is experimental. Before 1.0, any minor release (0.x) can change the API, the
 defaults or the output layout, often with no deprecation period. Pin an exact version
-(for example `saturate==0.3.1`) if you depend on current behaviour.
+(for example `saturate==0.3.2`) if you depend on current behaviour.
 
 ## [Unreleased]
+
+### Added
+
+- `saturate.labs`, for lab helpers: not part of the contract; they may change or be removed in
+  any release, without deprecation. The first import gives one `FutureWarning`.
+- `saturate.labs.compile_cache`: keeps vLLM's or SGLang's start-up caches as one archive in a
+  Bucket you own, restored before the engine starts and saved when cache files are new or
+  changed. Short form: `compile_cache(engine="vllm", model=MODEL)`, kept in
+  `hf://buckets/<you>/compile-cache`. Measured warm against cold server-ready time: Qwen3.6-35B-A3B-FP8 on vLLM, h200,
+  449 → 150 s; Nemotron NVFP4 on vLLM, rtx-pro-6000, 274 → 156 s; Unlimited-OCR-2 on SGLang,
+  rtx-pro-6000, 161 → 117 s with identical output; LightOnOCR-3 on vLLM, a10g-small, 221 → 122 s.
 
 ### Changed
 
@@ -18,6 +29,24 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
   backpressure alone". The old line, "metrics scrape unavailable ... running blind", read
   as a fault on runs where nothing was wrong. A named engine's 404 and every other miss
   (unreachable, 5xx, no gauges in the reply) still warn as before.
+
+### Fixed
+
+- `Auto` no longer starves of evidence when request latency exceeds `MAX_SAMPLES` ticks (~32 s).
+  Keeping only the last 16 ticks dropped completions faster than a slow window could accumulate
+  `limit` of them, which froze slow runs (long generations, heavy OCR/video pages, slow TEI) at
+  their starting window or left an overshooting trial permanently stuck in `hold:ack`. `Auto` now
+  retains enough ticks to hold `limit` completions (up to `MAX_EVIDENCE_TICKS = 1024`), while still
+  requiring recent completions within the last `MAX_SAMPLES` ticks so an old burst cannot qualify
+  a silent window. Workloads where the last 16 ticks already hold `limit` completions are
+  unchanged.
+
+## [0.3.2] - 2026-11-18
+
+Two fixes for TEI. Nothing changes in the output layout or in `pump()`'s arguments.
+
+### Changed
+
 - On TEI, `Auto` no longer reads `te_queue_size` as requests waiting. Every text waits in
   that queue for a GPU batch, so it is deep on a healthy server, and the queue cut shrank
   the window: to about 20 on single-text rows, which was about 10% slower in the one setup

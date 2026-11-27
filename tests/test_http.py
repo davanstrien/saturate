@@ -333,10 +333,21 @@ def test_bytes_can_be_sent_twice_and_an_open_file_cannot(tmp_path):
     path.write_bytes(b"AUDIO")
     with path.open("rb") as f:
         assert not resendable({"file": f})
-        # how the second send fails depends on the Python and aiohttp versions (a ValueError
-        # for the closed file, or a connection error from the half-built body); it always fails
+
+        async def send_once_then_retry():
+            async with RawServer(ok) as server, HttpClient() as client:
+                await client.post(f"{server.url}/v1/upload", form=multipart(None, {"file": f}))
+                # aiohttp schedules f.close() via run_in_executor without awaiting it
+                # (IOBasePayload._close); wait for that close so the second send never races
+                # ahead of the first send's cleanup
+                deadline = asyncio.get_running_loop().time() + 5.0
+                while not f.closed and asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(0.005)
+                assert f.closed, "first send did not close the open file"
+                await client.post(f"{server.url}/v1/upload", form=multipart(None, {"file": f}))
+
         with pytest.raises((ValueError, TransportError)):
-            run(send_twice({"file": f}))
+            run(send_once_then_retry())
 
 
 def test_a_file_tuple_keeps_the_filename_it_gives_even_none():

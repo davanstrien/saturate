@@ -21,6 +21,17 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
   449 → 150 s; Nemotron NVFP4 on vLLM, rtx-pro-6000, 274 → 156 s; Unlimited-OCR-2 on SGLang,
   rtx-pro-6000, 161 → 117 s with identical output; LightOnOCR-3 on vLLM, a10g-small, 221 → 122 s.
 
+### Fixed
+
+- `Auto` no longer starves of evidence when request latency exceeds `MAX_SAMPLES` ticks (~32 s).
+  Keeping only the last 16 ticks dropped completions faster than a slow window could accumulate
+  `limit` of them, which froze slow runs (long generations, heavy OCR/video pages, slow TEI) at
+  their starting window or left an overshooting trial permanently stuck in `hold:ack`. `Auto` now
+  retains enough ticks to hold `limit` completions (up to `MAX_EVIDENCE_TICKS = 1024`), while still
+  requiring recent completions within the last `MAX_SAMPLES` ticks so an old burst cannot qualify
+  a silent window. Workloads where the last 16 ticks already hold `limit` completions are
+  unchanged.
+
 ## [0.3.2] - 2026-11-18
 
 Two fixes for TEI. Nothing changes in the output layout or in `pump()`'s arguments.

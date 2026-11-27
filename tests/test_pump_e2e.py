@@ -672,3 +672,32 @@ def test_input_split_by_shard_select_runs_every_row_of_the_shard(stub, tmp_path)
     )
     assert mine and stats.rows_processed == len(mine)
     assert (tmp_path / "__saturate" / "completions" / "shard-1.done").exists()
+
+
+def test_auto_widens_on_requests_slower_than_max_samples_ticks(stub, tmp_path, monkeypatch):
+    """End-to-end over HTTP: when staggered requests take much longer than MAX_SAMPLES ticks
+    (mean latency ~0.88 s at initial=6 vs 16 * 0.02 s = 0.32 s, so ~2–3 completions land in
+    any 16-tick slice, well under 6), Auto still accumulates a window of completions and widens
+    past initial."""
+    monkeypatch.setattr(saturate.core, "TICK_S", 0.02)
+    # Staggered latencies prevent a synchronised wave of 6 completions inside one 16-tick slice
+    delays = (0.50, 0.65, 0.80, 0.95, 1.10, 1.25)
+
+    def staggered(body: dict) -> float:
+        idx = int(body["messages"][0]["content"].split()[-1])
+        return delays[idx % len(delays)]
+
+    stub.latency_for = staggered
+    stats = pump(
+        rows(24),
+        to_request,
+        parse,
+        endpoint=stub.endpoint,
+        output=str(tmp_path),
+        window=Auto(initial=6, max_limit=16, seed=0),
+        signal_source="none",
+    )
+    assert (stats.rows_processed, stats.rows_failed) == (24, 0)
+    ticks = read_ticks(tmp_path)
+    assert any(t["reason"] == "trial:up" for t in ticks), [t["reason"] for t in ticks]
+    assert max(t["limit"] for t in ticks) > 6

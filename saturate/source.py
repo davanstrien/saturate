@@ -112,7 +112,10 @@ def normalize(
                     "id_key/id_fn apply to dict rows, but this source yields (id, row) "
                     "pairs that already carry an id; drop id_key/id_fn or pass dicts"
                 )
-            yield str(item[0]), item[1]
+            id_, row = item
+            if id_ is None or str(id_) == "":  # "None" for every such row would collapse them into one
+                raise ValueError(f"row id is {id_!r}: every row needs a non-empty id")
+            yield str(id_), row
         elif isinstance(item, dict):
             if id_fn is not None or id_key is not None:
                 id_ = id_fn(item) if id_fn is not None else item[id_key]

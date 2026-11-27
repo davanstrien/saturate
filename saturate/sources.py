@@ -294,7 +294,13 @@ def bucket_rows(
 
     def rid_of(path: str) -> str:
         if callable(ids):
-            return str(ids(path))
+            raw = ids(path)
+            if raw is None or str(raw) == "":
+                raise ValueError(
+                    f"id strategy produced no id ({raw!r}) for {path!r} — refusing to "
+                    'collide rows on "None"/""; fix the callable or use ids="path"'
+                )
+            return str(raw)
         if not path.startswith(base_path):
             raise ValueError(f"{path!r} is not under root {base_path!r}")
         return path[len(base_path) :]

@@ -27,9 +27,10 @@ defaults or the output layout, often with no deprecation period. Pin an exact ve
   Keeping only the last 16 ticks dropped completions faster than a slow window could accumulate
   `limit` of them, which froze slow runs (long generations, heavy OCR/video pages, slow TEI) at
   their starting window or left an overshooting trial permanently stuck in `hold:ack`. `Auto` now
-  retains enough ticks to hold `limit` completions (up to `MAX_EVIDENCE_TICKS = 512`), while still
+  retains enough ticks to hold `limit` completions (up to `MAX_EVIDENCE_TICKS = 1024`), while still
   requiring recent completions within the last `MAX_SAMPLES` ticks so an old burst cannot qualify
-  a silent window. Fast workloads (≤ 32 s latency) are unchanged.
+  a silent window. Workloads where the last 16 ticks already hold `limit` completions are
+  unchanged.
 
 ## [0.3.2] - 2026-11-18
 

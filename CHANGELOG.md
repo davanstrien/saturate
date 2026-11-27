@@ -6,9 +6,13 @@ All notable changes to saturate are listed here. The format follows
 
 saturate is experimental. Before 1.0, any minor release (0.x) can change the API, the
 defaults or the output layout, often with no deprecation period. Pin an exact version
-(for example `saturate==0.3.2`) if you depend on current behaviour.
+(for example `saturate==0.3.3`) if you depend on current behaviour.
 
-## [Unreleased]
+## [0.3.3] - 2026-11-27
+
+Slow-request evidence fix for `Auto`, the `saturate.labs.compile_cache` helper, quieter
+hosted-API `/metrics` logging, and small bug fixes. Nothing changes in the output layout or
+in `pump()`'s arguments.
 
 ### Added
 

@@ -220,6 +220,30 @@ def test_env_set_only_when_unset_and_its_folder_archived(tmp_path, home, profile
     assert cache.report.groups["triton"]["new"] == 1
 
 
+def test_profile_env_preserves_non_path_values_and_expands_paths(tmp_path, home, monkeypatch):
+    for name in ("CUSTOM_FLAG", "CUSTOM_CACHE", "CUSTOM_USER"):
+        monkeypatch.delenv(name, raising=False)
+    custom = cc.Profile(
+        groups={"engine": ("~/.cache/engine",)},
+        env={
+            "CUSTOM_FLAG": "1",
+            "CUSTOM_CACHE": "{vllm}/triton",
+            "CUSTOM_USER": "{user}",
+        },
+    )
+    with cc.compile_cache(str(tmp_path / "bucket"), custom, "k", save=False) as cache:
+        assert os.environ["CUSTOM_FLAG"] == "1"
+        assert os.environ["CUSTOM_CACHE"] == str(home / ".cache/vllm/triton")
+        assert os.environ["CUSTOM_USER"] == cc._user()
+        assert cache.report.env == {
+            "CUSTOM_FLAG": "1",
+            "CUSTOM_CACHE": str(home / ".cache/vllm/triton"),
+            "CUSTOM_USER": cc._user(),
+        }
+    for name in ("CUSTOM_FLAG", "CUSTOM_CACHE", "CUSTOM_USER"):
+        assert name not in os.environ
+
+
 def test_unreadable_archive_is_recorded_and_never_replaced(tmp_path, home, profile, caplog):
     bucket = tmp_path / "bucket"
     write(bucket / "k.tar", "not a tar")
@@ -510,6 +534,15 @@ def test_default_key_without_a_version_raises(monkeypatch, tmp_path):
         cc.default_key("vllm", "m", gpu="gpu")
     with pytest.raises(ValueError, match="requires version="):
         cc.default_key("sglang", "m", gpu="gpu")
+
+
+def test_default_key_with_unparseable_vllm_shebang_raises_version_error(monkeypatch, tmp_path):
+    vllm = tmp_path / "vllm"
+    vllm.write_text("#!/usr/bin/env 'unclosed\n")
+    vllm.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    with pytest.raises(ValueError, match="requires version="):
+        cc.default_key("vllm", "m", gpu="gpu")
 
 
 def test_labs_import_warns_once_and_is_not_exported():
